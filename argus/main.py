@@ -16,7 +16,7 @@ from typing import Optional
 from argus.agent.decision import DecisionEngine, TradeDecision
 from argus.broker.robinhood import RobinhoodBroker
 from argus.config import get_settings
-from argus.dashboard.terminal import TerminalDashboard
+from argus.dashboard.terminal import NullTerminalDashboard, TerminalDashboard
 from argus.dashboard import web as web_dashboard
 from argus.notifications.notifier import Notifier
 from argus.risk.manager import RiskManager
@@ -183,7 +183,11 @@ class Autopilot:
             slack_bot_token=self._cfg.slack_bot_token,
             slack_channel=self._cfg.slack_channel,
         )
-        self._terminal = TerminalDashboard()
+        self._terminal = (
+            NullTerminalDashboard()
+            if os.environ.get("ARGUS_NO_TERMINAL")
+            else TerminalDashboard()
+        )
         self._flashcards = FlashcardStore()
         self._recent_trades: list[dict] = []
         self._latest_signals: list[dict] = []

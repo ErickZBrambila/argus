@@ -1,0 +1,36 @@
+services:
+  argus:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+
+    # Non-secret config (watchlist, intervals, thresholds, etc.)
+    env_file:
+      - .env
+
+    # Secrets — injected from the host environment at runtime.
+    # Never hardcode values here. On the Mac Mini, export these in ~/.zshrc
+    # or use: export ANTHROPIC_API_KEY=... before running docker compose up.
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - ROBINHOOD_PASSWORD=${ROBINHOOD_PASSWORD}
+      - ROBINHOOD_MFA_SECRET=${ROBINHOOD_MFA_SECRET:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+
+    volumes:
+      - argus-data:/data
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  argus-data:
+    driver: local

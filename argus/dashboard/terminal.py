@@ -28,6 +28,13 @@ def _pnl_style(value: float) -> str:
     return "green" if value > 0 else "red" if value < 0 else "white"
 
 
+class NullTerminalDashboard:
+    """No-op dashboard for headless / Docker environments (ARGUS_NO_TERMINAL=1)."""
+    def start(self) -> None: pass
+    def stop(self) -> None: pass
+    def update(self, state: dict) -> None: pass
+
+
 class _LiveRenderable:
     """Calls _render() on every Rich Live refresh so the countdown ticks live."""
     def __init__(self, dashboard: "TerminalDashboard") -> None:
