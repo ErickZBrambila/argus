@@ -93,8 +93,9 @@ class TerminalDashboard:
                 f"Total ${token.get('total_cost_usd',0):.4f}"
             )
 
+        from argus import __version__
         header = Text()
-        header.append("⬡ ARGUS  ", style="bold cyan")
+        header.append(f"⬡ ARGUS v{__version__}  ", style="bold cyan")
         header.append_text(mode)
         header.append_text(kill)
         header.append_text(paused)

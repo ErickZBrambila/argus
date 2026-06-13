@@ -104,6 +104,12 @@ def is_paused() -> bool:
 
 # ── REST endpoints ────────────────────────────────────────────────────────────
 
+@app.get("/api/version")
+async def get_version() -> dict:
+    from argus import __version__
+    return {"version": __version__}
+
+
 @app.get("/api/status")
 async def get_status() -> dict:
     return {
@@ -536,7 +542,7 @@ _HTML = """<!DOCTYPE html>
 <body>
 <div class="app">
   <header>
-    <span class="logo">⬡ ARGUS</span>
+    <span class="logo">⬡ ARGUS <span style="font-size:11px;font-weight:400;color:var(--muted)" id="version-badge"></span></span>
     <div style="display:flex;align-items:center;gap:10px">
       <span class="badge badge-session-closed" id="session-badge">—</span>
       <div class="countdown-wrap">
@@ -1399,6 +1405,10 @@ function connectSSE() {
 }
 
 // Init
+fetch('/api/version').then(r=>r.json()).then(d => {
+  const el = document.getElementById('version-badge');
+  if (el) el.textContent = 'v' + d.version;
+}).catch(()=>{});
 fetchAll();
 connectSSE();
 </script>
