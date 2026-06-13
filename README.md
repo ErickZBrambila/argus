@@ -2,7 +2,7 @@
 
 ![Argus](argus/dashboard/static/banner.png)
 
-![version](https://img.shields.io/badge/version-v0.4.1-blue)
+![version](https://img.shields.io/badge/version-v0.4.2-blue)
 
 ## 1. What is Argus?
 
@@ -477,19 +477,83 @@ Before setting `PAPER_TRADE=false`, verify all of the following in paper mode:
 
 ---
 
-## 16. Directory Structure
+## 16. Docker Deployment
+
+Argus ships with a `Dockerfile` and `docker-compose.yml` for running on any machine (Mac Mini, Linux server) without managing a Python environment.
+
+### How it works
+
+| Concern | Approach |
+|---------|----------|
+| Source code | Copied into `/app` inside the image |
+| Runtime data (SQLite, flashcards) | Written to `/data` — mounted as a named Docker volume |
+| Secrets | Injected from host environment variables at runtime — never baked into the image |
+| Terminal UI | Disabled automatically (`ARGUS_NO_TERMINAL=1`) — web dashboard is the interface |
+| Port | `8000` mapped to host `8000` |
+| Auto-restart | `restart: unless-stopped` — survives Mac Mini reboots |
+
+### Quick start
+
+```bash
+# 1. Export secrets in your shell (add to ~/.zshrc for persistence)
+export ANTHROPIC_API_KEY="your_key"
+export ROBINHOOD_PASSWORD="your_password"
+export GEMINI_API_KEY="your_key"          # optional
+export ROBINHOOD_MFA_SECRET="your_secret" # optional
+
+# 2. Copy config
+cp .env.example .env   # edit watchlist, intervals, account numbers
+
+# 3. Build and run
+docker compose up -d
+
+# 4. Check status
+docker compose ps
+curl http://localhost:8000/api/status
+```
+
+### Useful commands
+
+```bash
+docker compose up -d          # start in background
+docker compose down           # stop
+docker compose restart argus  # restart without rebuild
+docker compose logs -f        # follow live logs
+docker compose up -d --build  # rebuild after code changes
+```
+
+### Remote access (Mac Mini + Tailscale)
+
+Install Tailscale on both the Mac Mini and your iPhone. Once connected, access the dashboard from anywhere via the Mac Mini's Tailscale IP — no open ports, no public internet exposure:
+
+```
+http://100.x.x.x:8000
+```
+
+Full step-by-step migration checklist: [`docs/mac-mini-setup.md`](docs/mac-mini-setup.md)
+
+---
+
+## 17. Directory Structure
 
 ```
 argus/
 ├── .env                          # Non-secret config (copy from .env.example)
 ├── .env.example                  # Template with all supported variables
+├── Dockerfile                    # python:3.11-slim; source in /app; data at /data
+├── docker-compose.yml            # Service definition; secrets from host env; named volume
+├── .dockerignore                 # Excludes .venv, .env, db, logs from image
 ├── pyproject.toml                # Package definition and dependencies
+├── CHANGELOG.md                  # Version history
 ├── argus.db                      # SQLite trade history (created at runtime)
 ├── argus.log                     # Rolling log file (created at runtime)
 ├── argus_flashcards.jsonl        # Trade decision flashcards (created at runtime)
 │
+├── docs/
+│   └── mac-mini-setup.md         # Step-by-step Mac Mini + Docker migration checklist
+│
 └── argus/                        # Main package
-    ├── __init__.py               # Package version (__version__ = "0.4.0")
+    ├── __init__.py               # Package version (__version__ = "0.4.1")
     ├── main.py                   # Autopilot orchestration loop; AccountContext; market session detection
     ├── config.py                 # Pydantic settings; keychain source; priority chain
     ├── secrets.py                # OS keychain read/write via keyring
@@ -510,7 +574,7 @@ argus/
     │
     ├── dashboard/
     │   ├── web.py                # FastAPI app; SSE stream; approval queue; REST endpoints; HTML UI
-    │   ├── terminal.py           # Rich terminal dashboard; per-account panels; signals table; log panel
+    │   ├── terminal.py           # Rich terminal dashboard; NullTerminalDashboard for headless/Docker
     │   ├── token_tracker.py      # Thread-safe daily token + cost tracker; resets at midnight
     │   ├── log_buffer.py         # In-memory log ring buffer (500 entries); logging handler installer
     │   └── server.py             # Standalone web-only entry point (no main loop)

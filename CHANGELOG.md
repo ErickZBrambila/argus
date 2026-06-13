@@ -8,6 +8,19 @@ Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH
 
 ---
 
+## [0.4.2] — 2026-06-13
+
+### Added
+- **Docker support** — `Dockerfile`, `docker-compose.yml`, `.dockerignore`
+  - Source in `/app`; runtime data (SQLite, flashcards) written to `/data` volume
+  - Secrets injected from host environment variables — never baked into the image
+  - `WEB_HOST=0.0.0.0` and `ARGUS_NO_TERMINAL=1` set automatically in container
+  - Healthcheck on `/api/status`; `restart: unless-stopped` for auto-start on boot
+- **Headless mode** (`ARGUS_NO_TERMINAL=1`) — `NullTerminalDashboard` no-op replaces Rich terminal UI when running without a TTY
+- **`docs/mac-mini-setup.md`** — step-by-step checklist for migrating to Mac Mini + Docker + Tailscale
+
+---
+
 ## [0.4.1] — 2026-06-13
 
 ### Added
