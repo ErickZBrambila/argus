@@ -1,0 +1,17 @@
+.env
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+logs/
+*.log
+robinhood.pickle
