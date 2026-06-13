@@ -355,6 +355,28 @@ _HTML = """<!DOCTYPE html>
   /* Empty state */
   .empty { text-align: center; color: var(--muted); padding: 32px 0; font-size: 13px; }
 
+  /* Per-account panels */
+  .acct-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .acct-panel { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
+  .acct-panel.agentic { border-color: #00d4aa; }
+  .acct-panel.default { border-color: #c084fc; }
+  .acct-panel-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 10px; }
+  .acct-panel-title.agentic { color: #00d4aa; }
+  .acct-panel-title.default { color: #c084fc; }
+  .acct-equity { font-size: 22px; font-weight: 700; }
+  .acct-equity.agentic { color: #00d4aa; }
+  .acct-equity.default { color: #c084fc; }
+  .acct-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .acct-row:last-child { border-bottom: none; }
+  .acct-row-label { color: var(--muted); }
+  .acct-mode { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+  .acct-mode-auto     { background: rgba(0,212,170,.15);  color: var(--accent); }
+  .acct-mode-approval { background: rgba(210,153,34,.15); color: var(--yellow); }
+  .acct-positions-mini { margin-top: 10px; }
+  .acct-pos-row { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+  .acct-pos-sym { color: var(--accent); font-weight: 600; }
+  .acct-total-bar { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+
   /* Approval queue */
   .approval-card { border-color: var(--yellow); }
   .approval-item { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 10px; background: var(--surface2); }
@@ -404,14 +426,20 @@ _HTML = """<!DOCTYPE html>
   body.hide-values .private:hover { filter: blur(0); }
 
   /* Price chart */
-  .chart-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
+  .chart-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .chart-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
   .chart-tab { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: none; color: var(--muted); transition: all .15s; }
   .chart-tab:hover { border-color: var(--accent); color: var(--accent); }
   .chart-tab.active { background: var(--accent); color: #000; border-color: var(--accent); }
-  #price-chart { width: 100%; height: 320px; }
+  .chart-type-btns { display: flex; gap: 4px; }
+  .chart-type-btn { padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: none; color: var(--muted); transition: all .15s; }
+  .chart-type-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .chart-type-btn.active { background: var(--surface2); color: var(--text); border-color: var(--accent); }
+  #price-chart { width: 100%; height: 340px; }
   .chart-legend { display: flex; gap: 16px; margin-top: 8px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
   .legend-item { display: flex; align-items: center; gap: 5px; }
   .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .legend-dash { width: 16px; height: 2px; border-top: 2px dashed; }
 </style>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -426,26 +454,18 @@ _HTML = """<!DOCTYPE html>
   </header>
   <main>
 
-    <!-- Stats overview -->
+    <!-- Per-account panels -->
     <div class="card card-full">
-      <div class="card-title">Portfolio Overview</div>
-      <div class="stats-grid">
-        <div class="stat">
-          <span class="stat-label">Equity</span>
-          <span class="stat-value lg accent private" id="stat-equity">—</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Daily P&L</span>
-          <span class="stat-value private" id="stat-pnl">—</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Trades Today</span>
-          <span class="stat-value" id="stat-trades">—</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Day Trades (5d)</span>
-          <span class="stat-value" id="stat-daytrades">—</span>
-        </div>
+      <div class="card-title">Accounts</div>
+      <div class="acct-panels" id="accounts-panels">
+        <div class="empty">Waiting for data…</div>
+      </div>
+      <div class="acct-total-bar" id="acct-total-bar" style="display:none">
+        <span>Combined</span>
+        <span class="private" id="stat-equity">—</span>
+        <span class="private" id="stat-pnl">—</span>
+        <span id="stat-trades" style="display:none"></span>
+        <span id="stat-daytrades" style="display:none"></span>
       </div>
     </div>
 
@@ -461,12 +481,19 @@ _HTML = """<!DOCTYPE html>
     <!-- Price chart -->
     <div class="card card-full">
       <div class="card-title">Price Chart</div>
-      <div class="chart-tabs" id="chart-tabs"></div>
+      <div class="chart-toolbar">
+        <div class="chart-tabs" id="chart-tabs"></div>
+        <div class="chart-type-btns">
+          <button class="chart-type-btn active" id="btn-candles" onclick="setChartType('candles')">Candles</button>
+          <button class="chart-type-btn" id="btn-line" onclick="setChartType('line')">Line</button>
+        </div>
+      </div>
       <div id="price-chart"></div>
       <div class="chart-legend">
         <div class="legend-item"><div class="legend-dot" style="background:#00D4AA"></div> Price</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#3fb950"></div> BUY trade</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#3fb950"></div> BUY</div>
         <div class="legend-item"><div class="legend-dot" style="background:#f85149"></div> SELL / stop-loss</div>
+        <div class="legend-item"><div class="legend-dash" style="border-color:#60a5fa"></div> Trend projection</div>
       </div>
     </div>
 
@@ -603,23 +630,82 @@ function updateBadges(state) {
   el.innerHTML = html;
 }
 
+function renderAccounts(accounts) {
+  const panels = document.getElementById('accounts-panels');
+  if (!accounts || !Object.keys(accounts).length) return;
+
+  const COLOR = { agentic: '#00d4aa', default: '#c084fc' };
+
+  panels.innerHTML = Object.entries(accounts).map(([label, a]) => {
+    const cls = label === 'agentic' ? 'agentic' : 'default';
+    const equity = a.equity || 0;
+    const pnl = a.daily_pnl || 0;
+    const pnlPct = a.daily_pnl_pct || 0;
+    const pnlSign = pnl >= 0 ? '+' : '';
+    const pnlCls = pnlClass(pnl);
+    const modeLabel = a.auto_trade ? 'AUTO' : 'APPROVAL REQUIRED';
+    const modeCls   = a.auto_trade ? 'acct-mode-auto' : 'acct-mode-approval';
+    const pending   = a.pending_approvals || 0;
+    const dayTrades = a.day_trades || 0;
+
+    // Mini positions table
+    const pos = a.positions || {};
+    const posRows = Object.entries(pos).map(([sym, p]) => {
+      const pct = p.unrealized_pnl_pct || 0;
+      return `<div class="acct-pos-row">
+        <span class="acct-pos-sym">${sym}</span>
+        <span class="private muted">${fmtDollar(p.current_price)}</span>
+        <span class="${pnlClass(pct)}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</span>
+      </div>`;
+    }).join('') || '<div style="color:var(--muted);font-size:12px;padding:4px 0">No open positions</div>';
+
+    return `<div class="acct-panel ${cls}">
+      <div class="acct-panel-title ${cls}">${label.toUpperCase()}</div>
+      <div class="acct-equity ${cls} private">${'$' + equity.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+      <div class="acct-row">
+        <span class="acct-row-label">Daily P&L</span>
+        <span class="${pnlCls} private">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${pnlPct.toFixed(2)}%)</span>
+      </div>
+      <div class="acct-row">
+        <span class="acct-row-label">Mode</span>
+        <span class="acct-mode ${modeCls}">${modeLabel}</span>
+      </div>
+      <div class="acct-row">
+        <span class="acct-row-label">Day Trades</span>
+        <span class="${dayTrades >= 2 ? 'yellow' : ''}">${dayTrades} / 3</span>
+      </div>
+      ${pending ? `<div class="acct-row">
+        <span class="acct-row-label">Pending</span>
+        <span class="yellow">${pending} awaiting approval</span>
+      </div>` : ''}
+      <div class="acct-positions-mini">${posRows}</div>
+    </div>`;
+  }).join('');
+}
+
 function applyState(state) {
   paused = state.paused || false;
   updateBadges(state);
 
+  // Per-account panels
+  renderAccounts(state.accounts);
+
+  // Combined totals (hidden elements kept for backwards compat)
   const equity = state.equity || 0;
   const pnl = state.daily_pnl || 0;
   const pnlPct = state.daily_pnl_pct || 0;
   const dayTrades = state.day_trades || 0;
 
-  document.getElementById('stat-equity').innerHTML = fmtDollar(equity);
-  const pnlEl = document.getElementById('stat-pnl');
-  pnlEl.innerHTML = fmtPnl(pnl, pnlPct);
-  pnlEl.className = 'stat-value ' + pnlClass(pnl);
-  document.getElementById('stat-trades').textContent = state.trade_count || 0;
-  const dtEl = document.getElementById('stat-daytrades');
-  dtEl.textContent = `${dayTrades} / 3`;
-  dtEl.className = 'stat-value ' + (dayTrades >= 2 ? 'yellow' : '');
+  const totalBar = document.getElementById('acct-total-bar');
+  if (state.accounts && Object.keys(state.accounts).length > 1) {
+    totalBar.style.display = 'flex';
+    document.getElementById('stat-equity').innerHTML = fmtDollar(equity);
+    const pnlEl = document.getElementById('stat-pnl');
+    pnlEl.innerHTML = fmtPnl(pnl, pnlPct);
+    pnlEl.className = pnlClass(pnl);
+  } else {
+    totalBar.style.display = 'none';
+  }
 
   // Positions
   const pos = state.positions || {};
@@ -759,6 +845,11 @@ function renderFlashcards(state) {
     return;
   }
 
+  // Preserve which cards the user has open across re-renders
+  const openIds = new Set(
+    [...grid.querySelectorAll('.fc.expanded')].map(el => el.dataset.tradeId)
+  );
+
   grid.innerHTML = cards.map(c => {
     const closed = c.pnl_pct != null;
     const won = closed && c.pnl_pct > 0;
@@ -775,7 +866,7 @@ function renderFlashcards(state) {
     const bbLabel = (c.bb_position || 'inside').replace(/_/g, ' ');
     const ts = c.timestamp ? new Date(c.timestamp).toLocaleString() : '';
 
-    return `<div class="fc ${borderCls}" onclick="this.classList.toggle('expanded')">
+    return `<div class="fc ${borderCls}" data-trade-id="${c.trade_id||''}" onclick="this.classList.toggle('expanded')">
       <div class="fc-front">
         <div class="fc-top">
           <span class="fc-symbol">${c.symbol}</span>
@@ -802,6 +893,13 @@ function renderFlashcards(state) {
       </div>
     </div>`;
   }).join('');
+
+  // Restore open state after re-render
+  if (openIds.size) {
+    grid.querySelectorAll('.fc[data-trade-id]').forEach(el => {
+      if (openIds.has(el.dataset.tradeId)) el.classList.add('expanded');
+    });
+  }
 }
 
 async function togglePause() {
@@ -843,96 +941,169 @@ async function doClose(symbol) {
 }
 
 // ── Price chart ────────────────────────────────────────────────────────────
-let _chart = null;
+let _chart        = null;
 let _candleSeries = null;
-let _chartSymbol = null;
-let _lastCandles = {};   // symbol → candle array cache
+let _lineSeries   = null;
+let _predSeries   = null;   // dashed prediction line
+let _chartSymbol  = null;
+let _chartType    = 'candles';   // 'candles' | 'line'
+let _lastCandles  = {};
+
+const _CHART_OPTS = {
+  layout: { background: { color: '#161920' }, textColor: '#8892a4' },
+  grid:   { vertLines: { color: '#2a2f3e' }, horzLines: { color: '#2a2f3e' } },
+  crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  rightPriceScale: { borderColor: '#2a2f3e' },
+  timeScale: { borderColor: '#2a2f3e', timeVisible: true },
+  handleScroll: true, handleScale: true,
+};
 
 function initChart() {
   const el = document.getElementById('price-chart');
-  _chart = LightweightCharts.createChart(el, {
-    layout: { background: { color: '#161920' }, textColor: '#8892a4' },
-    grid: { vertLines: { color: '#2a2f3e' }, horzLines: { color: '#2a2f3e' } },
-    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    rightPriceScale: { borderColor: '#2a2f3e' },
-    timeScale: { borderColor: '#2a2f3e', timeVisible: true },
-    handleScroll: true,
-    handleScale: true,
-  });
+  _chart = LightweightCharts.createChart(el, _CHART_OPTS);
+
   _candleSeries = _chart.addCandlestickSeries({
     upColor: '#00D4AA', downColor: '#f85149',
     borderUpColor: '#00D4AA', borderDownColor: '#f85149',
     wickUpColor: '#00D4AA', wickDownColor: '#f85149',
+    visible: true,
   });
-  new ResizeObserver(() => {
-    _chart.applyOptions({ width: el.clientWidth });
-  }).observe(el);
+
+  _lineSeries = _chart.addAreaSeries({
+    lineColor: '#00D4AA', topColor: 'rgba(0,212,170,0.18)',
+    bottomColor: 'rgba(0,212,170,0.01)', lineWidth: 2,
+    visible: false,
+  });
+
+  _predSeries = _chart.addLineSeries({
+    color: '#60a5fa', lineWidth: 1,
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    lastValueVisible: true, priceLineVisible: false,
+    title: 'trend',
+  });
+
+  new ResizeObserver(() => _chart.applyOptions({ width: el.clientWidth })).observe(el);
 }
+
+function setChartType(type) {
+  _chartType = type;
+  document.getElementById('btn-candles').classList.toggle('active', type === 'candles');
+  document.getElementById('btn-line').classList.toggle('active', type === 'line');
+  if (!_chart) return;
+  _candleSeries.applyOptions({ visible: type === 'candles' });
+  _lineSeries.applyOptions({ visible: type === 'line' });
+  // Markers only supported on candlestick series; re-place on switch
+  if (_chartSymbol && _lastCandles[_chartSymbol]) {
+    placeTradeMarkers(_chartSymbol, _lastCandles[_chartSymbol]);
+  }
+}
+
+// ── Linear regression projection ─────────────────────────────────────────────
+function _linReg(pts) {
+  // pts: [{x, y}]  returns {slope, intercept}
+  const n = pts.length;
+  const sumX  = pts.reduce((s, p) => s + p.x, 0);
+  const sumY  = pts.reduce((s, p) => s + p.y, 0);
+  const sumXY = pts.reduce((s, p) => s + p.x * p.y, 0);
+  const sumX2 = pts.reduce((s, p) => s + p.x * p.x, 0);
+  const denom = n * sumX2 - sumX * sumX;
+  if (!denom) return { slope: 0, intercept: sumY / n };
+  return {
+    slope:     (n * sumXY - sumX * sumY) / denom,
+    intercept: (sumY - ((n * sumXY - sumX * sumY) / denom) * sumX) / n,
+  };
+}
+
+function buildPrediction(candles, forwardBars = 10) {
+  const lookback = Math.min(20, candles.length);
+  const recent   = candles.slice(-lookback);
+  const pts      = recent.map((c, i) => ({ x: i, y: c.close }));
+  const { slope, intercept } = _linReg(pts);
+
+  // Average bar interval in seconds
+  const intervals = candles.slice(-5).map((c, i, a) => i ? c.time - a[i-1].time : 0).filter(Boolean);
+  const avgInterval = intervals.length ? intervals.reduce((a, b) => a + b) / intervals.length : 86400;
+
+  const lastClose = candles[candles.length - 1];
+  const lastIdx   = lookback - 1;
+  const predPoints = [];
+
+  // Anchor: last real candle so line connects cleanly
+  predPoints.push({ time: lastClose.time, value: round2(intercept + slope * lastIdx) });
+
+  for (let i = 1; i <= forwardBars; i++) {
+    predPoints.push({
+      time:  lastClose.time + Math.round(avgInterval * i),
+      value: round2(intercept + slope * (lastIdx + i)),
+    });
+  }
+  return predPoints;
+}
+
+function round2(n) { return Math.round(n * 100) / 100; }
 
 async function loadChart(symbol) {
   if (!_chart) initChart();
   _chartSymbol = symbol;
-  // Update active tab
-  document.querySelectorAll('.chart-tab').forEach(t => {
-    t.classList.toggle('active', t.dataset.sym === symbol);
-  });
+  document.querySelectorAll('.chart-tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.sym === symbol));
   try {
-    const res = await fetch(`/api/chart/${encodeURIComponent(symbol)}`);
+    const res  = await fetch(`/api/chart/${encodeURIComponent(symbol)}`);
     const data = await res.json();
     const candles = (data.candles || []).sort((a, b) => a.time - b.time);
     _lastCandles[symbol] = candles;
+
     _candleSeries.setData(candles);
+    _lineSeries.setData(candles.map(c => ({ time: c.time, value: c.close })));
+
+    // Prediction line
+    if (candles.length >= 5) {
+      _predSeries.setData(buildPrediction(candles));
+    } else {
+      _predSeries.setData([]);
+    }
+
     placeTradeMarkers(symbol, candles);
     _chart.timeScale().fitContent();
   } catch(e) { console.error('Chart error', e); }
 }
 
 function placeTradeMarkers(symbol, candles) {
-  if (!_candleSeries || !candles.length) return;
+  // Markers only work on the visible primary series
+  const series = _chartType === 'candles' ? _candleSeries : _lineSeries;
+  if (!series || !candles.length) return;
   const cards = (window._flashcards || []).filter(c => c.symbol === symbol);
-  if (!cards.length) { _candleSeries.setMarkers([]); return; }
+  if (!cards.length) { series.setMarkers([]); return; }
 
   const markers = [];
   for (const c of cards) {
     const ts = c.timestamp ? Math.floor(new Date(c.timestamp).getTime() / 1000) : null;
     if (!ts) continue;
-    // Snap to nearest candle time
-    const nearest = candles.reduce((a, b) => Math.abs(b.time - ts) < Math.abs(a.time - ts) ? b : a);
+    const nearest = candles.reduce((a, b) =>
+      Math.abs(b.time - ts) < Math.abs(a.time - ts) ? b : a);
     if (c.action === 'BUY') {
-      markers.push({
-        time: nearest.time,
-        position: 'belowBar',
-        color: '#3fb950',
-        shape: 'arrowUp',
-        text: `BUY ${c.risk_level ? c.risk_level.toUpperCase() : ''}`,
-        size: 1,
-      });
+      markers.push({ time: nearest.time, position: 'belowBar', color: '#3fb950',
+        shape: 'arrowUp', text: `BUY ${(c.risk_level||'').toUpperCase()}`, size: 1 });
     }
     if (c.exit_price != null) {
-      const exitTs = c.timestamp ? Math.floor(new Date(c.timestamp).getTime() / 1000) + Math.round((c.hold_duration_hours || 1) * 3600) : null;
-      if (exitTs) {
-        const nearestExit = candles.reduce((a, b) => Math.abs(b.time - exitTs) < Math.abs(a.time - exitTs) ? b : a);
-        const won = c.pnl_pct > 0;
-        markers.push({
-          time: nearestExit.time,
-          position: 'aboveBar',
-          color: won ? '#00D4AA' : '#f85149',
-          shape: 'arrowDown',
-          text: `${c.outcome ? c.outcome.toUpperCase() : 'SELL'} ${c.pnl_pct != null ? (c.pnl_pct >= 0 ? '+' : '') + c.pnl_pct.toFixed(1) + '%' : ''}`,
-          size: 1,
-        });
-      }
+      const exitTs = ts + Math.round((c.hold_duration_hours || 1) * 3600);
+      const nearestExit = candles.reduce((a, b) =>
+        Math.abs(b.time - exitTs) < Math.abs(a.time - exitTs) ? b : a);
+      const won = c.pnl_pct > 0;
+      markers.push({ time: nearestExit.time, position: 'aboveBar',
+        color: won ? '#00D4AA' : '#f85149', shape: 'arrowDown',
+        text: `${(c.outcome||'SELL').toUpperCase()} ${c.pnl_pct != null ? (c.pnl_pct >= 0 ? '+' : '') + c.pnl_pct.toFixed(1) + '%' : ''}`,
+        size: 1 });
     }
   }
   markers.sort((a, b) => a.time - b.time);
-  _candleSeries.setMarkers(markers);
+  try { series.setMarkers(markers); } catch(_) {}
 }
 
 function buildChartTabs(signals) {
   const syms = [...new Set((signals || []).map(s => s.symbol))];
   if (!syms.length) return;
   const tabs = document.getElementById('chart-tabs');
-  // Add new symbols, keep existing active state
   const existing = new Set([...tabs.querySelectorAll('.chart-tab')].map(t => t.dataset.sym));
   syms.forEach(sym => {
     if (!existing.has(sym)) {
@@ -944,7 +1115,6 @@ function buildChartTabs(signals) {
       tabs.appendChild(btn);
     }
   });
-  // Auto-load first symbol if none selected yet
   if (!_chartSymbol && syms.length) loadChart(syms[0]);
 }
 
