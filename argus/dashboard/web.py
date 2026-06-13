@@ -372,7 +372,7 @@ _HTML = """<!DOCTYPE html>
     text-transform: uppercase;
     user-select: none;
   }
-  .logo img { height: 38px; display: block; mix-blend-mode: screen; }
+  .logo img { height: 38px; display: block; background: var(--surface); border-radius: 6px; }
   .logo-wordmark { display: flex; flex-direction: column; gap: 0; line-height: 1; }
   .logo-name { font-size: 17px; font-weight: 800; letter-spacing: 3px; color: var(--accent); }
   .logo-version { font-size: 10px; font-weight: 500; color: var(--text-dim); letter-spacing: 0.5px; text-transform: none; font-family: var(--mono); }
