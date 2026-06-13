@@ -2,7 +2,7 @@
 
 ![Argus](argus/dashboard/static/banner.png)
 
-![version](https://img.shields.io/badge/version-v0.4.2-blue)
+![version](https://img.shields.io/badge/version-v0.5.0-blue)
 
 ## 1. What is Argus?
 
@@ -352,45 +352,91 @@ These shell functions are defined in `~/.zshrc` and require `ARGUS_DIR` to point
 
 The dashboard is a single-page app served by FastAPI at `http://127.0.0.1:8000`. State is pushed from the main loop to the browser via **Server-Sent Events** (`/events`) on every tick, so all panels update live without client-side polling. On first connect the browser receives a snapshot of the latest state immediately.
 
-### Account Panels
+The dashboard has two tabs: **Dashboard** (live trading view) and **Performance** (analytics).
 
-Two side-by-side cards, one per account. **Agentic** uses cyan borders; **Default** uses purple (magenta). Each panel shows: equity, daily P&L (absolute and percent), day trade count (highlighted yellow at 2/3), mode (`AUTO` vs `APPROVAL`), pending approval count, open positions (entry/current price, unrealized P&L %), and the five most recent trades (time, side, fill price).
+---
 
-### Price Chart
+### Dashboard Tab
 
-Interactive chart for any watchlisted symbol. Pulls one month of daily OHLCV data from Robinhood via `GET /api/chart/{symbol}`. Features:
+#### Token Usage Today
 
-- **Candlestick / Line toggle** — switch rendering style without reloading data.
+First card at the top. Shows per-model API usage since midnight: call count, input/output tokens (and cache-read tokens for Claude), and estimated USD cost. Resets at midnight. Total combined cost at the bottom.
+
+#### Account Panels
+
+Two side-by-side cards, one per account. **Agentic** uses cyan borders; **Default** uses purple. Each panel shows: equity, daily P&L, day trade count (highlighted yellow at 2/3), mode (`AUTO` vs `APPROVAL`), open positions with unrealized P&L %, the five most recent trades, and a **$25K PDT Goal** progress bar.
+
+#### $25K PDT Goal
+
+Each account panel shows a gradient progress bar toward the `EQUITY_GOAL` (default `$25,000` — the threshold at which the FINRA PDT restriction is lifted). Configurable via the `EQUITY_GOAL` env var. The bar turns green and shows "PDT restriction lifted" once the goal is reached.
+
+#### Price Chart
+
+Interactive chart per watchlisted symbol. Pulls one month of daily OHLCV data via `GET /api/chart/{symbol}`. Features:
+- **Candlestick / Line toggle** — switch rendering style without reloading.
 - **Linear regression prediction line** — trend projection overlaid on the chart.
-- **Trade markers** — buy and sell executions from the current session plotted as arrows directly on the chart.
+- **Trade markers** — buy and sell executions plotted as arrows on the chart.
 
-### Pending Approvals
+#### Pending Approvals
 
-Yellow cards appear for every Default-account trade queued for approval. Each card shows: symbol, dollar amount, risk level, AI confidence, signal direction, and the full AI reasoning from both models. Buttons: **Approve** (`POST /api/approve/{trade_id}`) or **Deny** (`POST /api/deny/{trade_id}`). The main loop polls for decisions on every tick and executes approved trades immediately.
+Yellow cards for every Default-account trade queued for human approval. Each card shows symbol, dollar amount, risk level, AI confidence, and full AI reasoning. Buttons: **Approve** (`POST /api/approve/{trade_id}`) or **Deny** (`POST /api/deny/{trade_id}`).
 
-### Open Positions
+#### Open Positions
 
-Table of all open positions across both accounts showing: symbol, account label, quantity, entry price, current price, stop-loss price, and unrealized P&L %. A **Force Close** button sends `POST /api/close/{symbol}` to the main loop for immediate execution.
+Table of all open positions across both accounts: symbol, account, quantity, entry price, current price, stop-loss, and unrealized P&L %. Two action buttons per row:
+- **Close** — force-closes the position immediately (`POST /api/close/{symbol}`)
+- **Promote ↑** *(Default positions only)* — sells the position on Default and re-buys the equivalent dollar amount on Agentic (`POST /api/promote/{symbol}`). Use this to gradually shift trusted positions to the auto-trade account.
 
-### Signals
+#### Signals
 
-Latest `SignalResult` for every watchlisted symbol: price, RSI, MACD histogram, composite direction (BULLISH / BEARISH / NEUTRAL, color-coded), and signal confidence.
+Latest `SignalResult` per watchlisted symbol: price, RSI, MACD histogram, composite direction (BULLISH / BEARISH / NEUTRAL, color-coded), and confidence.
 
-### Recent Trades
+#### Recent Trades
 
-Chronological list of executed buy/sell orders from the current session: time, symbol, account label, side, quantity, and fill price.
+Chronological list of executed orders from the current session: time, symbol, account, side, quantity, fill price.
 
-### Token Usage Today
+#### Decision Flashcards
 
-Card showing per-model API usage since midnight: call count, input tokens, output tokens (and cache-read tokens for Claude), and estimated USD cost. Resets automatically at midnight. The total combined cost is shown at the bottom of the card.
+Grid of cards from `argus_flashcards.jsonl`. Front shows market context at decision time (signal, RSI, MACD, Bollinger Band). Click to expand: full AI reasoning, risk level, entry price, and — once closed — exit price, P&L %, and hold duration.
 
-### Decision Flashcards
+#### Agent Log
 
-A grid of cards from `argus_flashcards.jsonl`. Each card shows the market context at decision time on the front (symbol, signal composite, RSI, MACD histogram, Bollinger Band position). Click any card to expand the full AI reasoning, risk level, entry price, and — if the trade is closed — exit price, P&L %, and hold duration.
+Real-time log tail (last 100 entries) from the in-memory ring buffer. Color-coded by level. Auto-scrolls. Filterable by level.
 
-### Agent Log
+---
 
-Real-time log tail (last 100 entries) from the in-memory ring buffer. Color-coded by level: INFO (white), WARNING (yellow), ERROR (red). Auto-scrolls to the latest entry. Filterable by log level via a dropdown in the card header.
+### Performance Tab
+
+Populated from `FlashcardStore.performance()` on every state update. Resets as new trades close.
+
+#### Overall Performance
+
+Six stat cards:
+
+| Card | Description |
+|------|-------------|
+| Win Rate | % of closed trades that were profitable |
+| Avg P&L | Average P&L % per closed trade |
+| Streak | Current consecutive win or loss streak count |
+| Avg Hold | Average position hold time in hours |
+| Best Trade | Symbol, P&L %, and date of best closed trade |
+| Worst Trade | Symbol, P&L %, and date of worst closed trade |
+
+#### By Symbol
+
+Per-symbol table: total trades, wins, win rate, average P&L %. Identifies which stocks in the watchlist are performing well vs. dragging returns.
+
+#### AI Confidence Accuracy
+
+Win rate broken down by the ensemble's decision confidence at trade time:
+
+| Bucket | Threshold |
+|--------|-----------|
+| High | ≥ 70% |
+| Medium | 50–69% |
+| Low | < 50% |
+
+Use this to tune `classify_risk()` thresholds and understand whether high-confidence calls actually outperform.
 
 ---
 
@@ -553,7 +599,7 @@ argus/
 │   └── mac-mini-setup.md         # Step-by-step Mac Mini + Docker migration checklist
 │
 └── argus/                        # Main package
-    ├── __init__.py               # Package version (__version__ = "0.4.1")
+    ├── __init__.py               # Package version (__version__ = "0.5.0")
     ├── main.py                   # Autopilot orchestration loop; AccountContext; market session detection
     ├── config.py                 # Pydantic settings; keychain source; priority chain
     ├── secrets.py                # OS keychain read/write via keyring

@@ -8,6 +8,23 @@ Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH
 
 ---
 
+## [0.5.0] — 2026-06-13
+
+### Added
+- **Performance tab** — second dashboard tab with full analytics:
+  - 6 stat cards: win rate, avg P&L per trade, current streak, avg hold time, best trade, worst trade
+  - By-symbol breakdown: trades, wins, win rate, avg P&L per symbol
+  - AI Confidence Accuracy: win rate segmented by confidence bucket (≥70%, 50–69%, <50%)
+- **Promote to Agentic** — "Promote ↑" button on Default account positions; sells on Default and re-buys same dollar amount on Agentic, atomically queued via `POST /api/promote/{symbol}`
+- **$25K PDT Goal tracker** — progress bar per account in web (gradient fill, turns green at goal) and terminal (ASCII block bar); configurable via `EQUITY_GOAL` env var
+- **Tab navigation** — Dashboard / Performance tabs in web header; clean `switchTab()` JS, no page reload
+- **`FlashcardStore.performance()`** — full analytics engine: streak detection, per-symbol stats, confidence accuracy buckets, best/worst trade, avg hold duration
+
+### Changed
+- `flashcard_summary` extended; `performance` key added to state dict on every dashboard push
+
+---
+
 ## [0.4.2] — 2026-06-13
 
 ### Added
