@@ -861,6 +861,12 @@ _HTML = """<!DOCTYPE html>
   </header>
   <main>
 
+    <!-- Token usage -->
+    <div class="card card-full">
+      <div class="card-title">Token Usage Today</div>
+      <div class="token-grid" id="token-grid"><div class="empty">No AI calls yet</div></div>
+    </div>
+
     <!-- Per-account panels -->
     <div class="card card-full">
       <div class="card-title">Accounts</div>
@@ -976,12 +982,6 @@ _HTML = """<!DOCTYPE html>
           <tbody id="trades-body"></tbody>
         </table>
       </div>
-    </div>
-
-    <!-- Token usage -->
-    <div class="card card-full">
-      <div class="card-title">Token Usage Today</div>
-      <div class="token-grid" id="token-grid"><div class="empty">No AI calls yet</div></div>
     </div>
 
     <!-- Flashcards -->
