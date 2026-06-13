@@ -22,6 +22,7 @@ _SERVICE = "argus"
 # for the corresponding secrets.
 SECRET_KEYS: tuple[str, ...] = (
     "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
     "ROBINHOOD_PASSWORD",
     "ROBINHOOD_MFA_SECRET",
     "SMTP_PASSWORD",

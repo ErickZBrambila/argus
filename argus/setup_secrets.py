@@ -30,6 +30,7 @@ console = Console()
 
 _DESCRIPTIONS: dict[str, str] = {
     "ANTHROPIC_API_KEY":   "Anthropic API key  (required)",
+    "GEMINI_API_KEY":      "Google Gemini API key  (optional — enables ensemble AI voting)",
     "ROBINHOOD_PASSWORD":  "Robinhood password  (required)",
     "ROBINHOOD_MFA_SECRET":"Robinhood TOTP secret  (optional — leave blank to skip)",
     "SMTP_PASSWORD":       "SMTP / Gmail app password  (optional)",

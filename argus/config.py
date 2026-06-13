@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 # Keys that are fetched from the keychain (not the .env file)
 _KEYCHAIN_SECRET_KEYS: frozenset[str] = frozenset({
     "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
     "ROBINHOOD_PASSWORD",
     "ROBINHOOD_MFA_SECRET",
     "SMTP_PASSWORD",
@@ -66,6 +67,7 @@ class Settings(BaseSettings):
 
     # ── Secrets (keychain-backed, env var override supported) ───────────────
     anthropic_api_key: SecretStr = Field(..., alias="ANTHROPIC_API_KEY")
+    gemini_api_key: SecretStr = Field("", alias="GEMINI_API_KEY")
     robinhood_password: SecretStr = Field(..., alias="ROBINHOOD_PASSWORD")
     robinhood_mfa_secret: SecretStr = Field("", alias="ROBINHOOD_MFA_SECRET")
     smtp_password: SecretStr = Field("", alias="SMTP_PASSWORD")

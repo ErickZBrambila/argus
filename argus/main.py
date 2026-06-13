@@ -96,7 +96,11 @@ class Autopilot:
             paper=self._cfg.paper_trade,
         )
         self._strategy = SignalEngine(_shared_broker)
-        self._decision = DecisionEngine(self._cfg.anthropic_api_key.get_secret_value())
+        gemini_key = self._cfg.gemini_api_key.get_secret_value() or None
+        self._decision = DecisionEngine(
+            anthropic_key=self._cfg.anthropic_api_key.get_secret_value(),
+            gemini_key=gemini_key,
+        )
 
         def _make_broker(account_number: str) -> RobinhoodBroker:
             return RobinhoodBroker(
