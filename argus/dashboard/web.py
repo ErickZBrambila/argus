@@ -23,11 +23,17 @@ _sse_queue: asyncio.Queue = asyncio.Queue()
 
 # Chart data source — registered by main loop
 _chart_source_fn = None   # callable(symbol: str) -> list[dict]
+_autopilot = None         # Autopilot instance for runtime control
 
 
 def register_chart_source(fn) -> None:
     global _chart_source_fn
     _chart_source_fn = fn
+
+
+def register_autopilot(ap) -> None:
+    global _autopilot
+    _autopilot = ap
 
 # ── Approval queue (thread-safe: accessed by both sync main loop and async FastAPI) ──
 _approval_lock = threading.Lock()
@@ -120,6 +126,29 @@ async def get_logs(n: int = 100) -> dict:
         return {"logs": get_recent(n)}
     except Exception:
         return {"logs": []}
+
+
+@app.get("/api/scan-interval")
+async def get_scan_interval() -> dict:
+    return {
+        "scan_interval":     _state.get("scan_interval", 300),
+        "interval_override": _state.get("interval_override"),
+        "market_session":    _state.get("market_session", "unknown"),
+        "next_scan_at":      _state.get("next_scan_at"),
+    }
+
+
+@app.post("/api/scan-interval")
+async def set_scan_interval(body: dict) -> dict:
+    if _autopilot is None:
+        raise HTTPException(status_code=503, detail="Autopilot not available (mock mode?)")
+    seconds = body.get("seconds")   # None = reset to adaptive
+    if seconds is not None:
+        seconds = int(seconds)
+        if seconds < 15:
+            raise HTTPException(status_code=400, detail="Minimum interval is 15 seconds")
+    _autopilot.set_scan_interval(seconds)
+    return {"seconds": seconds, "status": "adaptive" if seconds is None else "override"}
 
 
 @app.get("/api/positions")
@@ -369,6 +398,31 @@ _HTML = """<!DOCTYPE html>
   /* Empty state */
   .empty { text-align: center; color: var(--muted); padding: 32px 0; font-size: 13px; }
 
+  /* Market session + countdown */
+  .badge-session-open       { background: #1a4d2e; color: var(--green); }
+  .badge-session-premarket  { background: #1a2f4d; color: var(--blue); }
+  .badge-session-afterhours { background: #4d3a00; color: var(--yellow); }
+  .badge-session-closed     { background: var(--surface2); color: var(--muted); }
+  .countdown-wrap { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .countdown-val  { font-family: "SF Mono","Fira Code",monospace; color: var(--text); font-weight: 700; min-width: 36px; }
+
+  /* Interval selector */
+  .interval-select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-sm,4px); padding: 6px 10px; font-size: 13px; cursor: pointer; }
+  .interval-select:focus { outline: none; border-color: var(--accent); }
+
+  /* Token usage card */
+  .token-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (min-width: 640px) { .token-grid { grid-template-columns: repeat(4, 1fr); } }
+  .token-model { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+  .token-model-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .token-model-title.claude { color: #c084fc; }
+  .token-model-title.gemini { color: #60a5fa; }
+  .token-model-title.total  { color: var(--accent); }
+  .token-row { display: flex; justify-content: space-between; font-size: 12px; padding: 2px 0; }
+  .token-label { color: var(--muted); }
+  .token-val { font-family: "SF Mono","Fira Code",monospace; font-weight: 600; }
+  .token-cost { font-size: 18px; font-weight: 700; margin-top: 6px; }
+
   /* Log tail */
   .log-tail { background: #0d1117; border: 1px solid var(--border); border-radius: var(--radius); font-family: "SF Mono","Fira Code","Cascadia Code",monospace; font-size: 11.5px; line-height: 1.6; overflow-y: auto; max-height: 320px; padding: 10px 12px; }
   .log-line { display: flex; gap: 10px; padding: 1px 0; border-bottom: 1px solid rgba(48,54,61,.4); }
@@ -484,6 +538,11 @@ _HTML = """<!DOCTYPE html>
   <header>
     <span class="logo">⬡ ARGUS</span>
     <div style="display:flex;align-items:center;gap:10px">
+      <span class="badge badge-session-closed" id="session-badge">—</span>
+      <div class="countdown-wrap">
+        <span>Next scan</span>
+        <span class="countdown-val" id="countdown">—</span>
+      </div>
       <div class="badges" id="badges"></div>
       <button class="btn-eye" id="btn-eye" onclick="toggleValues()" title="Show/hide dollar amounts">👁</button>
     </div>
@@ -511,6 +570,15 @@ _HTML = """<!DOCTYPE html>
       <div class="controls">
         <button class="btn btn-warning" id="btn-pause" onclick="togglePause()">⏸ Pause</button>
         <button class="btn btn-ghost" id="btn-refresh" onclick="fetchAll()">↻ Refresh</button>
+        <select class="interval-select" id="interval-select" onchange="setScanInterval(this.value)" title="Scan interval">
+          <option value="auto">Auto (adaptive)</option>
+          <option value="30">30 sec</option>
+          <option value="60">1 min</option>
+          <option value="90">90 sec</option>
+          <option value="120">2 min</option>
+          <option value="300">5 min</option>
+          <option value="600">10 min</option>
+        </select>
       </div>
     </div>
 
@@ -598,6 +666,12 @@ _HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Token usage -->
+    <div class="card card-full">
+      <div class="card-title">Token Usage Today</div>
+      <div class="token-grid" id="token-grid"><div class="empty">No AI calls yet</div></div>
+    </div>
+
     <!-- Flashcards -->
     <div class="card card-full">
       <div class="card-title">Decision Flashcards <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">— click any card to see reasoning</span></div>
@@ -642,6 +716,87 @@ _HTML = """<!DOCTYPE html>
 let paused = false;
 let pendingCloseSymbol = null;
 let valuesHidden = true;
+let _nextScanAt = null;
+
+// ── Countdown timer (runs every second independently of SSE) ──────────────────
+function _updateCountdown() {
+  const el = document.getElementById('countdown');
+  if (!el) return;
+  if (!_nextScanAt) { el.textContent = '—'; return; }
+  const secs = Math.max(0, Math.round((_nextScanAt - Date.now()) / 1000));
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  el.textContent = m > 0 ? `${m}:${String(s).padStart(2,'0')}` : `${s}s`;
+}
+setInterval(_updateCountdown, 1000);
+
+// ── Market session badge ──────────────────────────────────────────────────────
+const _SESSION_LABELS = {
+  open: 'MARKET OPEN', premarket: 'PRE-MARKET',
+  afterhours: 'AFTER-HOURS', closed: 'CLOSED',
+};
+function _updateSessionBadge(session) {
+  const el = document.getElementById('session-badge');
+  if (!el) return;
+  el.textContent = _SESSION_LABELS[session] || session.toUpperCase();
+  el.className = `badge badge-session-${session || 'closed'}`;
+}
+
+// ── Interval selector ─────────────────────────────────────────────────────────
+async function setScanInterval(val) {
+  const body = val === 'auto' ? { seconds: null } : { seconds: parseInt(val) };
+  try {
+    await fetch('/api/scan-interval', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch(e) { console.error('setScanInterval failed', e); }
+}
+
+function _syncIntervalSelect(override) {
+  const sel = document.getElementById('interval-select');
+  if (!sel) return;
+  sel.value = override != null ? String(override) : 'auto';
+  if (!sel.querySelector(`option[value="${sel.value}"]`)) sel.value = 'auto';
+}
+
+// ── Token usage ───────────────────────────────────────────────────────────────
+function renderTokenUsage(usage) {
+  const grid = document.getElementById('token-grid');
+  if (!grid) return;
+  if (!usage || !usage.total_calls) {
+    grid.innerHTML = '<div class="empty">No AI calls yet this session</div>';
+    return;
+  }
+  const c = usage.claude || {};
+  const g = usage.gemini || {};
+  const fmtN = n => (n || 0).toLocaleString();
+  const fmtC = n => '$' + (n || 0).toFixed(4);
+
+  grid.innerHTML = `
+    <div class="token-model">
+      <div class="token-model-title claude">Claude (Opus)</div>
+      <div class="token-cost ${c.cost_usd > 0.5 ? 'red' : 'green'}">${fmtC(c.cost_usd)}</div>
+      <div class="token-row"><span class="token-label">Calls</span><span class="token-val">${fmtN(c.calls)}</span></div>
+      <div class="token-row"><span class="token-label">Input</span><span class="token-val">${fmtN(c.input_tokens)}</span></div>
+      <div class="token-row"><span class="token-label">Output</span><span class="token-val">${fmtN(c.output_tokens)}</span></div>
+      <div class="token-row"><span class="token-label">Cache read</span><span class="token-val">${fmtN(c.cache_read_tokens)}</span></div>
+    </div>
+    <div class="token-model">
+      <div class="token-model-title gemini">Gemini (Flash)</div>
+      <div class="token-cost ${g.cost_usd > 0.1 ? 'yellow' : 'green'}">${fmtC(g.cost_usd)}</div>
+      <div class="token-row"><span class="token-label">Calls</span><span class="token-val">${fmtN(g.calls)}</span></div>
+      <div class="token-row"><span class="token-label">Input</span><span class="token-val">${fmtN(g.input_tokens)}</span></div>
+      <div class="token-row"><span class="token-label">Output</span><span class="token-val">${fmtN(g.output_tokens)}</span></div>
+    </div>
+    <div class="token-model">
+      <div class="token-model-title total">Total Today</div>
+      <div class="token-cost">${fmtC(usage.total_cost_usd)}</div>
+      <div class="token-row"><span class="token-label">Total calls</span><span class="token-val">${fmtN(usage.total_calls)}</span></div>
+      <div class="token-row"><span class="token-label">Date</span><span class="token-val muted">${usage.date || '—'}</span></div>
+    </div>`;
+}
 
 function toggleValues() {
   valuesHidden = !valuesHidden;
@@ -854,6 +1009,13 @@ function applyState(state) {
 
   // Cache flashcards globally for chart markers, then render
   window._flashcards = state.flashcards || [];
+  // Scan timing
+  if (state.next_scan_at) _nextScanAt = new Date(state.next_scan_at);
+  _updateSessionBadge(state.market_session || 'closed');
+  _syncIntervalSelect(state.interval_override);
+  _updateCountdown();
+
+  renderTokenUsage(state.token_usage);
   renderFlashcards(state);
   buildChartTabs(state.signals);
   renderLogs(state.logs || []);

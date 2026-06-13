@@ -91,8 +91,12 @@ class Settings(BaseSettings):
     max_positions: int = Field(5, alias="MAX_POSITIONS")
     daily_drawdown_limit: float = Field(-0.05, alias="DAILY_DRAWDOWN_LIMIT")
 
-    # Scan loop
+    # Scan loop — adaptive intervals per market session
     scan_interval_seconds: int = Field(300, alias="SCAN_INTERVAL_SECONDS")
+    interval_open:         int = Field(90,  alias="INTERVAL_OPEN")
+    interval_premarket:    int = Field(180, alias="INTERVAL_PREMARKET")
+    interval_afterhours:   int = Field(180, alias="INTERVAL_AFTERHOURS")
+    interval_closed:       int = Field(300, alias="INTERVAL_CLOSED")
 
     # Notifications — email
     notify_email: str = Field("", alias="NOTIFY_EMAIL")

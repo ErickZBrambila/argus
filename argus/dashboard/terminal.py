@@ -61,12 +61,49 @@ class TerminalDashboard:
         paused = Text(" ⏸ PAUSED ", style="bold black on yellow") if s.get("paused") else Text("")
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # Market session + countdown
+        _SESSION_STYLES = {
+            "open": "bold green", "premarket": "bold blue",
+            "afterhours": "bold yellow", "closed": "dim",
+        }
+        session = s.get("market_session", "closed")
+        session_label = {
+            "open": "OPEN", "premarket": "PRE", "afterhours": "AH", "closed": "CLOSED",
+        }.get(session, session.upper())
+
+        countdown_str = ""
+        next_scan = s.get("next_scan_at")
+        if next_scan:
+            try:
+                import pytz
+                nxt = datetime.datetime.fromisoformat(next_scan)
+                secs = max(0, int((nxt - datetime.datetime.now(datetime.timezone.utc)).total_seconds()))
+                m, sec = divmod(secs, 60)
+                countdown_str = f"{m}:{sec:02d}" if m else f"{sec}s"
+            except Exception:
+                pass
+
+        # Token cost line
+        token = s.get("token_usage", {})
+        token_str = ""
+        if token.get("total_calls", 0) > 0:
+            token_str = (
+                f"Claude ${token.get('claude',{}).get('cost_usd',0):.4f} · "
+                f"Gemini ${token.get('gemini',{}).get('cost_usd',0):.4f} · "
+                f"Total ${token.get('total_cost_usd',0):.4f}"
+            )
+
         header = Text()
         header.append("⬡ ARGUS  ", style="bold cyan")
         header.append_text(mode)
         header.append_text(kill)
         header.append_text(paused)
+        header.append(f" [{session_label}]", style=_SESSION_STYLES.get(session, "dim"))
+        if countdown_str:
+            header.append(f"  next {countdown_str}", style="dim")
         header.append(f"  {ts}", style="dim")
+        if token_str:
+            header.append(f"\n  {token_str}", style="dim")
 
         accounts = s.get("accounts", {})
 

@@ -45,19 +45,36 @@ _MARKET_CLOSE_H = 16
 _MARKET_CLOSE_M = 0
 
 
-def _is_market_hours() -> bool:
-    try:
+_ET = None
+def _et_tz():
+    global _ET
+    if _ET is None:
         import pytz
+        _ET = pytz.timezone("America/New_York")
+    return _ET
 
-        et = pytz.timezone("America/New_York")
-        now = datetime.datetime.now(et)
-        if now.weekday() >= 5:    # Saturday/Sunday
-            return False
-        market_open = now.replace(hour=_MARKET_OPEN_H, minute=_MARKET_OPEN_M, second=0, microsecond=0)
-        market_close = now.replace(hour=_MARKET_CLOSE_H, minute=_MARKET_CLOSE_M, second=0, microsecond=0)
-        return market_open <= now < market_close
+
+def get_market_session() -> str:
+    """Return the current NYSE market session in ET."""
+    try:
+        import datetime as _dt
+        now = _dt.datetime.now(_et_tz())
+        if now.weekday() >= 5:
+            return "closed"
+        t = now.time()
+        if _dt.time(4, 0) <= t < _dt.time(9, 30):
+            return "premarket"
+        if _dt.time(9, 30) <= t < _dt.time(16, 0):
+            return "open"
+        if _dt.time(16, 0) <= t < _dt.time(20, 0):
+            return "afterhours"
+        return "closed"
     except Exception:
-        return True    # fail open (let the loop run; broker will reject outside-hours orders)
+        return "open"   # fail open
+
+
+def _is_market_hours() -> bool:
+    return get_market_session() == "open"
 
 
 _RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
@@ -78,6 +95,10 @@ class Autopilot:
         self._cfg = get_settings()
         self._running = False
         self._paused = False
+        self._scan_interval_override: Optional[int] = None  # session-only manual override
+        self._next_scan_at: Optional[datetime.datetime] = None
+        self._current_interval: int = self._cfg.scan_interval_seconds
+        self._market_session: str = "closed"
 
         logger.info(
             "Argus starting — mode=%s watchlist=%s",
@@ -180,6 +201,9 @@ class Autopilot:
         signal.signal(signal.SIGINT, self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
 
+        # Expose this instance so web API can set interval override
+        web_dashboard.register_autopilot(self)
+
         # Register chart data source using first account's broker
         _history_broker = self._accounts[0].broker
         web_dashboard.register_chart_source(
@@ -209,14 +233,26 @@ class Autopilot:
 
             while self._running:
                 try:
+                    self._market_session = get_market_session()
                     self._check_force_close()
                     self._poll_approvals()
                     if not self._paused:
                         self._tick()
-                    time.sleep(self._cfg.scan_interval_seconds)
+                    interval = self._get_interval()
+                    self._current_interval = interval
+                    self._next_scan_at = datetime.datetime.now(_UTC) + datetime.timedelta(seconds=interval)
+                    self._update_dashboard()
+                    logger.info("Next scan in %ds [session=%s]", interval, self._market_session)
+                    for _ in range(interval):
+                        if not self._running:
+                            break
+                        time.sleep(1)
                 except Exception as exc:
                     logger.exception("Unhandled error in main loop: %s", exc)
-                    time.sleep(30)
+                    for _ in range(30):
+                        if not self._running:
+                            break
+                        time.sleep(1)
         finally:
             self._terminal.stop()
             for acct in self._accounts:
@@ -225,6 +261,24 @@ class Autopilot:
     def _shutdown(self, *_) -> None:
         logger.info("Shutdown signal received — stopping Argus")
         self._running = False
+
+    def _get_interval(self) -> int:
+        if self._scan_interval_override is not None:
+            return self._scan_interval_override
+        return {
+            "open":       self._cfg.interval_open,
+            "premarket":  self._cfg.interval_premarket,
+            "afterhours": self._cfg.interval_afterhours,
+            "closed":     self._cfg.interval_closed,
+        }.get(self._market_session, self._cfg.scan_interval_seconds)
+
+    def set_scan_interval(self, seconds: Optional[int]) -> None:
+        """Set or clear the manual interval override (session-only)."""
+        self._scan_interval_override = seconds
+        logger.info(
+            "Scan interval %s",
+            f"overridden to {seconds}s" if seconds else "reset to adaptive"
+        )
 
     # ── Main tick ────────────────────────────────────────────────────────────
 
@@ -579,6 +633,7 @@ class Autopilot:
                 "pending_approvals": len(acct.pending_approvals),
             }
 
+        from argus.dashboard.token_tracker import get_summary as _token_summary
         recent_cards = self._flashcards.get_recent(20)
         state = {
             "paper_trade": self._cfg.paper_trade,
@@ -595,6 +650,13 @@ class Autopilot:
             "accounts": accounts_state,
             "flashcards": [c.as_dict() for c in recent_cards],
             "flashcard_summary": self._flashcards.summary(),
+            # Scan timing
+            "market_session":      self._market_session,
+            "scan_interval":       self._current_interval,
+            "interval_override":   self._scan_interval_override,
+            "next_scan_at":        self._next_scan_at.isoformat() if self._next_scan_at else None,
+            # Token usage
+            "token_usage": _token_summary(),
         }
         self._terminal.update(state)
         web_dashboard.push_state(state)

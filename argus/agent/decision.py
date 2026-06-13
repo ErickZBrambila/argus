@@ -87,6 +87,14 @@ class _ClaudeEngine:
                     raw = block.text
                     break
 
+            try:
+                from argus.dashboard.token_tracker import record_claude
+                u = message.usage
+                record_claude(u.input_tokens, u.output_tokens,
+                              getattr(u, "cache_read_input_tokens", 0))
+            except Exception:
+                pass
+
             d = _parse_response(symbol, raw)
             d.models_used = "claude"
             return d
@@ -120,6 +128,16 @@ class _GeminiEngine:
             if raw.startswith("```"):
                 raw = "\n".join(raw.split("\n")[1:])
                 raw = raw.rstrip("`").strip()
+            try:
+                from argus.dashboard.token_tracker import record_gemini
+                m = response.usage_metadata
+                record_gemini(
+                    getattr(m, "prompt_token_count", 0),
+                    getattr(m, "candidates_token_count", 0),
+                )
+            except Exception:
+                pass
+
             d = _parse_response(symbol, raw)
             d.models_used = "gemini"
             return d
