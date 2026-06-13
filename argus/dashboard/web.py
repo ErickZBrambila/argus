@@ -577,7 +577,10 @@ _HTML = """<!DOCTYPE html>
   .tab-btn:hover { color: var(--text); }
   .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
   .tab-pane { display: none; }
-  .tab-pane.active { display: block; }
+  .tab-pane.active { display: grid; grid-column: 1 / -1; gap: 16px; }
+  @media (min-width: 640px)  { .tab-pane.active { gap: 18px; } }
+  @media (min-width: 1024px) { .tab-pane.active { grid-template-columns: repeat(2, 1fr); gap: 20px; } }
+  @media (min-width: 1400px) { .tab-pane.active { grid-template-columns: repeat(3, 1fr); } }
   .modal {
     background: var(--surface);
     border: 1px solid var(--border);
