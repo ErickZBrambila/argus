@@ -204,6 +204,7 @@ async def force_close(symbol: str) -> dict:
 
 
 _force_close_queue: asyncio.Queue = asyncio.Queue()
+_promote_queue: asyncio.Queue = asyncio.Queue()
 
 
 def get_force_close_symbol() -> str | None:
@@ -211,6 +212,23 @@ def get_force_close_symbol() -> str | None:
         return _force_close_queue.get_nowait()
     except asyncio.QueueEmpty:
         return None
+
+
+def get_promote_request() -> dict | None:
+    try:
+        return _promote_queue.get_nowait()
+    except asyncio.QueueEmpty:
+        return None
+
+
+@app.post("/api/promote/{symbol}")
+async def promote_position(symbol: str, body: dict = {}) -> dict:
+    symbol = symbol.upper().strip()
+    from_account = body.get("from_account", "default")
+    to_account   = body.get("to_account",   "agentic")
+    _promote_queue.put_nowait({"symbol": symbol, "from_account": from_account, "to_account": to_account})
+    logger.info("Promote requested: %s %s → %s", symbol, from_account, to_account)
+    return {"status": "queued", "symbol": symbol, "from": from_account, "to": to_account}
 
 
 @app.get("/api/chart/{symbol}")
@@ -552,6 +570,14 @@ _HTML = """<!DOCTYPE html>
     justify-content: center;
   }
   .modal-bg.open { display: flex; }
+
+  /* ── Tab navigation ─────────────────────────────────────────────────────── */
+  .tab-bar { display: flex; gap: 2px; padding: 0 20px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .tab-btn { padding: 10px 18px; font-size: 13px; font-weight: 600; color: var(--muted); background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; transition: color .15s, border-color .15s; letter-spacing: 0.2px; }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
   .modal {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -637,6 +663,21 @@ _HTML = """<!DOCTYPE html>
 
   .acct-positions-mini { margin-top: 12px; border-top: 1px solid var(--border-subtle); padding-top: 10px; }
   .acct-pos-row { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; padding: 4px 0; }
+  .btn-promote { font-size: 10px; padding: 1px 6px; margin-left: 6px; background: rgba(192,132,252,.12); color: var(--purple); border: 1px solid rgba(192,132,252,.3); border-radius: 4px; cursor: pointer; }
+  .btn-promote:hover { background: rgba(192,132,252,.25); }
+
+  /* Performance analytics card */
+  .perf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .perf-stat { background: var(--surface2); border-radius: var(--radius); padding: 12px 14px; }
+  .perf-stat-label { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .perf-stat-value { font-size: 22px; font-weight: 700; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .perf-stat-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .perf-tables { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .perf-section-title { font-size: 10.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; }
+  .perf-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border-subtle); font-size: 12.5px; }
+  .perf-row:last-child { border-bottom: none; }
+  .streak-win  { color: var(--green); font-weight: 700; }
+  .streak-loss { color: var(--red);   font-weight: 700; }
   .acct-pos-sym { color: var(--accent); font-weight: 600; font-family: var(--mono); font-size: 12px; }
 
   .acct-total-bar {
@@ -872,7 +913,13 @@ _HTML = """<!DOCTYPE html>
       <button class="btn-eye" id="btn-eye" onclick="toggleValues()" title="Show/hide dollar amounts">👁</button>
     </div>
   </header>
+  <nav class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
+    <button class="tab-btn" onclick="switchTab('performance')">Performance</button>
+  </nav>
   <main>
+
+  <div class="tab-pane active" id="tab-dashboard">
 
     <!-- Token usage -->
     <div class="card card-full">
@@ -1021,6 +1068,30 @@ _HTML = """<!DOCTYPE html>
       <div class="log-tail" id="log-tail"><div class="empty">Waiting for log entries…</div></div>
     </div>
 
+  </div><!-- /tab-dashboard -->
+
+  <div class="tab-pane" id="tab-performance">
+
+    <!-- Performance Analytics -->
+    <div class="card card-full">
+      <div class="card-title">Overall Performance</div>
+      <div id="perf-container"><div class="empty">No closed trades yet — check back after first positions close.</div></div>
+    </div>
+
+    <!-- Per-symbol breakdown -->
+    <div class="card card-full">
+      <div class="card-title">By Symbol</div>
+      <div id="perf-symbols"><div class="empty">No data yet</div></div>
+    </div>
+
+    <!-- Confidence accuracy -->
+    <div class="card card-full">
+      <div class="card-title">AI Confidence Accuracy</div>
+      <div id="perf-confidence"><div class="empty">No data yet</div></div>
+    </div>
+
+  </div><!-- /tab-performance -->
+
   </main>
   <p class="timestamp" id="last-update" style="padding: 0 24px 16px;">Last update: —</p>
 </div>
@@ -1040,6 +1111,103 @@ _HTML = """<!DOCTYPE html>
 <script>
 let paused = false;
 let _equityGoal = 25000;
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.textContent.toLowerCase() === name));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
+}
+
+async function promotePosition(symbol, fromAccount) {
+  if (!confirm(`Sell ${symbol} from ${fromAccount} and re-buy on Agentic?`)) return;
+  const r = await fetch('/api/promote/' + symbol, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({from_account: fromAccount, to_account: 'agentic'})
+  });
+  const d = await r.json();
+  alert(d.status === 'queued' ? `Promotion queued for ${symbol}` : JSON.stringify(d));
+}
+
+function renderPerformance(perf) {
+  if (!perf || !perf.closed_trades) {
+    document.getElementById('perf-container').innerHTML = '<div class="empty">No closed trades yet</div>';
+    document.getElementById('perf-symbols').innerHTML = '<div class="empty">No data yet</div>';
+    document.getElementById('perf-confidence').innerHTML = '<div class="empty">No data yet</div>';
+    return;
+  }
+
+  const winRate = perf.win_rate != null ? (perf.win_rate * 100).toFixed(1) + '%' : '—';
+  const winColor = perf.win_rate >= 0.5 ? 'var(--green)' : 'var(--red)';
+  const streakCls = perf.streak_type === 'win' ? 'streak-win' : 'streak-loss';
+  const streakLabel = perf.current_streak
+    ? `${perf.current_streak} ${perf.streak_type} streak`
+    : '—';
+  const avgPnl = perf.avg_pnl_pct != null ? (perf.avg_pnl_pct >= 0 ? '+' : '') + perf.avg_pnl_pct.toFixed(2) + '%' : '—';
+  const avgPnlColor = (perf.avg_pnl_pct || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+  const holdStr = perf.avg_hold_hours != null ? perf.avg_hold_hours.toFixed(1) + 'h' : '—';
+
+  document.getElementById('perf-container').innerHTML = `
+    <div class="perf-grid">
+      <div class="perf-stat">
+        <div class="perf-stat-label">Win Rate</div>
+        <div class="perf-stat-value" style="color:${winColor}">${winRate}</div>
+        <div class="perf-stat-sub">${perf.closed_trades} closed trades</div>
+      </div>
+      <div class="perf-stat">
+        <div class="perf-stat-label">Avg P&L</div>
+        <div class="perf-stat-value" style="color:${avgPnlColor}">${avgPnl}</div>
+        <div class="perf-stat-sub">per trade</div>
+      </div>
+      <div class="perf-stat">
+        <div class="perf-stat-label">Streak</div>
+        <div class="perf-stat-value ${streakCls}">${perf.current_streak || 0}</div>
+        <div class="perf-stat-sub">${streakLabel}</div>
+      </div>
+      <div class="perf-stat">
+        <div class="perf-stat-label">Avg Hold</div>
+        <div class="perf-stat-value">${holdStr}</div>
+        <div class="perf-stat-sub">per position</div>
+      </div>
+      <div class="perf-stat">
+        <div class="perf-stat-label">Best Trade</div>
+        <div class="perf-stat-value" style="color:var(--green)">${perf.best_trade ? '+' + perf.best_trade.pnl_pct.toFixed(2) + '%' : '—'}</div>
+        <div class="perf-stat-sub">${perf.best_trade ? perf.best_trade.symbol + ' · ' + perf.best_trade.date : ''}</div>
+      </div>
+      <div class="perf-stat">
+        <div class="perf-stat-label">Worst Trade</div>
+        <div class="perf-stat-value" style="color:var(--red)">${perf.worst_trade ? perf.worst_trade.pnl_pct.toFixed(2) + '%' : '—'}</div>
+        <div class="perf-stat-sub">${perf.worst_trade ? perf.worst_trade.symbol + ' · ' + perf.worst_trade.date : ''}</div>
+      </div>
+    </div>`;
+
+  // By symbol
+  const symRows = Object.entries(perf.by_symbol || {}).map(([sym, s]) => {
+    const wr = (s.win_rate * 100).toFixed(0) + '%';
+    const avg = (s.avg_pnl_pct >= 0 ? '+' : '') + s.avg_pnl_pct.toFixed(2) + '%';
+    const wrColor = s.win_rate >= 0.5 ? 'var(--green)' : 'var(--red)';
+    const avgColor = s.avg_pnl_pct >= 0 ? 'var(--green)' : 'var(--red)';
+    return `<div class="perf-row">
+      <span style="font-family:var(--mono);font-weight:600">${sym}</span>
+      <span style="color:var(--muted)">${s.trades} trades</span>
+      <span style="color:${wrColor}">${wr} win rate</span>
+      <span style="color:${avgColor}">${avg} avg</span>
+    </div>`;
+  }).join('') || '<div class="empty">No data</div>';
+  document.getElementById('perf-symbols').innerHTML = symRows;
+
+  // Confidence accuracy
+  const confRows = Object.entries(perf.by_confidence || {}).map(([k, v]) => {
+    if (!v.trades) return '';
+    const wr = v.win_rate != null ? (v.win_rate * 100).toFixed(0) + '%' : '—';
+    const wrColor = (v.win_rate || 0) >= 0.5 ? 'var(--green)' : 'var(--red)';
+    return `<div class="perf-row">
+      <span>Confidence ${v.label}</span>
+      <span style="color:var(--muted)">${v.trades} trades</span>
+      <span style="color:${wrColor};font-weight:600">${wr} win rate</span>
+    </div>`;
+  }).join('') || '<div class="empty">No data</div>';
+  document.getElementById('perf-confidence').innerHTML = confRows;
+}
 let pendingCloseSymbol = null;
 let valuesHidden = true;
 let _nextScanAt = null;
@@ -1278,7 +1446,10 @@ function applyState(state) {
         <td class="txt-right">${fmtDollar(p.current_price)}</td>
         <td class="txt-right ${pnlClass(pct)}">${pct >= 0 ? '+' : ''}${fmt(pct)}%</td>
         <td class="txt-right muted">${fmtDollar(p.stop_loss_price)}</td>
-        <td class="txt-center"><button class="btn btn-danger" style="padding:5px 11px;font-size:11px;font-weight:700" onclick="confirmClose('${sym.replace(/\s*\[.*?\]/,'')}')">Close</button></td>
+        <td class="txt-center">
+          <button class="btn btn-danger" style="padding:5px 11px;font-size:11px;font-weight:700" onclick="confirmClose('${sym.replace(/\s*\[.*?\]/,'')}')">Close</button>
+          ${(p.account||'').toLowerCase()==='default' ? `<button class="btn-promote" onclick="promotePosition('${sym.replace(/\s*\[.*?\]/,'')}','default')" title="Sell here, re-buy on Agentic">Promote ↑</button>` : ''}
+        </td>
       </tr>`;
     }).join('');
   }
@@ -1362,6 +1533,7 @@ function applyState(state) {
   _updateCountdown();
 
   renderTokenUsage(state.token_usage);
+  renderPerformance(state.performance);
   renderFlashcards(state);
   buildChartTabs(state.signals);
   renderLogs(state.logs || []);

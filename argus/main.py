@@ -239,6 +239,7 @@ class Autopilot:
                 try:
                     self._market_session = get_market_session()
                     self._check_force_close()
+                    self._check_promotions()
                     self._poll_approvals()
                     if not self._paused:
                         self._tick()
@@ -561,6 +562,39 @@ class Autopilot:
             if symbol in positions:
                 self._execute_sell(acct, symbol, positions[symbol]["qty"], reason="force-close via dashboard")
 
+    def _check_promotions(self) -> None:
+        """Sell from Default account and re-buy on Agentic (promote position)."""
+        req = web_dashboard.get_promote_request()
+        if not req:
+            return
+        symbol = req["symbol"]
+        from_label = req.get("from_account", "default")
+        to_label   = req.get("to_account",   "agentic")
+
+        from_acct = next((a for a in self._accounts if a.label == from_label), None)
+        to_acct   = next((a for a in self._accounts if a.label == to_label),   None)
+        if not from_acct or not to_acct:
+            logger.warning("Promote: could not find accounts %s → %s", from_label, to_label)
+            return
+
+        positions = from_acct.broker.get_open_positions()
+        if symbol not in positions:
+            logger.warning("Promote: %s not found in %s positions", symbol, from_label)
+            return
+
+        pos   = positions[symbol]
+        price = from_acct.broker.get_price(symbol)
+        qty   = pos["qty"]
+        dollar_value = qty * price
+
+        logger.info("Promoting %s from %s → %s ($%.2f)", symbol, from_label, to_label, dollar_value)
+        # Step 1: sell on source account
+        self._execute_sell(from_acct, symbol, qty, reason=f"promote to {to_label}")
+        # Step 2: buy on target account
+        shares = to_acct.risk.position_size(dollar_value, price)
+        if shares > 0:
+            self._execute_buy(to_acct, symbol, shares, price, reason=f"promoted from {from_label}")
+
     # ── Dashboard state ──────────────────────────────────────────────────────
 
     def _update_dashboard(self, trading: bool = True) -> None:
@@ -664,6 +698,8 @@ class Autopilot:
             "token_usage": _token_summary(),
             # Goal tracking
             "equity_goal": self._cfg.equity_goal,
+            # Performance analytics
+            "performance": self._flashcards.performance(),
         }
         self._terminal.update(state)
         web_dashboard.push_state(state)

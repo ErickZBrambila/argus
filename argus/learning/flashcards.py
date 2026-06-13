@@ -216,3 +216,102 @@ class FlashcardStore:
             "best_pnl_pct": max(pnls),
             "worst_pnl_pct": min(pnls),
         }
+
+    def performance(self) -> dict:
+        """Full performance analytics for the dashboard."""
+        with self._lock:
+            all_cards = list(self._cards.values())
+
+        closed = [c for c in all_cards if c.pnl_pct is not None]
+        open_  = [c for c in all_cards if c.pnl_pct is None]
+
+        if not closed:
+            return {
+                "total_trades": len(all_cards),
+                "open_trades": len(open_),
+                "closed_trades": 0,
+                "win_rate": None,
+                "avg_pnl_pct": None,
+                "total_pnl_pct": None,
+                "best_trade": None,
+                "worst_trade": None,
+                "current_streak": 0,
+                "streak_type": None,
+                "avg_hold_hours": None,
+                "by_symbol": {},
+                "by_confidence": {},
+            }
+
+        pnls  = [c.pnl_pct for c in closed]
+        wins  = [c for c in closed if (c.pnl_pct or 0) > 0]
+        best  = max(closed, key=lambda c: c.pnl_pct or 0)
+        worst = min(closed, key=lambda c: c.pnl_pct or 0)
+
+        # Current streak — walk back through time-sorted closed trades
+        by_time = sorted(closed, key=lambda c: c.timestamp)
+        streak, streak_type = 0, None
+        if by_time:
+            streak_type = "win" if (by_time[-1].pnl_pct or 0) > 0 else "loss"
+            for card in reversed(by_time):
+                is_win = (card.pnl_pct or 0) > 0
+                if (streak_type == "win") == is_win:
+                    streak += 1
+                else:
+                    break
+
+        # Per-symbol breakdown
+        by_symbol: dict[str, dict] = {}
+        for c in closed:
+            s = by_symbol.setdefault(c.symbol, {"trades": 0, "wins": 0, "pnl_sum": 0.0})
+            s["trades"] += 1
+            s["pnl_sum"] += c.pnl_pct or 0
+            if (c.pnl_pct or 0) > 0:
+                s["wins"] += 1
+        by_symbol_out = {
+            sym: {
+                "trades": v["trades"],
+                "wins": v["wins"],
+                "win_rate": round(v["wins"] / v["trades"], 3),
+                "avg_pnl_pct": round(v["pnl_sum"] / v["trades"], 2),
+            }
+            for sym, v in sorted(by_symbol.items())
+        }
+
+        # Confidence accuracy buckets (decision_confidence)
+        buckets: dict[str, dict] = {
+            "high":   {"label": "≥70%", "trades": 0, "wins": 0},
+            "medium": {"label": "50–69%", "trades": 0, "wins": 0},
+            "low":    {"label": "<50%", "trades": 0, "wins": 0},
+        }
+        for c in closed:
+            conf = c.decision_confidence or 0
+            key = "high" if conf >= 0.7 else "medium" if conf >= 0.5 else "low"
+            buckets[key]["trades"] += 1
+            if (c.pnl_pct or 0) > 0:
+                buckets[key]["wins"] += 1
+        by_conf = {
+            k: {
+                "label": v["label"],
+                "trades": v["trades"],
+                "win_rate": round(v["wins"] / v["trades"], 3) if v["trades"] else None,
+            }
+            for k, v in buckets.items()
+        }
+
+        hold_hours = [c.hold_duration_hours for c in closed if c.hold_duration_hours]
+
+        return {
+            "total_trades": len(all_cards),
+            "open_trades": len(open_),
+            "closed_trades": len(closed),
+            "win_rate": round(len(wins) / len(closed), 3),
+            "avg_pnl_pct": round(sum(pnls) / len(pnls), 2),
+            "total_pnl_pct": round(sum(pnls), 2),
+            "best_trade": {"symbol": best.symbol, "pnl_pct": round(best.pnl_pct, 2), "date": best.timestamp[:10]},
+            "worst_trade": {"symbol": worst.symbol, "pnl_pct": round(worst.pnl_pct, 2), "date": worst.timestamp[:10]},
+            "current_streak": streak,
+            "streak_type": streak_type,
+            "avg_hold_hours": round(sum(hold_hours) / len(hold_hours), 1) if hold_hours else None,
+            "by_symbol": by_symbol_out,
+            "by_confidence": by_conf,
+        }
