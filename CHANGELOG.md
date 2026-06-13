@@ -8,6 +8,20 @@ Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH
 
 ---
 
+## [0.4.1] — 2026-06-13
+
+### Added
+- **Branding** — neon hexagon-eye logo, favicon (16×16, 32×32), Apple touch icon (180×180), and GitHub banner; FastAPI serves assets via `/static`
+- **`argus-restart` alias** — full clean restart in one command: kills process + destroys tmux session + starts fresh
+
+### Fixed
+- **Terminal countdown frozen** — Rich `Live` was repainting the same panel object; wrapped in `_LiveRenderable` so `_render()` is called on every 1 s refresh and the countdown ticks correctly
+
+### Changed
+- **Web UI polish pass** — typography hierarchy, card spacing, semi-transparent badge borders, tabular-nums on all dollar values, button hover glow + press animation, log panel near-black background, flashcard indicator grid, modal backdrop blur
+
+---
+
 ## [0.4.0] — 2026-06-13
 
 ### Added

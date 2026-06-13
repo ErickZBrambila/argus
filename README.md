@@ -2,7 +2,7 @@
 
 ![Argus](argus/dashboard/static/banner.png)
 
-![version](https://img.shields.io/badge/version-v0.4.0-blue)
+![version](https://img.shields.io/badge/version-v0.4.1-blue)
 
 ## 1. What is Argus?
 
@@ -312,7 +312,24 @@ argus-setup --clear   # remove all Argus secrets from keychain
 
 ---
 
-## 11. CLI Commands
+## 11. Branding Assets
+
+Static files are served by FastAPI at `/static` and live in `argus/dashboard/static/`.
+
+| File | Size | Used in |
+|------|------|---------|
+| `icon.png` | 1024×1024 | Source for all derivatives |
+| `favicon-32x32.png` | 32×32 | Browser tab |
+| `favicon-16x16.png` | 16×16 | Browser tab (small) |
+| `apple-touch-icon.png` | 180×180 | Mobile bookmark |
+| `logo-horizontal.png` | 2112×496 | Reference horizontal lockup |
+| `banner.png` | 1456×720 | README / GitHub social preview |
+
+The dashboard header renders the icon inline with the "ARGUS" wordmark using `mix-blend-mode: screen` so the transparent PNG background vanishes against the dark surface.
+
+---
+
+## 12. CLI Commands
 
 These shell functions are defined in `~/.zshrc` and require `ARGUS_DIR` to point to the project root.
 
@@ -321,7 +338,7 @@ These shell functions are defined in `~/.zshrc` and require `ARGUS_DIR` to point
 | `argus-tmux` | **Start here.** Creates (or re-attaches to) a `tmux` session named `argus` running the full terminal UI and web dashboard. Re-run from any terminal to re-attach. |
 | `argus-start` | Foreground start with terminal UI. Exits when the terminal closes. |
 | `argus-bg` | Background start (no terminal UI). Logs to `~/argus.log`. Writes PID to `~/argus.pid`. |
-| `argus-restart` | Stops Argus and immediately restarts it in tmux. Equivalent to `argus-stop && sleep 1 && argus-tmux`. |
+| `argus-restart` | **Full clean restart.** Kills the process, destroys the tmux session, and starts a fresh one. Handles being run from inside tmux via `switch-client`. |
 | `argus-stop` | Graceful shutdown. Kills by PID file, port 8000 process, and process name — works regardless of how Argus was started. |
 | `argus-status` | Checks if Argus is running by polling `/api/status`. Prints equity and P&L if up, or a start instruction if down. |
 | `argus-log` | `tail -f ~/argus.log` — follows the live log file for `argus-bg` and `argus-tmux` runs. |
@@ -331,7 +348,7 @@ These shell functions are defined in `~/.zshrc` and require `ARGUS_DIR` to point
 
 ---
 
-## 12. Web Dashboard
+## 13. Web Dashboard
 
 The dashboard is a single-page app served by FastAPI at `http://127.0.0.1:8000`. State is pushed from the main loop to the browser via **Server-Sent Events** (`/events`) on every tick, so all panels update live without client-side polling. On first connect the browser receives a snapshot of the latest state immediately.
 
@@ -377,7 +394,7 @@ Real-time log tail (last 100 entries) from the in-memory ring buffer. Color-code
 
 ---
 
-## 13. Flashcard Learning System
+## 14. Flashcard Learning System
 
 Every executed trade (buy or sell) produces a flashcard. Cards are stored in `argus_flashcards.jsonl` (one JSON object per line) in the project root. The `FlashcardStore` loads all cards into memory at startup and flushes the full file to disk on every write.
 
@@ -426,7 +443,7 @@ Look for patterns in: which `bb_position` + `signal_composite` combinations win 
 
 ---
 
-## 14. Paper Mode vs Live
+## 15. Paper Mode vs Live
 
 ### Paper Mode (`PAPER_TRADE=true`)
 
@@ -460,7 +477,7 @@ Before setting `PAPER_TRADE=false`, verify all of the following in paper mode:
 
 ---
 
-## 15. Directory Structure
+## 16. Directory Structure
 
 ```
 argus/
