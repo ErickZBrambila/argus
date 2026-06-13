@@ -551,7 +551,7 @@ _HTML = """<!DOCTYPE html>
 <div class="app">
   <header>
     <span class="logo">
-      <img src="/static/logo-horizontal.png" alt="Argus" style="height:36px;vertical-align:middle;margin-right:8px;">
+      <img src="/static/favicon-32x32.png" alt="" style="height:22px;vertical-align:middle;margin-right:6px;image-rendering:crisp-edges;">ARGUS
       <span style="font-size:11px;font-weight:400;color:var(--muted)" id="version-badge"></span>
     </span>
     <div style="display:flex;align-items:center;gap:10px">
