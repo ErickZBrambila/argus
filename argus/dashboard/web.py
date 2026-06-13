@@ -75,6 +75,11 @@ app.add_middleware(
 def push_state(state: dict) -> None:
     """Called by the main loop to push new state to all SSE clients."""
     global _state
+    try:
+        from argus.dashboard.log_buffer import get_recent
+        state = {**state, "logs": get_recent(100)}
+    except Exception:
+        pass
     _state = state
     try:
         _sse_queue.put_nowait(json.dumps(state, default=str))
@@ -106,6 +111,15 @@ async def get_status() -> dict:
         "day_trades": _state.get("day_trades", 0),
         "timestamp": datetime.datetime.utcnow().isoformat(),
     }
+
+
+@app.get("/api/logs")
+async def get_logs(n: int = 100) -> dict:
+    try:
+        from argus.dashboard.log_buffer import get_recent
+        return {"logs": get_recent(n)}
+    except Exception:
+        return {"logs": []}
 
 
 @app.get("/api/positions")
@@ -355,6 +369,28 @@ _HTML = """<!DOCTYPE html>
   /* Empty state */
   .empty { text-align: center; color: var(--muted); padding: 32px 0; font-size: 13px; }
 
+  /* Log tail */
+  .log-tail { background: #0d1117; border: 1px solid var(--border); border-radius: var(--radius); font-family: "SF Mono","Fira Code","Cascadia Code",monospace; font-size: 11.5px; line-height: 1.6; overflow-y: auto; max-height: 320px; padding: 10px 12px; }
+  .log-line { display: flex; gap: 10px; padding: 1px 0; border-bottom: 1px solid rgba(48,54,61,.4); }
+  .log-line:last-child { border-bottom: none; }
+  .log-ts   { color: var(--muted); flex-shrink: 0; }
+  .log-lvl  { flex-shrink: 0; width: 28px; font-weight: 700; }
+  .log-name { color: #58a6ff; flex-shrink: 0; max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .log-msg  { color: var(--text); word-break: break-word; }
+  .log-lvl-INF { color: var(--muted); }
+  .log-lvl-WRN { color: var(--yellow); }
+  .log-lvl-ERR { color: var(--red); }
+  .log-lvl-CRT { color: var(--red); font-weight: 900; }
+  .log-lvl-DBG { color: #444c56; }
+  .log-line-WRN .log-msg { color: var(--yellow); }
+  .log-line-ERR .log-msg { color: var(--red); }
+  .log-line-CRT .log-msg { color: var(--red); }
+  .log-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .log-filter-btns { display: flex; gap: 4px; }
+  .log-filter-btn { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: none; color: var(--muted); }
+  .log-filter-btn.active { background: var(--surface2); color: var(--text); border-color: var(--accent); }
+  .log-autoscroll { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 5px; cursor: pointer; }
+
   /* Per-account panels */
   .acct-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
   .acct-panel { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
@@ -567,6 +603,23 @@ _HTML = """<!DOCTYPE html>
       <div class="card-title">Decision Flashcards <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">— click any card to see reasoning</span></div>
       <div class="fc-summary" id="fc-summary"></div>
       <div class="fc-grid" id="fc-grid"><div class="empty">No trades recorded yet</div></div>
+    </div>
+
+    <!-- Log tail -->
+    <div class="card card-full">
+      <div class="card-title">Agent Log</div>
+      <div class="log-toolbar">
+        <div class="log-filter-btns">
+          <button class="log-filter-btn active" onclick="setLogFilter('ALL')">All</button>
+          <button class="log-filter-btn" onclick="setLogFilter('INF')">Info</button>
+          <button class="log-filter-btn" onclick="setLogFilter('WRN')">Warn</button>
+          <button class="log-filter-btn" onclick="setLogFilter('ERR')">Error</button>
+        </div>
+        <label class="log-autoscroll">
+          <input type="checkbox" id="log-autoscroll" checked> Auto-scroll
+        </label>
+      </div>
+      <div class="log-tail" id="log-tail"><div class="empty">Waiting for log entries…</div></div>
     </div>
 
   </main>
@@ -803,6 +856,7 @@ function applyState(state) {
   window._flashcards = state.flashcards || [];
   renderFlashcards(state);
   buildChartTabs(state.signals);
+  renderLogs(state.logs || []);
   // Refresh markers if chart is showing (new closed trades may have arrived)
   if (_chartSymbol && _lastCandles[_chartSymbol]) {
     placeTradeMarkers(_chartSymbol, _lastCandles[_chartSymbol]);
@@ -912,13 +966,62 @@ async function togglePause() {
 }
 
 async function fetchAll() {
-  const [status, positions, signals, trades] = await Promise.all([
+  const [status, positions, signals, trades, logs] = await Promise.all([
     fetch('/api/status').then(r=>r.json()),
     fetch('/api/positions').then(r=>r.json()),
     fetch('/api/signals').then(r=>r.json()),
     fetch('/api/trades').then(r=>r.json()),
+    fetch('/api/logs?n=100').then(r=>r.json()),
   ]);
-  applyState({...status, ...positions, ...signals, ...trades});
+  applyState({...status, ...positions, ...signals, ...trades, logs: logs.logs || []});
+}
+
+// ── Log tail ──────────────────────────────────────────────────────────────────
+let _logFilter = 'ALL';
+const _LEVEL_SHORT = { DEBUG: 'DBG', INFO: 'INF', WARNING: 'WRN', ERROR: 'ERR', CRITICAL: 'CRT' };
+
+function setLogFilter(f) {
+  _logFilter = f;
+  document.querySelectorAll('.log-filter-btn').forEach(b =>
+    b.classList.toggle('active', b.textContent.trim() === f ||
+      (f === 'ALL' && b.textContent.trim() === 'All') ||
+      (f === 'INF' && b.textContent.trim() === 'Info') ||
+      (f === 'WRN' && b.textContent.trim() === 'Warn') ||
+      (f === 'ERR' && b.textContent.trim() === 'Error')));
+  // Re-render from cached entries
+  if (window._lastLogs) renderLogs(window._lastLogs);
+}
+
+function renderLogs(entries) {
+  window._lastLogs = entries;
+  const box = document.getElementById('log-tail');
+  if (!entries || !entries.length) {
+    box.innerHTML = '<div class="empty">No log entries yet</div>';
+    return;
+  }
+  const filtered = _logFilter === 'ALL' ? entries : entries.filter(e => {
+    const lvl = _LEVEL_SHORT[e.level] || e.level;
+    return lvl === _logFilter;
+  });
+  if (!filtered.length) {
+    box.innerHTML = '<div class="empty">No entries at this level</div>';
+    return;
+  }
+  box.innerHTML = filtered.map(e => {
+    const lvl = _LEVEL_SHORT[e.level] || e.level;
+    return `<div class="log-line log-line-${lvl}">
+      <span class="log-ts">${e.ts}</span>
+      <span class="log-lvl log-lvl-${lvl}">${lvl}</span>
+      <span class="log-name">${e.name || ''}</span>
+      <span class="log-msg">${escHtml(e.msg)}</span>
+    </div>`;
+  }).join('');
+  const auto = document.getElementById('log-autoscroll');
+  if (auto && auto.checked) box.scrollTop = box.scrollHeight;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 function confirmClose(symbol) {

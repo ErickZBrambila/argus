@@ -666,6 +666,7 @@ class Autopilot:
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def _setup_logging() -> None:
+    from argus.dashboard.log_buffer import install as _install_log_buffer
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
         level=getattr(logging, log_level, logging.INFO),
@@ -675,6 +676,7 @@ def _setup_logging() -> None:
             logging.FileHandler("argus.log", mode="a"),
         ],
     )
+    _install_log_buffer()
 
 
 def main() -> None:

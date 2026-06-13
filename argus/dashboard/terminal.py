@@ -94,6 +94,7 @@ class TerminalDashboard:
             layout.add_row(_build_legacy_panel(s))
 
         layout.add_row(signals_table)
+        layout.add_row(_build_log_panel())
 
         return Panel(layout, border_style="cyan", padding=(0, 1))
 
@@ -208,6 +209,45 @@ def _build_legacy_panel(s: dict) -> Table:
     stats.add_row("Trades",     Text(str(s.get("trade_count", 0))))
     stats.add_row("Day trades", Text(f"{s.get('day_trades', 0)} / 3"))
     return stats
+
+
+def _build_log_panel() -> Panel:
+    try:
+        from argus.dashboard.log_buffer import get_recent
+        entries = get_recent(12)
+    except Exception:
+        entries = []
+
+    _LEVEL_STYLES = {
+        "DEBUG":    "dim",
+        "INFO":     "white",
+        "WARNING":  "yellow",
+        "ERROR":    "bold red",
+        "CRITICAL": "bold white on red",
+    }
+
+    t = Table.grid(expand=True, padding=(0, 1))
+    t.add_column(style="dim", no_wrap=True, width=8)    # time
+    t.add_column(no_wrap=True, width=4)                  # level
+    t.add_column(style="#58a6ff", no_wrap=True, width=12)# name
+    t.add_column()                                        # message
+
+    if not entries:
+        t.add_row("", "", "", Text("No log entries yet", style="dim"))
+    else:
+        for e in entries:
+            lvl   = e.get("level", "INFO")
+            style = _LEVEL_STYLES.get(lvl, "white")
+            short = {"DEBUG": "DBG", "INFO": "INF", "WARNING": "WRN",
+                     "ERROR": "ERR", "CRITICAL": "CRT"}.get(lvl, lvl[:3])
+            t.add_row(
+                e.get("ts", ""),
+                Text(short, style=style),
+                e.get("name", "")[:12],
+                Text(e.get("msg", ""), style=style, overflow="fold"),
+            )
+
+    return Panel(t, title="[dim]Log[/dim]", border_style="dim", padding=(0, 1))
 
 
 def _empty_state() -> dict:
