@@ -178,7 +178,7 @@ def _pending_approval(tick):
                 "dollar_amount": 1570.00, "risk_level": "medium",
                 "confidence": 0.58,
                 "reasoning": "MACD histogram turning positive after extended bearish period. RSI at 42 with room to run. Position sizing within limits.",
-                "account_label": "default", "account_number": "464992270",
+                "account_label": "default", "account_number": "XXXXXXXXX",
                 "signal": "bullish", "signal_confidence": 0.61,
                 "queued_at": datetime.datetime.utcnow().isoformat(),
             }

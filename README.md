@@ -48,7 +48,7 @@ The main loop (`Autopilot`) runs on a configurable interval (default 5 min). On 
 
 ```mermaid
 sequenceDiagram
-    participant Loop as Main Loop
+    participant ML as Main Loop
     participant SE as Signal Engine
     participant DE as Decision Engine
     participant C as Claude
@@ -57,29 +57,29 @@ sequenceDiagram
     participant B as Broker
     participant FC as Flashcards
 
-    Loop->>SE: compute(symbol)
-    SE-->>Loop: SignalResult (RSI, MACD, BB, SMA, EMA, composite, confidence)
-    Loop->>DE: decide(signal, equity, positions, daily_pnl_pct)
+    ML->>SE: compute(symbol)
+    SE-->>ML: SignalResult (RSI, MACD, BB, SMA, EMA, composite, confidence)
+    ML->>DE: decide(signal, equity, positions, daily_pnl_pct)
     DE->>C: decide(symbol, prompt) [thread 1]
     DE->>G: decide(symbol, prompt) [thread 2]
     C-->>DE: TradeDecision (action, confidence, reasoning)
     G-->>DE: TradeDecision (action, confidence, reasoning)
     DE->>DE: _consensus() → merged TradeDecision
     DE->>DE: classify_risk(signal_conf, decision_conf, consensus)
-    DE-->>Loop: TradeDecision (action, risk_level, confidence)
-    Loop->>RM: approve_buy(symbol, equity, positions, day_trades)
-    RM-->>Loop: RiskDecision (allowed, dollar_amount)
-    alt auto_trade OR risk < threshold
-        Loop->>B: buy(symbol, dollar_amount)
-        B-->>Loop: OrderResult (filled, price, qty)
-        Loop->>FC: record_trade(trade_id, signal, decision, entry_price)
+    DE-->>ML: TradeDecision (action, risk_level, confidence)
+    ML->>RM: approve_buy(symbol, equity, positions, day_trades)
+    RM-->>ML: RiskDecision (allowed, dollar_amount)
+    alt auto_trade OR risk below threshold
+        ML->>B: buy(symbol, dollar_amount)
+        B-->>ML: OrderResult (filled, price, qty)
+        ML->>FC: record_trade(trade_id, signal, decision, entry_price)
     else needs approval
-        Loop->>WebDash: queue_approval(trade_id, trade_info)
-        WebDash-->>User: yellow approval card
-        User-->>WebDash: approve / deny
-        WebDash-->>Loop: get_approval_decision()
-        Loop->>B: buy(symbol, dollar_amount)
-        Loop->>FC: record_trade(...)
+        ML->>DE: queue_approval(trade_id, trade_info)
+        DE-->>FC: yellow approval card shown
+        FC-->>DE: approve / deny
+        DE-->>ML: get_approval_decision()
+        ML->>B: buy(symbol, dollar_amount)
+        ML->>FC: record_trade(...)
     end
     Note over B,FC: On SELL or stop-loss: FC.close_trade(exit_price, outcome)
 ```
@@ -141,10 +141,10 @@ On the **Default account**, trades with risk ≥ `APPROVAL_THRESHOLD` (default: 
 
 Argus manages two accounts simultaneously. Each account has its own `RobinhoodBroker` instance, its own `RiskManager` (separate drawdown/PDT tracking), and its own pending approvals dict.
 
-| Account | Number | Approximate Equity | Mode |
-|---------|--------|--------------------|------|
-| Agentic | 462038597 | ~$500 | Fully automated (`auto_trade=True`) |
-| Default | 464992270 | ~$15,700 | Approval required for `medium`+ risk |
+| Account | Variable | Mode |
+|---------|----------|------|
+| Agentic | `AGENTIC_ACCOUNT_NUMBER` | Fully automated (`auto_trade=True`) |
+| Default | `DEFAULT_ACCOUNT_NUMBER` | Approval required for `medium`+ risk |
 
 ```mermaid
 graph LR
