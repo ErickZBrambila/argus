@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     # ── Non-secret config (kept in .env / env vars) ─────────────────────────
     robinhood_username: str = Field(..., alias="ROBINHOOD_USERNAME")
     paper_trade: bool = Field(True, alias="PAPER_TRADE")
+
+    # Account numbers — set in .env (not secrets, just IDs)
+    agentic_account_number: str = Field("", alias="AGENTIC_ACCOUNT_NUMBER")
+    default_account_number: str = Field("", alias="DEFAULT_ACCOUNT_NUMBER")
+    # Minimum risk level that requires approval on the default account ("medium" or "high")
+    approval_threshold: str = Field("medium", alias="APPROVAL_THRESHOLD")
     watchlist_raw: str = Field("AAPL,TSLA,NVDA,BTC,ETH", alias="WATCHLIST")
 
     # Risk parameters

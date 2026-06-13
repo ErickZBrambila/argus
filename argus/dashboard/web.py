@@ -6,6 +6,7 @@ import asyncio
 import datetime
 import json
 import logging
+import threading
 from typing import AsyncGenerator
 
 import uvicorn
@@ -19,6 +20,48 @@ logger = logging.getLogger(__name__)
 _state: dict = {}
 _paused: bool = False
 _sse_queue: asyncio.Queue = asyncio.Queue()
+
+# Chart data source — registered by main loop
+_chart_source_fn = None   # callable(symbol: str) -> list[dict]
+
+
+def register_chart_source(fn) -> None:
+    global _chart_source_fn
+    _chart_source_fn = fn
+
+# ── Approval queue (thread-safe: accessed by both sync main loop and async FastAPI) ──
+_approval_lock = threading.Lock()
+_pending_approvals: dict[str, dict] = {}   # trade_id → trade info
+_approval_decisions: dict[str, str] = {}   # trade_id → "approved" | "denied"
+
+
+def queue_approval(trade_id: str, trade_info: dict) -> None:
+    with _approval_lock:
+        _pending_approvals[trade_id] = {**trade_info, "queued_at": datetime.datetime.utcnow().isoformat()}
+    _push_approvals_state()
+
+
+def get_approval_decision(trade_id: str) -> str | None:
+    """Returns 'approved', 'denied', or None if no decision yet."""
+    with _approval_lock:
+        return _approval_decisions.get(trade_id)
+
+
+def clear_approval(trade_id: str) -> None:
+    with _approval_lock:
+        _pending_approvals.pop(trade_id, None)
+        _approval_decisions.pop(trade_id, None)
+    _push_approvals_state()
+
+
+def _push_approvals_state() -> None:
+    with _approval_lock:
+        approvals = dict(_pending_approvals)
+    _state["pending_approvals"] = approvals
+    try:
+        _sse_queue.put_nowait(json.dumps(_state, default=str))
+    except asyncio.QueueFull:
+        pass
 
 app = FastAPI(title="Argus Dashboard", docs_url=None, redoc_url=None)
 app.add_middleware(
@@ -114,6 +157,72 @@ def get_force_close_symbol() -> str | None:
         return _force_close_queue.get_nowait()
     except asyncio.QueueEmpty:
         return None
+
+
+@app.get("/api/chart/{symbol}")
+async def get_chart(symbol: str) -> dict:
+    symbol = symbol.upper().strip()
+    if _chart_source_fn is None:
+        return {"candles": [], "symbol": symbol}
+    try:
+        raw = await asyncio.get_event_loop().run_in_executor(None, _chart_source_fn, symbol)
+        candles = []
+        for bar in (raw or []):
+            try:
+                ts = bar.get("begins_at") or bar.get("timestamp") or ""
+                import datetime as _dt
+                if isinstance(ts, str) and ts:
+                    t = int(_dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+                else:
+                    continue
+                candles.append({
+                    "time": t,
+                    "open":  float(bar.get("open_price")  or bar.get("open")  or 0),
+                    "high":  float(bar.get("high_price")  or bar.get("high")  or 0),
+                    "low":   float(bar.get("low_price")   or bar.get("low")   or 0),
+                    "close": float(bar.get("close_price") or bar.get("close") or 0),
+                })
+            except Exception:
+                pass
+        return {"candles": candles, "symbol": symbol}
+    except Exception as exc:
+        logger.warning("Chart data error for %s: %s", symbol, exc)
+        return {"candles": [], "symbol": symbol}
+
+
+@app.get("/api/flashcards")
+async def get_flashcards() -> dict:
+    cards = _state.get("flashcards", [])
+    summary = _state.get("flashcard_summary", {})
+    return {"flashcards": cards, "summary": summary}
+
+
+@app.get("/api/approvals")
+async def get_approvals() -> dict:
+    with _approval_lock:
+        return {"approvals": dict(_pending_approvals)}
+
+
+@app.post("/api/approve/{trade_id}")
+async def approve_trade(trade_id: str) -> dict:
+    with _approval_lock:
+        if trade_id not in _pending_approvals:
+            raise HTTPException(status_code=404, detail="Trade not found or already decided")
+        _approval_decisions[trade_id] = "approved"
+    logger.info("Trade %s approved via dashboard", trade_id)
+    _push_approvals_state()
+    return {"status": "approved", "trade_id": trade_id}
+
+
+@app.post("/api/deny/{trade_id}")
+async def deny_trade(trade_id: str) -> dict:
+    with _approval_lock:
+        if trade_id not in _pending_approvals:
+            raise HTTPException(status_code=404, detail="Trade not found or already decided")
+        _approval_decisions[trade_id] = "denied"
+    logger.info("Trade %s denied via dashboard", trade_id)
+    _push_approvals_state()
+    return {"status": "denied", "trade_id": trade_id}
 
 
 # ── SSE stream ────────────────────────────────────────────────────────────────
@@ -242,7 +351,60 @@ _HTML = """<!DOCTYPE html>
 
   /* Empty state */
   .empty { text-align: center; color: var(--muted); padding: 32px 0; font-size: 13px; }
+
+  /* Approval queue */
+  .approval-card { border-color: var(--yellow); }
+  .approval-item { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 10px; background: var(--surface2); }
+  .approval-item:last-child { margin-bottom: 0; }
+  .approval-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .approval-symbol { font-size: 16px; font-weight: 700; color: var(--accent); }
+  .pill-risk-low    { background: rgba(63,185,80,.15);  color: var(--green); }
+  .pill-risk-medium { background: rgba(251,191,36,.15); color: var(--yellow); }
+  .pill-risk-high   { background: rgba(248,81,73,.15);  color: var(--red); }
+  .approval-reasoning { font-size: 12px; color: var(--muted); margin: 6px 0 10px; line-height: 1.5; }
+  .approval-meta { font-size: 11px; color: var(--text-dim); margin-bottom: 10px; }
+  .approval-actions { display: flex; gap: 8px; }
+  #approvals-section { display: none; }
+  #approvals-section.has-items { display: block; }
+
+  /* Flashcards */
+  .fc-summary { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+  .fc-stat { display: flex; flex-direction: column; gap: 2px; }
+  .fc-stat-val { font-size: 18px; font-weight: 700; }
+  .fc-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+  .fc { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; cursor: pointer; transition: border-color .15s; }
+  .fc:hover { border-color: var(--accent); }
+  .fc.fc-win  { border-left: 3px solid var(--green); }
+  .fc.fc-loss { border-left: 3px solid var(--red); }
+  .fc.fc-open { border-left: 3px solid var(--yellow); }
+  .fc-front { padding: 12px 14px; background: var(--surface2); }
+  .fc-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .fc-symbol { font-size: 15px; font-weight: 700; color: var(--accent); }
+  .fc-badges { display: flex; gap: 5px; align-items: center; }
+  .fc-indicators { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+  .fc-ind-val { color: var(--text); font-weight: 600; font-family: "SF Mono","Fira Code",monospace; }
+  .fc-outcome { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+  .fc-back { padding: 10px 14px; background: var(--surface); border-top: 1px solid var(--border); display: none; }
+  .fc.expanded .fc-back { display: block; }
+  .fc-reasoning { font-size: 12px; color: var(--muted); line-height: 1.55; margin-bottom: 6px; }
+  .fc-meta { font-size: 11px; color: var(--text-dim); }
+  .pill-win  { background: rgba(63,185,80,.15);  color: var(--green); }
+  .pill-loss { background: rgba(248,81,73,.15);  color: var(--red); }
+  .pill-open { background: rgba(251,191,36,.15); color: var(--yellow); }
+  .pill-buy  { background: rgba(63,185,80,.15);  color: var(--green); }
+  .pill-sell { background: rgba(248,81,73,.15);  color: var(--red); }
+
+  /* Price chart */
+  .chart-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
+  .chart-tab { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: none; color: var(--muted); transition: all .15s; }
+  .chart-tab:hover { border-color: var(--accent); color: var(--accent); }
+  .chart-tab.active { background: var(--accent); color: #000; border-color: var(--accent); }
+  #price-chart { width: 100%; height: 320px; }
+  .chart-legend { display: flex; gap: 16px; margin-top: 8px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
 </style>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 <div class="app">
@@ -282,6 +444,24 @@ _HTML = """<!DOCTYPE html>
         <button class="btn btn-warning" id="btn-pause" onclick="togglePause()">⏸ Pause</button>
         <button class="btn btn-ghost" id="btn-refresh" onclick="fetchAll()">↻ Refresh</button>
       </div>
+    </div>
+
+    <!-- Price chart -->
+    <div class="card card-full">
+      <div class="card-title">Price Chart</div>
+      <div class="chart-tabs" id="chart-tabs"></div>
+      <div id="price-chart"></div>
+      <div class="chart-legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#00D4AA"></div> Price</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#3fb950"></div> BUY trade</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#f85149"></div> SELL / stop-loss</div>
+      </div>
+    </div>
+
+    <!-- Pending approvals -->
+    <div class="card card-full approval-card" id="approvals-section">
+      <div class="card-title" style="color:var(--yellow)">⚠ Pending Approval — Default Account</div>
+      <div id="approvals-list"></div>
     </div>
 
     <!-- Open positions -->
@@ -341,6 +521,13 @@ _HTML = """<!DOCTYPE html>
           <tbody id="trades-body"></tbody>
         </table>
       </div>
+    </div>
+
+    <!-- Flashcards -->
+    <div class="card card-full">
+      <div class="card-title">Decision Flashcards <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">— click any card to see reasoning</span></div>
+      <div class="fc-summary" id="fc-summary"></div>
+      <div class="fc-grid" id="fc-grid"><div class="empty">No trades recorded yet</div></div>
     </div>
 
   </main>
@@ -466,8 +653,126 @@ function applyState(state) {
     }).join('');
   }
 
+  // Pending approvals
+  const approvals = state.pending_approvals || {};
+  const approvalIds = Object.keys(approvals);
+  const approvalSection = document.getElementById('approvals-section');
+  const approvalList = document.getElementById('approvals-list');
+  if (approvalIds.length) {
+    approvalSection.classList.add('has-items');
+    approvalList.innerHTML = approvalIds.map(id => {
+      const a = approvals[id];
+      const riskCls = `pill-risk-${(a.risk_level||'medium').toLowerCase()}`;
+      const side = a.action || 'BUY';
+      return `<div class="approval-item">
+        <div class="approval-header">
+          <span class="approval-symbol">${side} ${a.symbol}</span>
+          <span class="pill ${riskCls}">${(a.risk_level||'medium').toUpperCase()} RISK</span>
+        </div>
+        <div class="approval-meta">
+          ${fmtDollar(a.dollar_amount)} · Confidence ${fmt((a.confidence||0)*100,0)}% · ${a.account_label||'Default'}
+        </div>
+        <div class="approval-reasoning">${a.reasoning||''}</div>
+        <div class="approval-actions">
+          <button class="btn btn-primary" onclick="decideApproval('${id}','approve')">✓ Approve</button>
+          <button class="btn btn-danger"  onclick="decideApproval('${id}','deny')">✗ Deny</button>
+        </div>
+      </div>`;
+    }).join('');
+  } else {
+    approvalSection.classList.remove('has-items');
+    approvalList.innerHTML = '';
+  }
+
+  // Cache flashcards globally for chart markers, then render
+  window._flashcards = state.flashcards || [];
+  renderFlashcards(state);
+  buildChartTabs(state.signals);
+  // Refresh markers if chart is showing (new closed trades may have arrived)
+  if (_chartSymbol && _lastCandles[_chartSymbol]) {
+    placeTradeMarkers(_chartSymbol, _lastCandles[_chartSymbol]);
+  }
+
   document.getElementById('last-update').textContent = 'Last update: ' + new Date().toLocaleTimeString();
   document.getElementById('btn-pause').textContent = (state.paused || paused) ? '▶ Resume' : '⏸ Pause';
+}
+
+async function decideApproval(tradeId, decision) {
+  await fetch(`/api/${decision}/${encodeURIComponent(tradeId)}`, {method:'POST'});
+}
+
+function renderFlashcards(state) {
+  const cards = state.flashcards || [];
+  const summary = state.flashcard_summary || {};
+
+  // Summary bar
+  const fcSum = document.getElementById('fc-summary');
+  if (summary.total > 0) {
+    const wr = summary.win_rate != null ? (summary.win_rate * 100).toFixed(0) + '%' : '—';
+    const avgPnl = summary.avg_pnl_pct != null ? (summary.avg_pnl_pct >= 0 ? '+' : '') + summary.avg_pnl_pct.toFixed(2) + '%' : '—';
+    const best = summary.best_pnl_pct != null ? '+' + summary.best_pnl_pct.toFixed(2) + '%' : '—';
+    const worst = summary.worst_pnl_pct != null ? summary.worst_pnl_pct.toFixed(2) + '%' : '—';
+    const wrClass = summary.win_rate >= 0.5 ? 'green' : summary.win_rate != null ? 'red' : '';
+    fcSum.innerHTML = `
+      <div class="fc-stat"><span class="label">Total Trades</span><span class="fc-stat-val">${summary.total}</span></div>
+      <div class="fc-stat"><span class="label">Closed</span><span class="fc-stat-val">${summary.closed}</span></div>
+      <div class="fc-stat"><span class="label">Win Rate</span><span class="fc-stat-val ${wrClass}">${wr}</span></div>
+      <div class="fc-stat"><span class="label">Avg P&L</span><span class="fc-stat-val ${summary.avg_pnl_pct >= 0 ? 'green' : 'red'}">${avgPnl}</span></div>
+      <div class="fc-stat"><span class="label">Best</span><span class="fc-stat-val green">${best}</span></div>
+      <div class="fc-stat"><span class="label">Worst</span><span class="fc-stat-val red">${worst}</span></div>`;
+  } else {
+    fcSum.innerHTML = '';
+  }
+
+  const grid = document.getElementById('fc-grid');
+  if (!cards.length) {
+    grid.innerHTML = '<div class="empty">No trades recorded yet</div>';
+    return;
+  }
+
+  grid.innerHTML = cards.map(c => {
+    const closed = c.pnl_pct != null;
+    const won = closed && c.pnl_pct > 0;
+    const borderCls = closed ? (won ? 'fc-win' : 'fc-loss') : 'fc-open';
+    const outcomeHtml = closed
+      ? `<span class="pill ${won ? 'pill-win' : 'pill-loss'}">${won ? '▲' : '▼'} ${(c.pnl_pct >= 0 ? '+' : '') + c.pnl_pct.toFixed(2)}%</span>
+         <span class="muted" style="font-size:11px">${c.hold_duration_hours ? c.hold_duration_hours.toFixed(1) + 'h held' : ''}</span>`
+      : `<span class="pill pill-open">OPEN</span>`;
+
+    const rsiVal = c.rsi != null ? c.rsi.toFixed(1) : '—';
+    const macdVal = c.macd_hist != null ? (c.macd_hist >= 0 ? '+' : '') + c.macd_hist.toFixed(4) : '—';
+    const macdCls = c.macd_hist > 0 ? 'green' : c.macd_hist < 0 ? 'red' : '';
+    const rsiCls = c.rsi < 30 ? 'green' : c.rsi > 70 ? 'red' : '';
+    const bbLabel = (c.bb_position || 'inside').replace(/_/g, ' ');
+    const ts = c.timestamp ? new Date(c.timestamp).toLocaleString() : '';
+
+    return `<div class="fc ${borderCls}" onclick="this.classList.toggle('expanded')">
+      <div class="fc-front">
+        <div class="fc-top">
+          <span class="fc-symbol">${c.symbol}</span>
+          <div class="fc-badges">
+            <span class="pill pill-${(c.action||'buy').toLowerCase()}">${c.action}</span>
+            <span class="pill pill-risk-${c.risk_level||'medium'}">${(c.risk_level||'medium').toUpperCase()}</span>
+          </div>
+        </div>
+        <div class="fc-indicators">
+          <span class="muted">RSI</span><span class="fc-ind-val ${rsiCls}">${rsiVal}</span>
+          <span class="muted">MACD hist</span><span class="fc-ind-val ${macdCls}">${macdVal}</span>
+          <span class="muted">BB</span><span class="fc-ind-val">${bbLabel}</span>
+          <span class="muted">Signal</span><span class="fc-ind-val">${c.signal_composite} ${(c.signal_confidence*100).toFixed(0)}%</span>
+          <span class="muted">vs SMA20</span><span class="fc-ind-val">${c.price_vs_sma20||'—'}</span>
+          <span class="muted">vs EMA50</span><span class="fc-ind-val">${c.price_vs_ema50||'—'}</span>
+        </div>
+        <div class="fc-outcome">${outcomeHtml}</div>
+      </div>
+      <div class="fc-back">
+        <div class="fc-reasoning">${c.reasoning||'No reasoning recorded.'}</div>
+        <div class="fc-meta">
+          Entry $${(c.entry_price||0).toFixed(2)} · $${(c.dollar_amount||0).toFixed(2)} · ${c.account||''} · ${ts}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 async function togglePause() {
@@ -506,6 +811,112 @@ async function doClose(symbol) {
   try {
     await fetch(`/api/close/${encodeURIComponent(symbol)}`, {method:'POST'});
   } catch(e) { console.error(e); }
+}
+
+// ── Price chart ────────────────────────────────────────────────────────────
+let _chart = null;
+let _candleSeries = null;
+let _chartSymbol = null;
+let _lastCandles = {};   // symbol → candle array cache
+
+function initChart() {
+  const el = document.getElementById('price-chart');
+  _chart = LightweightCharts.createChart(el, {
+    layout: { background: { color: '#161920' }, textColor: '#8892a4' },
+    grid: { vertLines: { color: '#2a2f3e' }, horzLines: { color: '#2a2f3e' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#2a2f3e' },
+    timeScale: { borderColor: '#2a2f3e', timeVisible: true },
+    handleScroll: true,
+    handleScale: true,
+  });
+  _candleSeries = _chart.addCandlestickSeries({
+    upColor: '#00D4AA', downColor: '#f85149',
+    borderUpColor: '#00D4AA', borderDownColor: '#f85149',
+    wickUpColor: '#00D4AA', wickDownColor: '#f85149',
+  });
+  new ResizeObserver(() => {
+    _chart.applyOptions({ width: el.clientWidth });
+  }).observe(el);
+}
+
+async function loadChart(symbol) {
+  if (!_chart) initChart();
+  _chartSymbol = symbol;
+  // Update active tab
+  document.querySelectorAll('.chart-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.sym === symbol);
+  });
+  try {
+    const res = await fetch(`/api/chart/${encodeURIComponent(symbol)}`);
+    const data = await res.json();
+    const candles = (data.candles || []).sort((a, b) => a.time - b.time);
+    _lastCandles[symbol] = candles;
+    _candleSeries.setData(candles);
+    placeTradeMarkers(symbol, candles);
+    _chart.timeScale().fitContent();
+  } catch(e) { console.error('Chart error', e); }
+}
+
+function placeTradeMarkers(symbol, candles) {
+  if (!_candleSeries || !candles.length) return;
+  const cards = (window._flashcards || []).filter(c => c.symbol === symbol);
+  if (!cards.length) { _candleSeries.setMarkers([]); return; }
+
+  const markers = [];
+  for (const c of cards) {
+    const ts = c.timestamp ? Math.floor(new Date(c.timestamp).getTime() / 1000) : null;
+    if (!ts) continue;
+    // Snap to nearest candle time
+    const nearest = candles.reduce((a, b) => Math.abs(b.time - ts) < Math.abs(a.time - ts) ? b : a);
+    if (c.action === 'BUY') {
+      markers.push({
+        time: nearest.time,
+        position: 'belowBar',
+        color: '#3fb950',
+        shape: 'arrowUp',
+        text: `BUY ${c.risk_level ? c.risk_level.toUpperCase() : ''}`,
+        size: 1,
+      });
+    }
+    if (c.exit_price != null) {
+      const exitTs = c.timestamp ? Math.floor(new Date(c.timestamp).getTime() / 1000) + Math.round((c.hold_duration_hours || 1) * 3600) : null;
+      if (exitTs) {
+        const nearestExit = candles.reduce((a, b) => Math.abs(b.time - exitTs) < Math.abs(a.time - exitTs) ? b : a);
+        const won = c.pnl_pct > 0;
+        markers.push({
+          time: nearestExit.time,
+          position: 'aboveBar',
+          color: won ? '#00D4AA' : '#f85149',
+          shape: 'arrowDown',
+          text: `${c.outcome ? c.outcome.toUpperCase() : 'SELL'} ${c.pnl_pct != null ? (c.pnl_pct >= 0 ? '+' : '') + c.pnl_pct.toFixed(1) + '%' : ''}`,
+          size: 1,
+        });
+      }
+    }
+  }
+  markers.sort((a, b) => a.time - b.time);
+  _candleSeries.setMarkers(markers);
+}
+
+function buildChartTabs(signals) {
+  const syms = [...new Set((signals || []).map(s => s.symbol))];
+  if (!syms.length) return;
+  const tabs = document.getElementById('chart-tabs');
+  // Add new symbols, keep existing active state
+  const existing = new Set([...tabs.querySelectorAll('.chart-tab')].map(t => t.dataset.sym));
+  syms.forEach(sym => {
+    if (!existing.has(sym)) {
+      const btn = document.createElement('button');
+      btn.className = 'chart-tab' + (sym === _chartSymbol ? ' active' : '');
+      btn.dataset.sym = sym;
+      btn.textContent = sym;
+      btn.onclick = () => loadChart(sym);
+      tabs.appendChild(btn);
+    }
+  });
+  // Auto-load first symbol if none selected yet
+  if (!_chartSymbol && syms.length) loadChart(syms[0]);
 }
 
 // SSE

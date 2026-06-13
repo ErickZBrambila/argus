@@ -52,6 +52,7 @@ class RobinhoodBroker:
         password: SecretStr | str,
         mfa_secret: SecretStr | str = "",
         paper: bool = True,
+        account_number: str = "",
     ) -> None:
         self.username = username
         self._password = password if isinstance(password, SecretStr) else SecretStr(password)
@@ -61,6 +62,7 @@ class RobinhoodBroker:
             else None
         )
         self.paper = paper
+        self.account_number = account_number or ""
         self._logged_in = False
         self._paper_positions: dict[str, dict] = {}
         self._paper_equity = 10_000.0
@@ -266,7 +268,9 @@ class RobinhoodBroker:
             if symbol in CRYPTO_SYMBOLS:
                 order = rh.orders.order_buy_crypto_by_quantity(symbol, qty)
             else:
-                order = rh.orders.order_buy_fractional_by_quantity(symbol, qty)
+                order = rh.orders.order_buy_fractional_by_quantity(
+                    symbol, qty, account_number=self.account_number or None
+                )
 
             order_id = order.get("id", str(uuid.uuid4()))
             filled = order.get("state") in ("filled", "partially_filled")
@@ -283,7 +287,9 @@ class RobinhoodBroker:
             if symbol in CRYPTO_SYMBOLS:
                 order = rh.orders.order_sell_crypto_by_quantity(symbol, qty)
             else:
-                order = rh.orders.order_sell_fractional_by_quantity(symbol, qty)
+                order = rh.orders.order_sell_fractional_by_quantity(
+                    symbol, qty, account_number=self.account_number or None
+                )
 
             order_id = order.get("id", str(uuid.uuid4()))
             filled = order.get("state") in ("filled", "partially_filled")

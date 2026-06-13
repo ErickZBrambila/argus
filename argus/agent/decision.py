@@ -43,6 +43,15 @@ class TradeDecision:
     confidence: float
     reasoning: str
     raw_response: str = ""
+    risk_level: str = "medium"   # "low" | "medium" | "high"
+
+
+def classify_risk(signal_confidence: float, decision_confidence: float) -> str:
+    if signal_confidence >= 0.7 and decision_confidence >= 0.7:
+        return "low"
+    if signal_confidence >= 0.4 or decision_confidence >= 0.5:
+        return "medium"
+    return "high"
 
 
 class DecisionEngine:
@@ -58,7 +67,9 @@ class DecisionEngine:
     ) -> TradeDecision:
         prompt = _build_prompt(signal, portfolio_equity, open_positions, daily_pnl_pct)
         try:
-            return self._call_claude(signal.symbol, prompt)
+            decision = self._call_claude(signal.symbol, prompt)
+            decision.risk_level = classify_risk(signal.confidence, decision.confidence)
+            return decision
         except Exception as exc:
             logger.error("Claude decision failed for %s: %s", signal.symbol, exc)
             return TradeDecision(
@@ -66,6 +77,7 @@ class DecisionEngine:
                 action="HOLD",
                 confidence=0.0,
                 reasoning=f"Decision engine error: {exc}",
+                risk_level="high",
             )
 
     def _call_claude(self, symbol: str, prompt: str) -> TradeDecision:
