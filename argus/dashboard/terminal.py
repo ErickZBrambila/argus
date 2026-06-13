@@ -28,6 +28,15 @@ def _pnl_style(value: float) -> str:
     return "green" if value > 0 else "red" if value < 0 else "white"
 
 
+class _LiveRenderable:
+    """Calls _render() on every Rich Live refresh so the countdown ticks live."""
+    def __init__(self, dashboard: "TerminalDashboard") -> None:
+        self._d = dashboard
+
+    def __rich_console__(self, console, options):  # type: ignore[override]
+        yield self._d._render()
+
+
 class TerminalDashboard:
     def __init__(self) -> None:
         self._live: Optional[Live] = None
@@ -35,7 +44,7 @@ class TerminalDashboard:
 
     def start(self) -> None:
         self._live = Live(
-            self._render(),
+            _LiveRenderable(self),
             console=console,
             refresh_per_second=1,
             screen=True,
@@ -48,9 +57,7 @@ class TerminalDashboard:
             self._live = None
 
     def update(self, state: dict) -> None:
-        self._state.update(state)
-        if self._live:
-            self._live.update(self._render())
+        self._state.update(state)  # _render() is called automatically by Live each second
 
     def _render(self) -> Panel:
         s = self._state
