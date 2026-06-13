@@ -17,7 +17,7 @@ from argus.agent.decision import DecisionEngine, TradeDecision
 from argus.broker.robinhood import RobinhoodBroker
 from argus.config import get_settings
 from argus.dashboard.terminal import TerminalDashboard
-from argus.dashboard import server as web_dashboard
+from argus.dashboard import web as web_dashboard
 from argus.notifications.notifier import Notifier
 from argus.risk.manager import RiskManager
 from argus.storage.models import (

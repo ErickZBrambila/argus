@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=61.0"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "argus"
@@ -10,7 +10,7 @@ dependencies = [
     "anthropic>=0.40.0",
     "robin-stocks>=3.0.0",
     "pandas>=2.0.0",
-    "pandas-ta>=0.3.14b",
+    "pandas-ta",
     "numpy>=1.26.0",
     "sqlalchemy>=2.0.0",
     "fastapi>=0.110.0",
