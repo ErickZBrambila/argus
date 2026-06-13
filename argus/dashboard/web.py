@@ -622,6 +622,19 @@ _HTML = """<!DOCTYPE html>
   .acct-mode-auto     { background: rgba(0,212,170,.12); color: var(--accent); border: 1px solid rgba(0,212,170,.25); }
   .acct-mode-approval { background: rgba(210,153,34,.12); color: var(--yellow); border: 1px solid rgba(210,153,34,.25); }
 
+  /* Goal progress bar */
+  .goal-wrap { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
+  .goal-labels { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 6px; }
+  .goal-title { color: var(--muted); font-weight: 600; letter-spacing: 0.3px; }
+  .goal-pct { font-family: var(--mono); font-weight: 700; }
+  .goal-track { height: 6px; background: var(--surface2); border-radius: 99px; overflow: hidden; }
+  .goal-fill { height: 100%; border-radius: 99px; transition: width .6s ease; }
+  .goal-fill.agentic { background: linear-gradient(90deg, var(--accent), #00ff99); }
+  .goal-fill.default { background: linear-gradient(90deg, var(--purple), #f0abfc); }
+  .goal-fill.done    { background: linear-gradient(90deg, var(--green), #86efac); }
+  .goal-remaining { font-size: 11px; color: var(--muted); margin-top: 5px; text-align: right; font-family: var(--mono); }
+  .goal-done-badge { display: inline-block; margin-top: 6px; padding: 2px 8px; border-radius: 99px; font-size: 10.5px; font-weight: 700; background: rgba(63,185,80,.15); color: var(--green); border: 1px solid rgba(63,185,80,.3); }
+
   .acct-positions-mini { margin-top: 12px; border-top: 1px solid var(--border-subtle); padding-top: 10px; }
   .acct-pos-row { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; padding: 4px 0; }
   .acct-pos-sym { color: var(--accent); font-weight: 600; font-family: var(--mono); font-size: 12px; }
@@ -1026,6 +1039,7 @@ _HTML = """<!DOCTYPE html>
 
 <script>
 let paused = false;
+let _equityGoal = 25000;
 let pendingCloseSymbol = null;
 let valuesHidden = true;
 let _nextScanAt = null;
@@ -1150,6 +1164,24 @@ function updateBadges(state) {
   el.innerHTML = html;
 }
 
+function renderGoalBar(equity, goal, cls) {
+  const pct = Math.min(100, (equity / goal) * 100);
+  const done = equity >= goal;
+  const fillCls = done ? 'done' : cls;
+  const remaining = goal - equity;
+  return `<div class="goal-wrap">
+    <div class="goal-labels">
+      <span class="goal-title">$${(goal/1000).toFixed(0)}K PDT Goal</span>
+      <span class="goal-pct" style="color:${done ? 'var(--green)' : 'var(--text)'}">${pct.toFixed(1)}%</span>
+    </div>
+    <div class="goal-track"><div class="goal-fill ${fillCls}" style="width:${pct}%"></div></div>
+    ${done
+      ? '<div class="goal-done-badge">PDT restriction lifted</div>'
+      : `<div class="goal-remaining private">$${remaining.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})} remaining</div>`
+    }
+  </div>`;
+}
+
 function renderAccounts(accounts) {
   const panels = document.getElementById('accounts-panels');
   if (!accounts || !Object.keys(accounts).length) return;
@@ -1199,12 +1231,14 @@ function renderAccounts(accounts) {
         <span class="yellow">${pending} awaiting approval</span>
       </div>` : ''}
       <div class="acct-positions-mini">${posRows}</div>
+      ${renderGoalBar(equity, _equityGoal, cls)}
     </div>`;
   }).join('');
 }
 
 function applyState(state) {
   paused = state.paused || false;
+  if (state.equity_goal) _equityGoal = state.equity_goal;
   updateBadges(state);
 
   // Per-account panels

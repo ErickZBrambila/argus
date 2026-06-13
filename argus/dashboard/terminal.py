@@ -151,6 +151,21 @@ class TerminalDashboard:
         return Panel(layout, border_style="cyan", padding=(0, 1))
 
 
+def _build_goal_bar(equity: float, goal: float, color: str) -> Text:
+    pct = min(1.0, equity / goal) if goal > 0 else 0.0
+    filled = int(pct * 20)
+    bar = "█" * filled + "░" * (20 - filled)
+    style = "green" if pct >= 1.0 else color
+    t = Text()
+    t.append(f"[{bar}] ", style=style)
+    t.append(f"{pct*100:.1f}%", style=f"bold {style}")
+    if pct < 1.0:
+        t.append(f"  ${goal - equity:,.0f} to go", style="dim")
+    else:
+        t.append("  PDT lifted!", style="bold green")
+    return t
+
+
 def _build_account_panel(label: str, acct: dict, color: str) -> Panel:
     equity      = acct.get("equity", 0.0)
     daily_pnl   = acct.get("daily_pnl", 0.0)
@@ -213,6 +228,8 @@ def _build_account_panel(label: str, acct: dict, color: str) -> Panel:
                 f"${t.get('price', 0):.2f}",
             )
 
+    goal = acct.get("equity_goal", 25_000.0)
+
     inner = Table.grid(expand=True)
     inner.add_column()
     inner.add_row(stats)
@@ -220,6 +237,9 @@ def _build_account_panel(label: str, acct: dict, color: str) -> Panel:
     inner.add_row(pos_table)
     inner.add_row(Text("Trades", style="dim italic"))
     inner.add_row(tr_table)
+    inner.add_row(Text(""))
+    inner.add_row(Text(f"$25K Goal", style="dim"))
+    inner.add_row(_build_goal_bar(equity, goal, color))
 
     title = f"[bold {color}]{label.upper()}[/bold {color}]"
     return Panel(inner, title=title, border_style=color, padding=(0, 1))

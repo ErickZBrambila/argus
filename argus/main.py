@@ -635,6 +635,7 @@ class Autopilot:
                 "positions": acct_positions,
                 "trades": [t for t in self._recent_trades if t.get("account") == acct.label][:10],
                 "pending_approvals": len(acct.pending_approvals),
+                "equity_goal": self._cfg.equity_goal,
             }
 
         from argus.dashboard.token_tracker import get_summary as _token_summary
@@ -661,6 +662,8 @@ class Autopilot:
             "next_scan_at":        self._next_scan_at.isoformat() if self._next_scan_at else None,
             # Token usage
             "token_usage": _token_summary(),
+            # Goal tracking
+            "equity_goal": self._cfg.equity_goal,
         }
         self._terminal.update(state)
         web_dashboard.push_state(state)

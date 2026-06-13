@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     approval_threshold: str = Field("medium", alias="APPROVAL_THRESHOLD")
     watchlist_raw: str = Field("AAPL,TSLA,NVDA,BTC,ETH", alias="WATCHLIST")
 
+    # Goal tracking — target equity to lift PDT restriction
+    equity_goal: float = Field(25_000.0, alias="EQUITY_GOAL")
+
     # Risk parameters
     max_position_pct: float = Field(0.10, alias="MAX_POSITION_PCT")
     stop_loss_pct: float = Field(0.05, alias="STOP_LOSS_PCT")
