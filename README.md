@@ -319,6 +319,7 @@ These shell functions are defined in `~/.zshrc` and require `ARGUS_DIR` to point
 | `argus-tmux` | **Start here.** Creates (or re-attaches to) a `tmux` session named `argus` running the full terminal UI and web dashboard. Re-run from any terminal to re-attach. |
 | `argus-start` | Foreground start with terminal UI. Exits when the terminal closes. |
 | `argus-bg` | Background start (no terminal UI). Logs to `~/argus.log`. Writes PID to `~/argus.pid`. |
+| `argus-restart` | Stops Argus and immediately restarts it in tmux. Equivalent to `argus-stop && sleep 1 && argus-tmux`. |
 | `argus-stop` | Graceful shutdown. Kills by PID file, port 8000 process, and process name — works regardless of how Argus was started. |
 | `argus-status` | Checks if Argus is running by polling `/api/status`. Prints equity and P&L if up, or a start instruction if down. |
 | `argus-log` | `tail -f ~/argus.log` — follows the live log file for `argus-bg` and `argus-tmux` runs. |
