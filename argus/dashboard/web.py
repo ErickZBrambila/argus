@@ -9,10 +9,13 @@ import logging
 import threading
 from typing import AsyncGenerator
 
+import pathlib
+
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+_STATIC_DIR = pathlib.Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 
 def push_state(state: dict) -> None:
@@ -303,6 +308,9 @@ _HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Argus — Trading Dashboard</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16x16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
 <style>
   :root {
     --bg: #0d1117;
@@ -542,7 +550,10 @@ _HTML = """<!DOCTYPE html>
 <body>
 <div class="app">
   <header>
-    <span class="logo">⬡ ARGUS <span style="font-size:11px;font-weight:400;color:var(--muted)" id="version-badge"></span></span>
+    <span class="logo">
+      <img src="/static/logo-horizontal.png" alt="Argus" style="height:36px;vertical-align:middle;margin-right:8px;">
+      <span style="font-size:11px;font-weight:400;color:var(--muted)" id="version-badge"></span>
+    </span>
     <div style="display:flex;align-items:center;gap:10px">
       <span class="badge badge-session-closed" id="session-badge">—</span>
       <div class="countdown-wrap">

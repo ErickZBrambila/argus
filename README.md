@@ -1,5 +1,7 @@
 # Argus — Technical Documentation
 
+![Argus](argus/dashboard/static/banner.png)
+
 ![version](https://img.shields.io/badge/version-v0.4.0-blue)
 
 ## 1. What is Argus?
