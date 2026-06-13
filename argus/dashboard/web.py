@@ -169,14 +169,17 @@ async def get_chart(symbol: str) -> dict:
         candles = []
         for bar in (raw or []):
             try:
-                ts = bar.get("begins_at") or bar.get("timestamp") or ""
-                import datetime as _dt
-                if isinstance(ts, str) and ts:
-                    t = int(_dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+                # Accept pre-parsed integer timestamps or ISO string fields
+                if isinstance(bar.get("time"), (int, float)):
+                    t = int(bar["time"])
                 else:
-                    continue
+                    ts = bar.get("begins_at") or bar.get("timestamp") or ""
+                    if not ts:
+                        continue
+                    import datetime as _dt
+                    t = int(_dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
                 candles.append({
-                    "time": t,
+                    "time":  t,
                     "open":  float(bar.get("open_price")  or bar.get("open")  or 0),
                     "high":  float(bar.get("high_price")  or bar.get("high")  or 0),
                     "low":   float(bar.get("low_price")   or bar.get("low")   or 0),
@@ -394,6 +397,12 @@ _HTML = """<!DOCTYPE html>
   .pill-buy  { background: rgba(63,185,80,.15);  color: var(--green); }
   .pill-sell { background: rgba(248,81,73,.15);  color: var(--red); }
 
+  /* Hide values toggle */
+  .btn-eye { background: none; border: 1px solid var(--border); color: var(--muted); padding: 5px 10px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; transition: all .15s; }
+  .btn-eye:hover { border-color: var(--accent); color: var(--accent); }
+  body.hide-values .private { filter: blur(6px); user-select: none; transition: filter .2s; }
+  body.hide-values .private:hover { filter: blur(0); }
+
   /* Price chart */
   .chart-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
   .chart-tab { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: none; color: var(--muted); transition: all .15s; }
@@ -410,7 +419,10 @@ _HTML = """<!DOCTYPE html>
 <div class="app">
   <header>
     <span class="logo">⬡ ARGUS</span>
-    <div class="badges" id="badges"></div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <div class="badges" id="badges"></div>
+      <button class="btn-eye" id="btn-eye" onclick="toggleValues()" title="Show/hide dollar amounts">👁</button>
+    </div>
   </header>
   <main>
 
@@ -420,11 +432,11 @@ _HTML = """<!DOCTYPE html>
       <div class="stats-grid">
         <div class="stat">
           <span class="stat-label">Equity</span>
-          <span class="stat-value lg accent" id="stat-equity">—</span>
+          <span class="stat-value lg accent private" id="stat-equity">—</span>
         </div>
         <div class="stat">
           <span class="stat-label">Daily P&L</span>
-          <span class="stat-value" id="stat-pnl">—</span>
+          <span class="stat-value private" id="stat-pnl">—</span>
         </div>
         <div class="stat">
           <span class="stat-label">Trades Today</span>
@@ -549,6 +561,18 @@ _HTML = """<!DOCTYPE html>
 <script>
 let paused = false;
 let pendingCloseSymbol = null;
+let valuesHidden = true;
+
+function toggleValues() {
+  valuesHidden = !valuesHidden;
+  document.body.classList.toggle('hide-values', valuesHidden);
+  document.getElementById('btn-eye').textContent = valuesHidden ? '🙈' : '👁';
+}
+
+// Apply hidden state on load
+document.addEventListener('DOMContentLoaded', () => {
+  document.body.classList.add('hide-values');
+});
 
 function fmt(n, decimals=2) {
   if (n == null) return '—';
@@ -556,7 +580,11 @@ function fmt(n, decimals=2) {
 }
 function fmtDollar(n) {
   if (n == null) return '—';
-  return '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+  return '<span class="private">$' + Number(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) + '</span>';
+}
+function fmtPnl(val, pct) {
+  const sign = val >= 0 ? '+' : '';
+  return `<span class="private">${sign}$${Math.abs(val).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})} (${sign}${Number(pct).toFixed(2)}%)</span>`;
 }
 function pnlClass(n) {
   return n > 0 ? 'green' : n < 0 ? 'red' : '';
@@ -584,9 +612,9 @@ function applyState(state) {
   const pnlPct = state.daily_pnl_pct || 0;
   const dayTrades = state.day_trades || 0;
 
-  document.getElementById('stat-equity').textContent = fmtDollar(equity);
+  document.getElementById('stat-equity').innerHTML = fmtDollar(equity);
   const pnlEl = document.getElementById('stat-pnl');
-  pnlEl.textContent = `${pnl >= 0 ? '+' : ''}${fmtDollar(pnl)} (${pnlPct >= 0 ? '+' : ''}${fmt(pnlPct)}%)`;
+  pnlEl.innerHTML = fmtPnl(pnl, pnlPct);
   pnlEl.className = 'stat-value ' + pnlClass(pnl);
   document.getElementById('stat-trades').textContent = state.trade_count || 0;
   const dtEl = document.getElementById('stat-daytrades');
@@ -610,7 +638,7 @@ function applyState(state) {
         <td class="txt-right">${fmtDollar(p.current_price)}</td>
         <td class="txt-right ${pnlClass(pct)}">${pct >= 0 ? '+' : ''}${fmt(pct)}%</td>
         <td class="txt-right muted">${fmtDollar(p.stop_loss_price)}</td>
-        <td class="txt-center"><button class="btn btn-danger" style="padding:4px 10px;font-size:11px" onclick="confirmClose('${sym}')">Close</button></td>
+        <td class="txt-center"><button class="btn btn-danger" style="padding:4px 10px;font-size:11px" onclick="confirmClose('${sym.replace(/\s*\[.*?\]/,'')}')">Close</button></td>
       </tr>`;
     }).join('');
   }
@@ -649,6 +677,7 @@ function applyState(state) {
         <td class="txt-center">${pill(side.toUpperCase(), side)}</td>
         <td class="txt-right">${fmt(t.quantity,4)}</td>
         <td class="txt-right">${fmtDollar(t.price)}</td>
+        <td class="txt-right muted" style="font-size:11px">${t.account || ''}</td>
       </tr>`;
     }).join('');
   }
@@ -670,7 +699,7 @@ function applyState(state) {
           <span class="pill ${riskCls}">${(a.risk_level||'medium').toUpperCase()} RISK</span>
         </div>
         <div class="approval-meta">
-          ${fmtDollar(a.dollar_amount)} · Confidence ${fmt((a.confidence||0)*100,0)}% · ${a.account_label||'Default'}
+          ${fmtDollar(a.dollar_amount)} &middot; Confidence ${fmt((a.confidence||0)*100,0)}% &middot; ${a.account_label||'Default'}
         </div>
         <div class="approval-reasoning">${a.reasoning||''}</div>
         <div class="approval-actions">
@@ -768,7 +797,7 @@ function renderFlashcards(state) {
       <div class="fc-back">
         <div class="fc-reasoning">${c.reasoning||'No reasoning recorded.'}</div>
         <div class="fc-meta">
-          Entry $${(c.entry_price||0).toFixed(2)} · $${(c.dollar_amount||0).toFixed(2)} · ${c.account||''} · ${ts}
+          <span class="private">Entry $${(c.entry_price||0).toFixed(2)} · $${(c.dollar_amount||0).toFixed(2)}</span> · ${c.account||''} · ${ts}
         </div>
       </div>
     </div>`;

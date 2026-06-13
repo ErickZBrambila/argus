@@ -7,7 +7,6 @@ import logging
 from typing import Optional
 
 from rich import box
-from rich.columns import Columns
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -18,13 +17,15 @@ logger = logging.getLogger(__name__)
 
 console = Console()
 
+_ACCOUNT_COLORS = {
+    "agentic": "cyan",
+    "default": "magenta",
+    "main": "cyan",
+}
 
-def _pnl_color(value: float) -> str:
-    if value > 0:
-        return "green"
-    if value < 0:
-        return "red"
-    return "white"
+
+def _pnl_style(value: float) -> str:
+    return "green" if value > 0 else "red" if value < 0 else "white"
 
 
 class TerminalDashboard:
@@ -53,135 +54,160 @@ class TerminalDashboard:
 
     def _render(self) -> Panel:
         s = self._state
-        paper_badge = (
-            Text(" PAPER ", style="bold white on blue")
-            if s.get("paper_trade")
-            else Text(" LIVE ", style="bold white on red")
-        )
-        kill_badge = (
-            Text(" KILL SWITCH ACTIVE ", style="bold white on red") if s.get("kill_switch") else Text("")
-        )
-        paused_badge = Text(" PAUSED ", style="bold white on yellow") if s.get("paused") else Text("")
+
+        # ── Header ──────────────────────────────────────────────────────────
+        mode = Text(" PAPER ", style="bold white on blue") if s.get("paper_trade") else Text(" LIVE ", style="bold white on red")
+        kill = Text(" ⚡ KILL SWITCH ", style="bold white on red") if s.get("kill_switch") else Text("")
+        paused = Text(" ⏸ PAUSED ", style="bold black on yellow") if s.get("paused") else Text("")
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         header = Text()
-        header.append("⬡ ARGUS", style="bold cyan")
-        header.append("  ")
-        header.append_text(paper_badge)
-        header.append(" ")
-        header.append_text(kill_badge)
-        header.append_text(paused_badge)
-        header.append(f"  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", style="dim")
+        header.append("⬡ ARGUS  ", style="bold cyan")
+        header.append_text(mode)
+        header.append_text(kill)
+        header.append_text(paused)
+        header.append(f"  {ts}", style="dim")
 
-        equity = s.get("equity", 0.0)
-        daily_pnl = s.get("daily_pnl", 0.0)
-        daily_pnl_pct = s.get("daily_pnl_pct", 0.0)
-        trade_count = s.get("trade_count", 0)
-        day_trades = s.get("day_trades", 0)
+        accounts = s.get("accounts", {})
 
-        stats = Table.grid(padding=(0, 2))
-        stats.add_column()
-        stats.add_column()
-        stats.add_row(
-            Text("Portfolio equity", style="dim"),
-            Text(f"${equity:,.2f}", style="bold white"),
-        )
-        stats.add_row(
-            Text("Daily P&L", style="dim"),
-            Text(f"${daily_pnl:+,.2f}  ({daily_pnl_pct:+.2f}%)", style=_pnl_color(daily_pnl)),
-        )
-        stats.add_row(
-            Text("Trades today", style="dim"),
-            Text(str(trade_count), style="white"),
-        )
-        stats.add_row(
-            Text("Day trades (5-day)", style="dim"),
-            Text(f"{day_trades} / 3", style="yellow" if day_trades >= 2 else "white"),
-        )
+        # ── Per-account panels ───────────────────────────────────────────────
+        account_panels = []
+        for label, acct in accounts.items():
+            color = _ACCOUNT_COLORS.get(label, "cyan")
+            account_panels.append(_build_account_panel(label, acct, color))
 
-        positions_table = _build_positions_table(s.get("positions", {}))
+        # ── Signals table ────────────────────────────────────────────────────
         signals_table = _build_signals_table(s.get("signals", []))
-        recent_trades_table = _build_trades_table(s.get("recent_trades", []))
 
-        grid = Table.grid(expand=True, padding=(0, 1))
-        grid.add_column(ratio=1)
-        grid.add_column(ratio=1)
-        grid.add_row(positions_table, signals_table)
-        grid.add_row(recent_trades_table, Panel(stats, title="Stats", border_style="dim"))
-
+        # ── Layout ───────────────────────────────────────────────────────────
         layout = Table.grid(expand=True)
         layout.add_column()
         layout.add_row(header)
-        layout.add_row(grid)
+
+        if account_panels:
+            acct_row = Table.grid(expand=True, padding=(0, 1))
+            for _ in account_panels:
+                acct_row.add_column(ratio=1)
+            acct_row.add_row(*account_panels)
+            layout.add_row(acct_row)
+        else:
+            layout.add_row(_build_legacy_panel(s))
+
+        layout.add_row(signals_table)
 
         return Panel(layout, border_style="cyan", padding=(0, 1))
 
 
-def _build_positions_table(positions: dict) -> Table:
-    t = Table(title="Open Positions", box=box.SIMPLE_HEAVY, expand=True, show_edge=False)
-    t.add_column("Symbol", style="cyan")
-    t.add_column("Qty", justify="right")
-    t.add_column("Entry", justify="right")
-    t.add_column("Current", justify="right")
-    t.add_column("P&L %", justify="right")
-    t.add_column("Stop", justify="right", style="dim")
+def _build_account_panel(label: str, acct: dict, color: str) -> Panel:
+    equity      = acct.get("equity", 0.0)
+    daily_pnl   = acct.get("daily_pnl", 0.0)
+    daily_pct   = acct.get("daily_pnl_pct", 0.0)
+    day_trades  = acct.get("day_trades", 0)
+    auto        = acct.get("auto_trade", True)
+    pending     = acct.get("pending_approvals", 0)
+    kill        = acct.get("kill_switch", False)
 
-    for sym, pos in positions.items():
-        pnl_pct = pos.get("unrealized_pnl_pct", 0.0)
-        t.add_row(
-            sym,
-            f"{pos.get('quantity', 0):.4f}",
-            f"${pos.get('entry_price', 0):.4f}",
-            f"${pos.get('current_price', 0):.4f}",
-            Text(f"{pnl_pct:+.2f}%", style=_pnl_color(pnl_pct)),
-            f"${pos.get('stop_loss_price', 0):.4f}",
-        )
-    return t
+    # Stats grid
+    stats = Table.grid(padding=(0, 2))
+    stats.add_column(style="dim")
+    stats.add_column()
+    stats.add_row("Equity",    Text(f"${equity:,.2f}", style=f"bold {color}"))
+    stats.add_row("Daily P&L", Text(f"${daily_pnl:+,.2f}  ({daily_pct:+.2f}%)", style=_pnl_style(daily_pnl)))
+    stats.add_row("Day trades", Text(f"{day_trades} / 3", style="yellow" if day_trades >= 2 else "white"))
+    mode_label = "AUTO" if auto else "APPROVAL"
+    mode_style = f"bold {color}" if auto else "bold yellow"
+    stats.add_row("Mode",      Text(mode_label, style=mode_style))
+    if pending:
+        stats.add_row("Pending",   Text(f"{pending} awaiting approval", style="bold yellow"))
+    if kill:
+        stats.add_row("",          Text("KILL SWITCH ACTIVE", style="bold red"))
+
+    # Positions
+    positions = acct.get("positions", {})
+    pos_table = Table(box=box.SIMPLE_HEAVY, expand=True, show_edge=False, show_header=bool(positions))
+    pos_table.add_column("Symbol", style=color)
+    pos_table.add_column("Entry",   justify="right")
+    pos_table.add_column("Now",     justify="right")
+    pos_table.add_column("P&L%",    justify="right")
+    if not positions:
+        pos_table.add_row("[dim]No open positions[/dim]", "", "", "")
+    else:
+        for sym, pos in positions.items():
+            pct = pos.get("unrealized_pnl_pct", 0.0)
+            pos_table.add_row(
+                sym,
+                f"${pos.get('entry_price', 0):.2f}",
+                f"${pos.get('current_price', 0):.2f}",
+                Text(f"{pct:+.2f}%", style=_pnl_style(pct)),
+            )
+
+    # Recent trades
+    trades = acct.get("trades", [])
+    tr_table = Table(box=box.SIMPLE_HEAVY, expand=True, show_edge=False, show_header=bool(trades))
+    tr_table.add_column("Time",   style="dim")
+    tr_table.add_column("Symbol", style=color)
+    tr_table.add_column("Side",   justify="center")
+    tr_table.add_column("Price",  justify="right")
+    if not trades:
+        tr_table.add_row("[dim]No trades yet[/dim]", "", "", "")
+    else:
+        for t in trades[:5]:
+            side = t.get("side", "")
+            tr_table.add_row(
+                t.get("time", ""),
+                t.get("symbol", ""),
+                Text(side.upper(), style="green" if side == "buy" else "red"),
+                f"${t.get('price', 0):.2f}",
+            )
+
+    inner = Table.grid(expand=True)
+    inner.add_column()
+    inner.add_row(stats)
+    inner.add_row(Text("Positions", style="dim italic"))
+    inner.add_row(pos_table)
+    inner.add_row(Text("Trades", style="dim italic"))
+    inner.add_row(tr_table)
+
+    title = f"[bold {color}]{label.upper()}[/bold {color}]"
+    return Panel(inner, title=title, border_style=color, padding=(0, 1))
 
 
 def _build_signals_table(signals: list) -> Table:
     t = Table(title="Signals", box=box.SIMPLE_HEAVY, expand=True, show_edge=False)
     t.add_column("Symbol", style="cyan")
-    t.add_column("Price", justify="right")
-    t.add_column("RSI", justify="right")
+    t.add_column("Price",  justify="right")
+    t.add_column("RSI",    justify="right")
     t.add_column("MACD H", justify="right")
     t.add_column("Signal", justify="center")
+    t.add_column("Conf",   justify="right")
 
     for s in signals:
         sig = s.get("composite", "neutral")
         sig_style = {"bullish": "green", "bearish": "red", "neutral": "yellow"}.get(sig, "white")
         rsi = s.get("rsi")
-        rsi_str = f"{rsi:.1f}" if rsi is not None else "—"
         macd_h = s.get("macd_hist")
-        macd_h_str = f"{macd_h:.4f}" if macd_h is not None else "—"
+        conf = s.get("confidence", 0.0)
         t.add_row(
             s.get("symbol", ""),
-            f"${s.get('price', 0):.4f}",
-            rsi_str,
-            macd_h_str,
+            f"${s.get('price', 0):.2f}",
+            f"{rsi:.1f}" if rsi is not None else "—",
+            f"{macd_h:.4f}" if macd_h is not None else "—",
             Text(sig.upper(), style=sig_style),
+            f"{conf:.0%}",
         )
     return t
 
 
-def _build_trades_table(trades: list) -> Table:
-    t = Table(title="Recent Trades", box=box.SIMPLE_HEAVY, expand=True, show_edge=False)
-    t.add_column("Time", style="dim")
-    t.add_column("Symbol", style="cyan")
-    t.add_column("Side", justify="center")
-    t.add_column("Qty", justify="right")
-    t.add_column("Price", justify="right")
-
-    for trade in trades[:10]:
-        side = trade.get("side", "")
-        side_style = "green" if side == "buy" else "red"
-        t.add_row(
-            trade.get("time", ""),
-            trade.get("symbol", ""),
-            Text(side.upper(), style=side_style),
-            f"{trade.get('quantity', 0):.4f}",
-            f"${trade.get('price', 0):.4f}",
-        )
-    return t
+def _build_legacy_panel(s: dict) -> Table:
+    """Fallback single-account layout when no per-account data available."""
+    stats = Table.grid(padding=(0, 2))
+    stats.add_column(style="dim")
+    stats.add_column()
+    stats.add_row("Equity",     Text(f"${s.get('equity', 0):,.2f}", style="bold white"))
+    stats.add_row("Daily P&L",  Text(f"${s.get('daily_pnl', 0):+,.2f} ({s.get('daily_pnl_pct', 0):+.2f}%)", style=_pnl_style(s.get("daily_pnl", 0))))
+    stats.add_row("Trades",     Text(str(s.get("trade_count", 0))))
+    stats.add_row("Day trades", Text(f"{s.get('day_trades', 0)} / 3"))
+    return stats
 
 
 def _empty_state() -> dict:
@@ -197,4 +223,5 @@ def _empty_state() -> dict:
         "positions": {},
         "signals": [],
         "recent_trades": [],
+        "accounts": {},
     }

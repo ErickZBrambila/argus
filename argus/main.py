@@ -201,6 +201,7 @@ class Autopilot:
                 except Exception as exc:
                     logger.error("[%s] Could not fetch initial equity: %s", acct.label, exc)
             self._init_daily_stats(self._accounts[0].broker.get_portfolio_equity())
+            self._update_dashboard()  # seed web dashboard before first tick
 
             while self._running:
                 try:
@@ -538,6 +539,42 @@ class Autopilot:
 
         day_trades = sum(a.risk._day_trade_count for a in self._accounts)
 
+        # Per-account breakdown for terminal dashboard
+        accounts_state = {}
+        for acct in self._accounts:
+            try:
+                eq = acct.broker.get_portfolio_equity()
+            except Exception:
+                eq = 0.0
+            entry_eq = acct.risk._session_entry_equity
+            acct_pnl = eq - entry_eq
+            acct_pnl_pct = (acct_pnl / entry_eq * 100) if entry_eq else 0.0
+            acct_positions = {}
+            for sym, pos in acct.broker.get_open_positions().items():
+                try:
+                    cur = acct.broker.get_price(sym)
+                    pnl_pct = (cur - pos["avg_price"]) / pos["avg_price"] * 100 if pos["avg_price"] else 0
+                    acct_positions[sym] = {
+                        "quantity": pos["qty"],
+                        "entry_price": pos["avg_price"],
+                        "current_price": cur,
+                        "stop_loss_price": acct.risk.stop_loss_price(pos["avg_price"]),
+                        "unrealized_pnl_pct": pnl_pct,
+                    }
+                except Exception:
+                    pass
+            accounts_state[acct.label] = {
+                "equity": eq,
+                "daily_pnl": acct_pnl,
+                "daily_pnl_pct": acct_pnl_pct,
+                "kill_switch": acct.risk.kill_switch_active,
+                "day_trades": acct.risk._day_trade_count,
+                "auto_trade": acct.auto_trade,
+                "positions": acct_positions,
+                "trades": [t for t in self._recent_trades if t.get("account") == acct.label][:10],
+                "pending_approvals": len(acct.pending_approvals),
+            }
+
         recent_cards = self._flashcards.get_recent(20)
         state = {
             "paper_trade": self._cfg.paper_trade,
@@ -551,6 +588,7 @@ class Autopilot:
             "positions": pos_display,
             "signals": self._latest_signals[-20:],
             "recent_trades": self._recent_trades[:20],
+            "accounts": accounts_state,
             "flashcards": [c.as_dict() for c in recent_cards],
             "flashcard_summary": self._flashcards.summary(),
         }
