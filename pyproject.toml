@@ -27,11 +27,15 @@ dependencies = [
     "pyotp>=2.9.0",
     "pytz>=2024.1",
     "pandas-market-calendars>=4.4.0",
+    "keyring>=25.0.0",
+    "keyrings.alt>=5.0.0",
 ]
 
 [project.scripts]
-argus = "argus.main:main"
-argus-web = "argus.dashboard.web:main"
+argus         = "argus.main:main"
+argus-web     = "argus.dashboard.web:main"
+argus-setup   = "argus.setup_secrets:main"
+argus-service = "argus.install_service:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -1,0 +1,33 @@
+# Argus systemd user service — Linux
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp argus.service.template ~/.config/systemd/user/argus.service
+#   # edit WorkingDirectory and ExecStart below
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now argus
+#   systemctl --user status argus
+#   journalctl --user -fu argus
+#
+# Note: secrets are read from the OS Secret Service (keyring).
+# Run `argus-setup` first.
+
+[Unit]
+Description=Argus Trading Autopilot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/argus
+ExecStart=%h/.local/bin/argus
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:%h/.local/share/argus/argus.log
+StandardError=append:%h/.local/share/argus/argus.error.log
+
+# Keep memory usage bounded
+MemoryMax=512M
+
+[Install]
+WantedBy=default.target

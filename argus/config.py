@@ -1,26 +1,80 @@
-"""Central configuration loaded from environment / .env file."""
+"""Central configuration.
+
+Secret resolution priority (highest → lowest):
+  1. Environment variables  — always wins (CI / Docker / manual override)
+  2. OS keychain            — production default (run `argus-setup` to populate)
+  3. .env file              — fallback / non-secret config
+  4. Defaults
+
+Run `argus-setup` once to store secrets in the OS keychain.
+Only non-secret config (watchlist, scan interval, ports, etc.) needs to be in .env.
+"""
 
 from __future__ import annotations
 
+import logging
+from typing import Any
+
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+# Keys that are fetched from the keychain (not the .env file)
+_KEYCHAIN_SECRET_KEYS: frozenset[str] = frozenset({
+    "ANTHROPIC_API_KEY",
+    "ROBINHOOD_PASSWORD",
+    "ROBINHOOD_MFA_SECRET",
+    "SMTP_PASSWORD",
+    "TWILIO_AUTH_TOKEN",
+    "SLACK_BOT_TOKEN",
+})
+
+
+class _KeychainSource(PydanticBaseSettingsSource):
+    """Pydantic settings source that reads from the OS keychain."""
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        alias = str(field.alias) if field.alias else field_name.upper()
+        if alias not in _KEYCHAIN_SECRET_KEYS:
+            return None, field_name, False
+        try:
+            from argus.secrets import get_secret
+            value = get_secret(alias)
+            return value, field_name, False
+        except Exception as exc:
+            logger.debug("Keychain lookup failed for %s: %s", alias, exc)
+            return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        data: dict[str, Any] = {}
+        for field_name, field_info in self.settings_cls.model_fields.items():
+            val, _, _ = self.get_field_value(field_info, field_name)
+            if val is not None:
+                data[field_name] = val
+        return data
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        # Keep populate_by_name so both alias and field name work
+        populate_by_name=True,
+    )
 
-    # Anthropic
+    # ── Secrets (keychain-backed, env var override supported) ───────────────
     anthropic_api_key: SecretStr = Field(..., alias="ANTHROPIC_API_KEY")
-
-    # Robinhood
-    robinhood_username: str = Field(..., alias="ROBINHOOD_USERNAME")
     robinhood_password: SecretStr = Field(..., alias="ROBINHOOD_PASSWORD")
     robinhood_mfa_secret: SecretStr = Field("", alias="ROBINHOOD_MFA_SECRET")
+    smtp_password: SecretStr = Field("", alias="SMTP_PASSWORD")
+    twilio_auth_token: SecretStr = Field("", alias="TWILIO_AUTH_TOKEN")
+    slack_bot_token: SecretStr = Field("", alias="SLACK_BOT_TOKEN")
 
-    # Trading mode
+    # ── Non-secret config (kept in .env / env vars) ─────────────────────────
+    robinhood_username: str = Field(..., alias="ROBINHOOD_USERNAME")
     paper_trade: bool = Field(True, alias="PAPER_TRADE")
-
-    # Watchlist
     watchlist_raw: str = Field("AAPL,TSLA,NVDA,BTC,ETH", alias="WATCHLIST")
 
     # Risk parameters
@@ -37,24 +91,40 @@ class Settings(BaseSettings):
     smtp_host: str = Field("smtp.gmail.com", alias="SMTP_HOST")
     smtp_port: int = Field(587, alias="SMTP_PORT")
     smtp_user: str = Field("", alias="SMTP_USER")
-    smtp_password: SecretStr = Field("", alias="SMTP_PASSWORD")
 
-    # Notifications — Twilio / SMS
+    # Twilio
     twilio_account_sid: str = Field("", alias="TWILIO_ACCOUNT_SID")
-    twilio_auth_token: SecretStr = Field("", alias="TWILIO_AUTH_TOKEN")
     twilio_from: str = Field("", alias="TWILIO_FROM")
     twilio_to: str = Field("", alias="TWILIO_TO")
 
-    # Notifications — Slack
-    slack_bot_token: SecretStr = Field("", alias="SLACK_BOT_TOKEN")
+    # Slack
     slack_channel: str = Field("#argus-alerts", alias="SLACK_CHANNEL")
 
-    # Web dashboard — default localhost only; set to 0.0.0.0 only behind an authenticated proxy
+    # Web dashboard — default localhost; set 0.0.0.0 only behind an auth proxy
     web_host: str = Field("127.0.0.1", alias="WEB_HOST")
     web_port: int = Field(8000, alias="WEB_PORT")
 
     # Database
     database_url: str = Field("sqlite:///argus.db", alias="DATABASE_URL")
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # Priority: init > env vars > keychain > .env > defaults
+        return (
+            init_settings,
+            env_settings,
+            _KeychainSource(settings_cls),
+            dotenv_settings,
+        )
+
+    # ── Validators ──────────────────────────────────────────────────────────
 
     @property
     def watchlist(self) -> list[str]:
