@@ -33,9 +33,63 @@ def _fake_candles(symbol: str) -> list[dict]:
 
 dash.register_chart_source(_fake_candles)
 
+# ── Symbol search (name → ticker) ─────────────────────────────────────────────
+
+_SYMBOL_DB = [
+    {"symbol": "AAPL",  "name": "Apple Inc."},
+    {"symbol": "TSLA",  "name": "Tesla, Inc."},
+    {"symbol": "NVDA",  "name": "NVIDIA Corporation"},
+    {"symbol": "MSFT",  "name": "Microsoft Corporation"},
+    {"symbol": "AMZN",  "name": "Amazon.com, Inc."},
+    {"symbol": "GOOGL", "name": "Alphabet Inc. (Google)"},
+    {"symbol": "GOOG",  "name": "Alphabet Inc. Class C"},
+    {"symbol": "META",  "name": "Meta Platforms (Facebook)"},
+    {"symbol": "NFLX",  "name": "Netflix, Inc."},
+    {"symbol": "AMD",   "name": "Advanced Micro Devices"},
+    {"symbol": "INTC",  "name": "Intel Corporation"},
+    {"symbol": "JPM",   "name": "JPMorgan Chase & Co."},
+    {"symbol": "BAC",   "name": "Bank of America"},
+    {"symbol": "GS",    "name": "Goldman Sachs"},
+    {"symbol": "COIN",  "name": "Coinbase Global, Inc."},
+    {"symbol": "PLTR",  "name": "Palantir Technologies"},
+    {"symbol": "RIVN",  "name": "Rivian Automotive"},
+    {"symbol": "UBER",  "name": "Uber Technologies"},
+    {"symbol": "LYFT",  "name": "Lyft, Inc."},
+    {"symbol": "ROKU",  "name": "Roku, Inc."},
+    {"symbol": "SOFI",  "name": "SoFi Technologies"},
+    {"symbol": "SPY",   "name": "SPDR S&P 500 ETF"},
+    {"symbol": "QQQ",   "name": "Invesco QQQ Trust (Nasdaq-100)"},
+    {"symbol": "DIS",   "name": "The Walt Disney Company"},
+    {"symbol": "NKLA",  "name": "Nikola Corporation"},
+    {"symbol": "SHOP",  "name": "Shopify Inc."},
+    {"symbol": "SQ",    "name": "Block, Inc. (Square)"},
+    {"symbol": "PYPL",  "name": "PayPal Holdings"},
+    {"symbol": "V",     "name": "Visa Inc."},
+    {"symbol": "MA",    "name": "Mastercard Incorporated"},
+    {"symbol": "BTC",   "name": "Bitcoin"},
+    {"symbol": "ETH",   "name": "Ethereum"},
+    {"symbol": "SOL",   "name": "Solana"},
+    {"symbol": "DOGE",  "name": "Dogecoin"},
+    {"symbol": "XRP",   "name": "XRP (Ripple)"},
+    {"symbol": "ADA",   "name": "Cardano"},
+]
+
+def _mock_search(query: str) -> list[dict]:
+    q = query.lower().strip()
+    results = []
+    for item in _SYMBOL_DB:
+        if q in item["symbol"].lower() or q in item["name"].lower():
+            results.append(item)
+        if len(results) >= 6:
+            break
+    return results
+
+dash.register_search(_mock_search)
+
 # ── Fake data generators ──────────────────────────────────────────────────────
 
 SYMBOLS = ["AAPL", "TSLA", "NVDA", "BTC", "ETH"]
+dash.set_watchlist_base(SYMBOLS)
 _t = 0  # tick counter
 
 def _price(sym, tick):
@@ -236,6 +290,7 @@ def push_loop():
             "paper_trade": True,
             "kill_switch": False,
             "paused": False,
+            "watchlist": dash.get_watchlist(),
             "equity": round(total_eq, 2),
             "daily_pnl": round(total_pnl, 2),
             "daily_pnl_pct": round(total_pnl / (total_eq - total_pnl) * 100, 2) if total_eq else 0,

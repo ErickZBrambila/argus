@@ -238,11 +238,36 @@ class Autopilot:
         signal.signal(signal.SIGTERM, self._shutdown)
 
         web_dashboard.register_autopilot(self)
+        web_dashboard.set_watchlist_base(self._cfg.watchlist)
 
         _history_broker = self._accounts[0].broker
         web_dashboard.register_chart_source(
             lambda sym: _history_broker.get_historical_prices(sym, span="month", interval="day")
         )
+
+        try:
+            import robin_stocks.robinhood as _rh
+
+            def _rh_search(q: str) -> list[dict]:
+                instruments = _rh.stocks.find_instrument_data(q) or []
+                seen: set[str] = set()
+                results = []
+                for inst in instruments:
+                    sym = inst.get("symbol", "")
+                    if not sym or sym in seen:
+                        continue
+                    seen.add(sym)
+                    results.append({
+                        "symbol": sym,
+                        "name": inst.get("simple_name") or inst.get("name") or "",
+                    })
+                    if len(results) >= 6:
+                        break
+                return results
+
+            web_dashboard.register_search(_rh_search)
+        except Exception:
+            pass
 
         web_thread = threading.Thread(
             target=web_dashboard.main,
@@ -340,7 +365,7 @@ class Autopilot:
             return symbol, sig
 
         import concurrent.futures as _cf
-        watchlist = self._cfg.watchlist
+        watchlist = web_dashboard.get_watchlist() or self._cfg.watchlist
         with _cf.ThreadPoolExecutor(max_workers=min(len(watchlist), 8), thread_name_prefix="sig") as ex:
             futures = {ex.submit(_compute_signal, sym): sym for sym in watchlist}
             for fut in _cf.as_completed(futures):

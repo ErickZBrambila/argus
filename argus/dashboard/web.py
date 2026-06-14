@@ -14,7 +14,7 @@ from typing import AsyncGenerator
 import pathlib
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -31,12 +31,18 @@ _subscribers: set[asyncio.Queue] = set()
 
 # Chart data source — registered by main loop
 _chart_source_fn = None   # callable(symbol: str) -> list[dict]
+_search_fn = None          # callable(query: str) -> list[{symbol, name}]
 _autopilot = None         # Autopilot instance for runtime control
 
 
 def register_chart_source(fn) -> None:
     global _chart_source_fn
     _chart_source_fn = fn
+
+
+def register_search(fn) -> None:
+    global _search_fn
+    _search_fn = fn
 
 
 def register_autopilot(ap) -> None:
@@ -73,6 +79,23 @@ def _push_approvals_state() -> None:
         approvals = dict(_pending_approvals)
     _state["pending_approvals"] = approvals
     _sse_push(json.dumps(_state, default=str))
+
+
+# ── Runtime watchlist (mutable; seeded from config at startup) ────────────────
+_watchlist_lock = threading.Lock()
+_runtime_watchlist: list[str] = []
+
+
+def set_watchlist_base(symbols: list[str]) -> None:
+    global _runtime_watchlist
+    with _watchlist_lock:
+        _runtime_watchlist = list(symbols)
+    _state["watchlist"] = list(symbols)
+
+
+def get_watchlist() -> list[str]:
+    with _watchlist_lock:
+        return list(_runtime_watchlist)
 
 
 def _sse_push(data: str) -> None:
@@ -319,11 +342,58 @@ async def get_chart(symbol: str) -> dict:
         return {"candles": [], "symbol": symbol}
 
 
+@app.get("/api/search")
+async def search_symbols(q: str = Query(default="", max_length=60)) -> dict:
+    q = q.strip()
+    if not q or _search_fn is None:
+        return {"results": []}
+    try:
+        results = await asyncio.get_event_loop().run_in_executor(None, _search_fn, q)
+        return {"results": results or []}
+    except Exception as exc:
+        logger.warning("Symbol search error: %s", exc)
+        return {"results": []}
+
+
 @app.get("/api/flashcards")
 async def get_flashcards() -> dict:
     cards = _state.get("flashcards", [])
     summary = _state.get("flashcard_summary", {})
     return {"flashcards": cards, "summary": summary}
+
+
+@app.get("/api/watchlist")
+async def get_watchlist_api() -> dict:
+    return {"watchlist": get_watchlist()}
+
+
+@app.post("/api/watchlist", dependencies=[Depends(_require_auth)])
+async def add_to_watchlist_api(body: dict) -> dict:
+    symbol = (body.get("symbol") or "").strip().upper()
+    if not symbol or not _SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=400, detail="Invalid symbol")
+    with _watchlist_lock:
+        if symbol not in _runtime_watchlist:
+            _runtime_watchlist.append(symbol)
+        wl = list(_runtime_watchlist)
+    _state["watchlist"] = wl
+    _sse_push(json.dumps(_state, default=str))
+    logger.info("Watchlist add: %s → %s", symbol, wl)
+    return {"watchlist": wl}
+
+
+@app.delete("/api/watchlist/{symbol}", dependencies=[Depends(_require_auth)])
+async def remove_from_watchlist_api(symbol: str) -> dict:
+    symbol = symbol.upper().strip()
+    if not _SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=400, detail="Invalid symbol")
+    with _watchlist_lock:
+        _runtime_watchlist[:] = [s for s in _runtime_watchlist if s != symbol]
+        wl = list(_runtime_watchlist)
+    _state["watchlist"] = wl
+    _sse_push(json.dumps(_state, default=str))
+    logger.info("Watchlist remove: %s → %s", symbol, wl)
+    return {"watchlist": wl}
 
 
 @app.get("/api/approvals")
@@ -640,6 +710,63 @@ _HTML = """<!DOCTYPE html>
   @media (min-width: 640px)  { .tab-pane.active { gap: 18px; } }
   @media (min-width: 1024px) { .tab-pane.active { grid-template-columns: repeat(2, 1fr); gap: 20px; } }
   @media (min-width: 1400px) { .tab-pane.active { grid-template-columns: repeat(3, 1fr); } }
+
+  /* ── Charts tab — full-width single column, no multi-col grid ──────────── */
+  #tab-charts.active { display: flex !important; flex-direction: column; grid-template-columns: none; gap: 14px; }
+
+  /* Toolbar card */
+  .ct-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .wl-add-row { display: flex; gap: 6px; }
+  .wl-add-input { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 13px; padding: 7px 10px; font-family: var(--mono); text-transform: uppercase; width: 120px; }
+  .wl-add-input::placeholder { text-transform: none; color: var(--text-dim); }
+  .wl-add-input:focus { outline: none; border-color: var(--accent); }
+  .wl-add-btn { background: var(--accent); color: #000d0a; border: none; border-radius: var(--radius-sm); font-weight: 700; font-size: 12px; padding: 7px 12px; cursor: pointer; white-space: nowrap; }
+  .wl-add-btn:hover { background: #00ebc2; }
+  .ct-divider { width: 1px; height: 20px; background: var(--border); flex-shrink: 0; }
+  .suggest-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .suggest-chip { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 999px; font-size: 11px; font-weight: 600; padding: 3px 10px; cursor: pointer; transition: border-color .15s, color .15s; }
+  .suggest-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Dashlet grid — draggable cards */
+  .ct-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+  .ct-dashlet {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px 16px;
+    cursor: grab;
+    user-select: none;
+    transition: box-shadow .15s, border-color .15s;
+  }
+  .ct-dashlet:hover { border-color: rgba(0,212,170,.35); box-shadow: 0 0 0 1px rgba(0,212,170,.15), 0 4px 18px rgba(0,0,0,.4); }
+  .ct-dashlet.sortable-ghost { opacity: .35; }
+  .ct-dashlet.sortable-drag { cursor: grabbing; box-shadow: 0 8px 32px rgba(0,0,0,.6); }
+  .ct-dashlet-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; cursor: grab; }
+  .ct-dashlet-sym { font-size: 15px; font-weight: 700; color: var(--accent); flex: 1; }
+  .ct-dashlet-price { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); }
+  .ct-dashlet-sig { font-size: 11px; }
+  .ct-dashlet-remove { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; padding: 2px 5px; border-radius: 4px; line-height: 1; }
+  .ct-dashlet-remove:hover { color: var(--danger); background: rgba(248,81,73,.12); }
+  .ct-chart-area { width: 100%; height: 240px; border-radius: var(--radius-sm); overflow: hidden; }
+  .ct-dashlet-footer { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 11px; flex-wrap: wrap; }
+  .ct-stat { color: var(--muted); }
+  .ct-stat span { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .ct-type-btns { display: flex; gap: 3px; margin-left: auto; }
+  .ct-type-btn { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); font-size: 10px; font-weight: 700; padding: 2px 7px; cursor: pointer; }
+  .ct-type-btn.active { background: var(--surface2); color: var(--text); border-color: var(--accent); }
+
+  /* ── Symbol search autocomplete ─────────────────────────────────────────── */
+  .wl-search-wrap { position: relative; }
+  .wl-add-input { width: 220px; }
+  .wl-dropdown { position: absolute; top: calc(100% + 4px); left: 0; min-width: 280px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm); z-index: 200; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,.55); display: none; }
+  .wl-dropdown.open { display: block; }
+  .wl-dd-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; cursor: pointer; transition: background .1s; }
+  .wl-dd-item:hover, .wl-dd-item.wl-dd-sel { background: rgba(0,212,170,.12); }
+  .wl-dd-sym { font-family: var(--mono); font-weight: 700; font-size: 13px; color: var(--accent); min-width: 55px; }
+  .wl-dd-name { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wl-dd-empty { padding: 10px 14px; font-size: 12px; color: var(--text-dim); }
+  .wl-dd-searching { padding: 10px 14px; font-size: 12px; color: var(--muted); }
+
   .modal {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -968,6 +1095,7 @@ _HTML = """<!DOCTYPE html>
   .legend-dash { width: 18px; height: 2px; border-top: 2px dashed; flex-shrink: 0; }
 </style>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://unpkg.com/sortablejs@1.15.2/Sortable.min.js"></script>
 </head>
 <body>
 <div class="app">
@@ -992,6 +1120,7 @@ _HTML = """<!DOCTYPE html>
   <nav class="tab-bar">
     <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
     <button class="tab-btn" onclick="switchTab('performance')">Performance</button>
+    <button class="tab-btn" onclick="switchTab('charts')">Charts</button>
   </nav>
   <main>
 
@@ -1168,6 +1297,35 @@ _HTML = """<!DOCTYPE html>
 
   </div><!-- /tab-performance -->
 
+  <div class="tab-pane" id="tab-charts">
+
+    <!-- Toolbar -->
+    <div class="card card-full">
+      <div class="ct-toolbar">
+        <div class="wl-add-row">
+          <div class="wl-search-wrap">
+            <input class="wl-add-input" id="wl-add-input" placeholder="Search name or ticker…"
+                   autocomplete="off"
+                   oninput="ctSearchDebounce(this.value)"
+                   onkeydown="ctSearchKeydown(event)"
+                   onblur="setTimeout(ctDropdownClose,150)">
+            <div class="wl-dropdown" id="wl-dropdown"></div>
+          </div>
+          <button class="wl-add-btn" onclick="ctAddFromInput()">+ Add</button>
+        </div>
+        <div class="ct-divider"></div>
+        <div style="font-size:11px;font-weight:700;color:var(--muted);white-space:nowrap">Suggested:</div>
+        <div class="suggest-chips" id="suggest-chips"></div>
+      </div>
+    </div>
+
+    <!-- Draggable dashlet grid -->
+    <div class="ct-grid" id="ct-grid">
+      <div class="empty" style="grid-column:1/-1;padding:40px 0">No symbols in watchlist — add one above</div>
+    </div>
+
+  </div><!-- /tab-charts -->
+
   </main>
   <p class="timestamp" id="last-update" style="padding: 0 24px 16px;">Last update: —</p>
 </div>
@@ -1199,6 +1357,7 @@ function apiFetch(url, opts = {}) {
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.textContent.toLowerCase() === name));
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
+  if (name === 'charts') ctInitSortable();
 }
 
 async function promotePosition(symbol, fromAccount) {
@@ -1607,8 +1766,10 @@ function applyState(state) {
     approvalList.innerHTML = '';
   }
 
-  // Cache flashcards globally for chart markers, then render
+  // Cache signals + flashcards globally for chart markers and charts tab
+  window._latestSignals = state.signals || [];
   window._flashcards = state.flashcards || [];
+  if (state.watchlist) ctApplyWatchlist(state.watchlist);
   // Scan timing
   if (state.next_scan_at) _nextScanAt = new Date(state.next_scan_at);
   _updateSessionBadge(state.market_session || 'closed');
@@ -2063,6 +2224,287 @@ function buildChartTabs(signals) {
     }
   });
   if (!_chartSymbol && syms.length) loadChart(syms[0]);
+}
+
+// ── Charts tab (draggable dashlets) ──────────────────────────────────────────
+const _POPULAR = ['MSFT','AMZN','GOOGL','META','NFLX','AMD','INTC','JPM','BAC',
+                  'COIN','SOL','DOGE','XRP','SPY','QQQ','ROKU','UBER','PLTR','RIVN','SOFI'];
+
+let _ctWatchlist = [];   // current ordered watchlist
+let _ctCharts = {};      // symbol → {chart, candle, line, pred, type}
+let _ctSortable = null;
+
+function ctInitSortable() {
+  if (_ctSortable) return;
+  const grid = document.getElementById('ct-grid');
+  _ctSortable = Sortable.create(grid, {
+    animation: 150,
+    ghostClass: 'sortable-ghost',
+    dragClass: 'sortable-drag',
+    handle: '.ct-dashlet-header',
+    onEnd: () => {
+      _ctWatchlist = [...grid.querySelectorAll('.ct-dashlet')].map(el => el.dataset.sym);
+    },
+  });
+}
+
+function ctApplyWatchlist(symbols) {
+  const prev = new Set(_ctWatchlist);
+  const next = new Set(symbols);
+
+  // Add new dashlets
+  for (const sym of symbols) {
+    if (!prev.has(sym)) ctAddDashlet(sym);
+  }
+  // Remove gone dashlets
+  for (const sym of [...prev]) {
+    if (!next.has(sym)) ctRemoveDashlet(sym);
+  }
+
+  _ctWatchlist = symbols;
+  ctRefreshSignals();
+  ctRefreshSuggestions(symbols);
+}
+
+function ctAddDashlet(sym) {
+  if (document.getElementById('ct-card-' + sym)) return;
+  const grid = document.getElementById('ct-grid');
+  const empty = grid.querySelector('.empty');
+  if (empty) empty.remove();
+
+  const card = document.createElement('div');
+  card.className = 'ct-dashlet';
+  card.id = 'ct-card-' + sym;
+  card.dataset.sym = sym;
+  card.innerHTML = `
+    <div class="ct-dashlet-header">
+      <span class="ct-dashlet-sym">${escHtml(sym)}</span>
+      <span class="ct-dashlet-price" id="ct-price-${escHtml(sym)}">—</span>
+      <span class="ct-dashlet-sig" id="ct-sig-${escHtml(sym)}"></span>
+      <button class="ct-dashlet-remove" onclick="event.stopPropagation();ctRemoveSymbol('${escHtml(sym)}')" title="Remove from watchlist">✕</button>
+    </div>
+    <div class="ct-chart-area" id="ct-chart-${escHtml(sym)}"></div>
+    <div class="ct-dashlet-footer">
+      <span class="ct-stat">RSI <span id="ct-rsi-${escHtml(sym)}">—</span></span>
+      <span class="ct-stat">MACD <span id="ct-macd-${escHtml(sym)}">—</span></span>
+      <div class="ct-type-btns">
+        <button class="ct-type-btn active" id="ct-candles-${escHtml(sym)}" onclick="ctSetType('${escHtml(sym)}','candles')">Candles</button>
+        <button class="ct-type-btn" id="ct-line-${escHtml(sym)}" onclick="ctSetType('${escHtml(sym)}','line')">Line</button>
+      </div>
+    </div>`;
+  grid.appendChild(card);
+
+  // Init chart instance
+  const el = document.getElementById('ct-chart-' + sym);
+  const chart = LightweightCharts.createChart(el, {
+    ..._CHART_OPTS,
+    layout: { ..._CHART_OPTS.layout },
+    rightPriceScale: { borderColor: '#2a2f3e', visible: true },
+    timeScale: { borderColor: '#2a2f3e', timeVisible: false },
+    handleScroll: false, handleScale: true,
+  });
+  const candle = chart.addCandlestickSeries({
+    upColor: '#00D4AA', downColor: '#f85149',
+    borderUpColor: '#00D4AA', borderDownColor: '#f85149',
+    wickUpColor: '#00D4AA', wickDownColor: '#f85149',
+  });
+  const line = chart.addAreaSeries({
+    lineColor: '#00D4AA', topColor: 'rgba(0,212,170,0.18)',
+    bottomColor: 'rgba(0,212,170,0.01)', lineWidth: 2, visible: false,
+  });
+  const pred = chart.addLineSeries({
+    color: '#60a5fa', lineWidth: 1,
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    lastValueVisible: false, priceLineVisible: false,
+  });
+  new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth })).observe(el);
+  _ctCharts[sym] = { chart, candle, line, pred, type: 'candles' };
+
+  ctLoadChart(sym);
+}
+
+function ctRemoveDashlet(sym) {
+  const el = document.getElementById('ct-card-' + sym);
+  if (el) el.remove();
+  if (_ctCharts[sym]) { try { _ctCharts[sym].chart.remove(); } catch(_){} delete _ctCharts[sym]; }
+  const grid = document.getElementById('ct-grid');
+  if (!grid.querySelector('.ct-dashlet')) {
+    grid.innerHTML = '<div class="empty" style="grid-column:1/-1;padding:40px 0">No symbols in watchlist — add one above</div>';
+  }
+}
+
+function ctSetType(sym, type) {
+  const inst = _ctCharts[sym];
+  if (!inst) return;
+  inst.type = type;
+  inst.candle.applyOptions({ visible: type === 'candles' });
+  inst.line.applyOptions({ visible: type === 'line' });
+  document.getElementById('ct-candles-' + sym)?.classList.toggle('active', type === 'candles');
+  document.getElementById('ct-line-' + sym)?.classList.toggle('active', type === 'line');
+}
+
+async function ctLoadChart(sym) {
+  const inst = _ctCharts[sym];
+  if (!inst) return;
+  try {
+    const res = await fetch(`/api/chart/${encodeURIComponent(sym)}`);
+    const data = await res.json();
+    const candles = (data.candles || []).sort((a, b) => a.time - b.time);
+    _lastCandles[sym] = candles;
+    inst.candle.setData(candles);
+    inst.line.setData(candles.map(c => ({ time: c.time, value: c.close })));
+    if (candles.length >= 5) inst.pred.setData(buildPrediction(candles));
+    else inst.pred.setData([]);
+
+    // Trade markers
+    const cards = (window._flashcards || []).filter(c => c.symbol === sym);
+    const markers = [];
+    for (const c of cards) {
+      const ts = c.timestamp ? Math.floor(new Date(c.timestamp).getTime() / 1000) : null;
+      if (!ts || !candles.length) continue;
+      const nearest = candles.reduce((a,b) => Math.abs(b.time-ts)<Math.abs(a.time-ts)?b:a);
+      if (c.action === 'BUY') markers.push({ time: nearest.time, position: 'belowBar', color: '#3fb950', shape: 'arrowUp', text: 'B', size: 1 });
+      if (c.exit_price != null) {
+        const exitTs = ts + Math.round((c.hold_duration_hours || 1) * 3600);
+        const ne = candles.reduce((a,b) => Math.abs(b.time-exitTs)<Math.abs(a.time-exitTs)?b:a);
+        markers.push({ time: ne.time, position: 'aboveBar', color: c.pnl_pct>0?'#00D4AA':'#f85149', shape: 'arrowDown', text: c.pnl_pct!=null?(c.pnl_pct>=0?'+':'')+c.pnl_pct.toFixed(1)+'%':'S', size: 1 });
+      }
+    }
+    markers.sort((a,b) => a.time - b.time);
+    try { inst.candle.setMarkers(markers); } catch(_){}
+    inst.chart.timeScale().fitContent();
+  } catch(e) { console.error('ct chart error', sym, e); }
+}
+
+function ctRefreshSignals() {
+  const sigs = window._latestSignals || [];
+  for (const sym of _ctWatchlist) {
+    const sig = sigs.find(s => s.symbol === sym);
+    if (!sig) continue;
+    const priceEl = document.getElementById('ct-price-' + sym);
+    const sigEl   = document.getElementById('ct-sig-' + sym);
+    const rsiEl   = document.getElementById('ct-rsi-' + sym);
+    const macdEl  = document.getElementById('ct-macd-' + sym);
+    if (priceEl) priceEl.textContent = sig.price != null ? '$' + sig.price.toFixed(2) : '—';
+    if (sigEl) {
+      const cls = sig.composite === 'bullish' ? 'bullish' : sig.composite === 'bearish' ? 'bearish' : 'neutral';
+      sigEl.innerHTML = pill((sig.composite||'neutral').toUpperCase(), cls);
+    }
+    if (rsiEl) {
+      const r = sig.rsi != null ? sig.rsi.toFixed(1) : '—';
+      const c = sig.rsi < 30 ? '#00D4AA' : sig.rsi > 70 ? '#f85149' : 'var(--text)';
+      rsiEl.innerHTML = `<span style="color:${c}">${r}</span>`;
+    }
+    if (macdEl) {
+      const m = sig.macd_hist != null ? (sig.macd_hist>=0?'+':'')+sig.macd_hist.toFixed(4) : '—';
+      const c = sig.macd_hist > 0 ? '#00D4AA' : '#f85149';
+      macdEl.innerHTML = `<span style="color:${c}">${m}</span>`;
+    }
+  }
+}
+
+function ctRefreshSuggestions(watchlist) {
+  const chips = document.getElementById('suggest-chips');
+  if (!chips) return;
+  const notWatched = _POPULAR.filter(s => !watchlist.includes(s));
+  chips.innerHTML = notWatched.slice(0, 14).map(s =>
+    `<button class="suggest-chip" onclick="ctAddSymbol('${escHtml(s)}')">${escHtml(s)}</button>`
+  ).join('');
+}
+
+// ── Symbol search / autocomplete ──────────────────────────────────────────────
+let _ctSearchTimer = null;
+let _ctSearchResults = [];
+let _ctSearchSel = -1;
+
+function ctSearchDebounce(val) {
+  clearTimeout(_ctSearchTimer);
+  _ctSearchResults = []; _ctSearchSel = -1;
+  if (!val.trim()) { ctDropdownClose(); return; }
+  const dd = document.getElementById('wl-dropdown');
+  dd.innerHTML = '<div class="wl-dd-searching">Searching…</div>';
+  dd.classList.add('open');
+  _ctSearchTimer = setTimeout(() => ctSearchFetch(val.trim()), 280);
+}
+
+async function ctSearchFetch(q) {
+  try {
+    const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+    const d = await r.json();
+    _ctSearchResults = d.results || [];
+    ctDropdownRender();
+  } catch(e) { ctDropdownClose(); }
+}
+
+function ctDropdownRender() {
+  const dd = document.getElementById('wl-dropdown');
+  if (!_ctSearchResults.length) {
+    dd.innerHTML = '<div class="wl-dd-empty">No results — try the exact ticker (e.g. AAPL)</div>';
+  } else {
+    dd.innerHTML = _ctSearchResults.map((item, i) => {
+      const sel = i === _ctSearchSel ? ' wl-dd-sel' : '';
+      return `<div class="wl-dd-item${sel}" onmousedown="ctPickResult('${escHtml(item.symbol)}')">
+        <span class="wl-dd-sym">${escHtml(item.symbol)}</span>
+        <span class="wl-dd-name">${escHtml(item.name || '')}</span>
+      </div>`;
+    }).join('');
+  }
+  dd.classList.add('open');
+}
+
+function ctDropdownClose() {
+  const dd = document.getElementById('wl-dropdown');
+  if (dd) { dd.classList.remove('open'); dd.innerHTML = ''; }
+}
+
+function ctPickResult(symbol) {
+  document.getElementById('wl-add-input').value = '';
+  ctDropdownClose();
+  ctAddSymbol(symbol);
+}
+
+function ctSearchKeydown(e) {
+  if (e.key === 'Escape') { ctDropdownClose(); return; }
+  if (e.key === 'Enter') {
+    if (_ctSearchSel >= 0 && _ctSearchResults[_ctSearchSel]) {
+      ctPickResult(_ctSearchResults[_ctSearchSel].symbol);
+    } else {
+      ctAddFromInput();
+    }
+    e.preventDefault(); return;
+  }
+  if (!_ctSearchResults.length) return;
+  if (e.key === 'ArrowDown') {
+    _ctSearchSel = Math.min(_ctSearchSel + 1, _ctSearchResults.length - 1);
+    ctDropdownRender(); e.preventDefault();
+  } else if (e.key === 'ArrowUp') {
+    _ctSearchSel = Math.max(_ctSearchSel - 1, 0);
+    ctDropdownRender(); e.preventDefault();
+  }
+}
+
+function ctAddFromInput() {
+  const val = (document.getElementById('wl-add-input').value || '').trim().toUpperCase();
+  if (val) ctAddSymbol(val);
+}
+
+async function ctAddSymbol(symbol) {
+  if (!symbol) return;
+  document.getElementById('wl-add-input').value = '';
+  ctDropdownClose();
+  try {
+    const r = await apiFetch('/api/watchlist', { method: 'POST', body: JSON.stringify({ symbol }) });
+    const d = await r.json();
+    if (d.watchlist) ctApplyWatchlist(d.watchlist);
+  } catch(e) { console.error(e); }
+}
+
+async function ctRemoveSymbol(symbol) {
+  try {
+    const r = await apiFetch(`/api/watchlist/${encodeURIComponent(symbol)}`, { method: 'DELETE' });
+    const d = await r.json();
+    if (d.watchlist) ctApplyWatchlist(d.watchlist);
+  } catch(e) { console.error(e); }
 }
 
 // SSE
