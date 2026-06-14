@@ -44,6 +44,7 @@ export ROBINHOOD_MFA_SECRET="your_mfa_secret"   # optional
 export SMTP_PASSWORD=""                           # optional
 export TWILIO_AUTH_TOKEN=""                       # optional
 export SLACK_BOT_TOKEN=""                         # optional
+export DASHBOARD_TOKEN="your_secret_token"        # recommended — gates all mutating API endpoints
 ```
 
 Then reload:

@@ -169,6 +169,41 @@ def _flashcards():
         },
     ]
 
+def _token_usage(tick):
+    # Simulate accumulating token usage across the trading day
+    calls = 4 + tick  # one ensemble call per scan tick
+    claude_input  = calls * 1_240
+    claude_output = calls * 187
+    claude_cache  = calls * 3_800
+    gemini_input  = calls * 1_190
+    gemini_output = calls * 143
+    claude_cost = (
+        claude_input  * 15.00 / 1_000_000
+        + claude_output * 75.00 / 1_000_000
+        + claude_cache  *  1.50 / 1_000_000
+    )
+    gemini_cost = gemini_input * 0.10 / 1_000_000 + gemini_output * 0.40 / 1_000_000
+    import datetime as _dt
+    return {
+        "date": _dt.date.today().isoformat(),
+        "claude": {
+            "calls": calls,
+            "input_tokens":      claude_input,
+            "output_tokens":     claude_output,
+            "cache_read_tokens": claude_cache,
+            "cost_usd":          round(claude_cost, 4),
+        },
+        "gemini": {
+            "calls":         calls,
+            "input_tokens":  gemini_input,
+            "output_tokens": gemini_output,
+            "cost_usd":      round(gemini_cost, 4),
+        },
+        "total_calls":    calls * 2,
+        "total_cost_usd": round(claude_cost + gemini_cost, 4),
+    }
+
+
 def _pending_approval(tick):
     if tick % 20 < 8:
         return {
@@ -216,6 +251,7 @@ def push_loop():
                 "total": 3, "closed": 2, "win_rate": 0.5,
                 "avg_pnl_pct": 1.67, "best_pnl_pct": 5.62, "worst_pnl_pct": -2.29,
             },
+            "token_usage": _token_usage(_t),
         }
         dash.push_state(state)
         # Also wire pending approvals directly

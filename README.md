@@ -2,7 +2,7 @@
 
 ![Argus](argus/dashboard/static/banner.png)
 
-![version](https://img.shields.io/badge/version-v0.5.0-blue)
+![version](https://img.shields.io/badge/version-v0.5.3-blue)
 
 ## 1. What is Argus?
 
@@ -51,7 +51,7 @@ graph TD
     LB -->|"last 12 entries"| TERM
 ```
 
-The main loop (`Autopilot`) runs on an adaptive interval that changes with the NYSE market session. On each tick it detects the current session, computes signals once (market data is account-agnostic), then runs `_tick_account` independently for each configured account.
+The main loop (`Autopilot`) runs on an adaptive interval that changes with the NYSE market session. On each tick it detects the current session, computes signals **in parallel** across all watchlist symbols (`ThreadPoolExecutor`, up to 8 workers), then runs `_tick_account` independently for each configured account.
 
 ---
 
@@ -70,7 +70,7 @@ sequenceDiagram
 
     ML->>SE: compute(symbol)
     SE-->>ML: SignalResult (RSI, MACD, BB, SMA, EMA, composite, confidence)
-    ML->>DE: decide(signal, equity, positions, daily_pnl_pct)
+    ML->>DE: decide(signal, equity, positions, daily_pnl_pct, max_positions)
     DE->>C: decide(symbol, prompt) [thread 1]
     DE->>G: decide(symbol, prompt) [thread 2]
     C-->>DE: TradeDecision (action, confidence, reasoning)
@@ -267,6 +267,7 @@ Non-secret settings live in `.env` (copy from `.env.example`). Secrets use the O
 |----------|---------|-------------|
 | `WEB_HOST` | `127.0.0.1` | Bind address; use `0.0.0.0` only behind an auth proxy. |
 | `WEB_PORT` | `8000` | Port for the FastAPI web server. |
+| `DASHBOARD_TOKEN` | *(empty)* | If set, all mutating API endpoints require an `X-Argus-Token: <value>` header. The token is embedded in the served HTML at page load so the browser sends it automatically. Read-only endpoints and SSE are not gated. Strongly recommended when `WEB_HOST=0.0.0.0`. |
 | `DATABASE_URL` | `sqlite:///argus.db` | SQLAlchemy connection string for trade history. |
 
 ### Notifications
@@ -397,7 +398,7 @@ Chronological list of executed orders from the current session: time, symbol, ac
 
 #### Decision Flashcards
 
-Grid of cards from `argus_flashcards.jsonl`. Front shows market context at decision time (signal, RSI, MACD, Bollinger Band). Click to expand: full AI reasoning, risk level, entry price, and — once closed — exit price, P&L %, and hold duration.
+Grid of cards from `argus_flashcards.jsonl`, designed for non-technical review. Each card face shows: the symbol + action (BUY/SELL pill), how long ago the trade was made, the AI's confidence level in plain English (e.g. "Low-risk trade — AI was 78% confident"), and a quote-style excerpt of the AI's reasoning. Click any card to expand the full explanation in two sections: "Why the AI decided this" (full reasoning) and "Market conditions at the time" with plain-English labels (Momentum, Trend strength, Price range, vs 20-day average, vs 50-day trend line, Overall signal). Closed trades show the dollar outcome (e.g. "▲ Made +$2.81 (+5.62%)") and hold duration. Open trades show "In progress · opened Xh ago".
 
 #### Agent Log
 
@@ -442,7 +443,7 @@ Use this to tune `classify_risk()` thresholds and understand whether high-confid
 
 ## 14. Flashcard Learning System
 
-Every executed trade (buy or sell) produces a flashcard. Cards are stored in `argus_flashcards.jsonl` (one JSON object per line) in the project root. The `FlashcardStore` loads all cards into memory at startup and flushes the full file to disk on every write.
+Every executed trade (buy or sell) produces a flashcard. Cards are stored in `argus_flashcards.jsonl` (one JSON object per line) in the project root. The `FlashcardStore` loads all cards into memory at startup and flushes to disk atomically on every write: it writes to a temp file in the same directory, then `os.replace()`s it into place, so a crash mid-write can never produce a corrupt file. The file is `chmod 0600` after each flush.
 
 **On trade entry (`FlashcardStore.record_trade`)**, the card captures:
 
@@ -599,7 +600,7 @@ argus/
 │   └── mac-mini-setup.md         # Step-by-step Mac Mini + Docker migration checklist
 │
 └── argus/                        # Main package
-    ├── __init__.py               # Package version (__version__ = "0.5.0")
+    ├── __init__.py               # Package version (__version__ = "0.5.3")
     ├── main.py                   # Autopilot orchestration loop; AccountContext; market session detection
     ├── config.py                 # Pydantic settings; keychain source; priority chain
     ├── secrets.py                # OS keychain read/write via keyring
@@ -622,8 +623,7 @@ argus/
     │   ├── web.py                # FastAPI app; SSE stream; approval queue; REST endpoints; HTML UI
     │   ├── terminal.py           # Rich terminal dashboard; NullTerminalDashboard for headless/Docker
     │   ├── token_tracker.py      # Thread-safe daily token + cost tracker; resets at midnight
-    │   ├── log_buffer.py         # In-memory log ring buffer (500 entries); logging handler installer
-    │   └── server.py             # Standalone web-only entry point (no main loop)
+    │   └── log_buffer.py         # In-memory log ring buffer (500 entries); logging handler installer
     │
     ├── learning/
     │   └── flashcards.py         # FlashcardStore; Flashcard dataclass; JSONL persistence
