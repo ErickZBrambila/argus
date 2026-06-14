@@ -6,6 +6,8 @@ import asyncio
 import datetime
 import json
 import logging
+import queue as stdlib_queue
+import re
 import threading
 from typing import AsyncGenerator
 
@@ -14,7 +16,6 @@ import pathlib
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,11 @@ logger = logging.getLogger(__name__)
 # Shared state injected by main loop
 _state: dict = {}
 _paused: bool = False
-_sse_queue: asyncio.Queue = asyncio.Queue()
+
+# Thread-safe queue: main loop (sync thread) → SSE broadcaster (async thread)
+_sse_queue: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=5)
+# Per-subscriber async queues — only accessed within the event loop
+_subscribers: set[asyncio.Queue] = set()
 
 # Chart data source — registered by main loop
 _chart_source_fn = None   # callable(symbol: str) -> list[dict]
@@ -67,24 +72,52 @@ def _push_approvals_state() -> None:
     with _approval_lock:
         approvals = dict(_pending_approvals)
     _state["pending_approvals"] = approvals
+    _sse_push(json.dumps(_state, default=str))
+
+
+def _sse_push(data: str) -> None:
+    """Thread-safe push to SSE broadcaster. Drops oldest item if full."""
     try:
-        _sse_queue.put_nowait(json.dumps(_state, default=str))
-    except asyncio.QueueFull:
-        pass
+        _sse_queue.put_nowait(data)
+    except stdlib_queue.Full:
+        try:
+            _sse_queue.get_nowait()
+        except stdlib_queue.Empty:
+            pass
+        try:
+            _sse_queue.put_nowait(data)
+        except stdlib_queue.Full:
+            pass
+
 
 app = FastAPI(title="Argus Dashboard", docs_url=None, redoc_url=None)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS intentionally omitted: frontend is served from the same origin as the API.
 _STATIC_DIR = pathlib.Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 
+@app.on_event("startup")
+async def _start_sse_broadcaster() -> None:
+    asyncio.create_task(_sse_broadcaster())
+
+
+async def _sse_broadcaster() -> None:
+    """Drain the thread-safe _sse_queue and fan out to all async subscribers."""
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            data = await loop.run_in_executor(None, _sse_queue.get, True, 0.5)
+            for q in list(_subscribers):
+                try:
+                    q.put_nowait(data)
+                except asyncio.QueueFull:
+                    pass
+        except Exception:
+            pass
+
+
 def push_state(state: dict) -> None:
-    """Called by the main loop to push new state to all SSE clients."""
+    """Called by the main loop (sync thread) to push new state to all SSE clients."""
     global _state
     try:
         from argus.dashboard.log_buffer import get_recent
@@ -92,10 +125,7 @@ def push_state(state: dict) -> None:
     except Exception:
         pass
     _state = state
-    try:
-        _sse_queue.put_nowait(json.dumps(state, default=str))
-    except asyncio.QueueFull:
-        pass
+    _sse_push(json.dumps(state, default=str))
 
 
 def set_paused(v: bool) -> None:
@@ -158,6 +188,8 @@ async def set_scan_interval(body: dict) -> dict:
         seconds = int(seconds)
         if seconds < 15:
             raise HTTPException(status_code=400, detail="Minimum interval is 15 seconds")
+        if seconds > 3600:
+            raise HTTPException(status_code=400, detail="Maximum interval is 3600 seconds")
     _autopilot.set_scan_interval(seconds)
     return {"seconds": seconds, "status": "adaptive" if seconds is None else "override"}
 
@@ -203,29 +235,36 @@ async def force_close(symbol: str) -> dict:
     return {"status": "close_requested", "symbol": symbol}
 
 
-_force_close_queue: asyncio.Queue = asyncio.Queue()
-_promote_queue: asyncio.Queue = asyncio.Queue()
+_force_close_queue: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=10)
+_promote_queue: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=10)
+
+_KNOWN_ACCOUNTS = {"agentic", "default", "main"}
+_SYMBOL_RE = re.compile(r"^[A-Z0-9.]{1,10}$")
 
 
 def get_force_close_symbol() -> str | None:
     try:
         return _force_close_queue.get_nowait()
-    except asyncio.QueueEmpty:
+    except stdlib_queue.Empty:
         return None
 
 
 def get_promote_request() -> dict | None:
     try:
         return _promote_queue.get_nowait()
-    except asyncio.QueueEmpty:
+    except stdlib_queue.Empty:
         return None
 
 
 @app.post("/api/promote/{symbol}")
 async def promote_position(symbol: str, body: dict = {}) -> dict:
     symbol = symbol.upper().strip()
-    from_account = body.get("from_account", "default")
-    to_account   = body.get("to_account",   "agentic")
+    if not _SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=400, detail="Invalid symbol")
+    from_account = str(body.get("from_account", "default"))
+    to_account   = str(body.get("to_account",   "agentic"))
+    if from_account not in _KNOWN_ACCOUNTS or to_account not in _KNOWN_ACCOUNTS:
+        raise HTTPException(status_code=400, detail="Invalid account label")
     _promote_queue.put_nowait({"symbol": symbol, "from_account": from_account, "to_account": to_account})
     logger.info("Promote requested: %s %s → %s", symbol, from_account, to_account)
     return {"status": "queued", "symbol": symbol, "from": from_account, "to": to_account}
@@ -234,6 +273,8 @@ async def promote_position(symbol: str, body: dict = {}) -> dict:
 @app.get("/api/chart/{symbol}")
 async def get_chart(symbol: str) -> dict:
     symbol = symbol.upper().strip()
+    if not _SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=400, detail="Invalid symbol")
     if _chart_source_fn is None:
         return {"candles": [], "symbol": symbol}
     try:
@@ -304,16 +345,21 @@ async def deny_trade(trade_id: str) -> dict:
 
 @app.get("/events")
 async def sse_stream() -> StreamingResponse:
+    q: asyncio.Queue = asyncio.Queue(maxsize=10)
+    _subscribers.add(q)
+
     async def generator() -> AsyncGenerator[str, None]:
-        # Send current state immediately on connect
-        if _state:
-            yield f"data: {json.dumps(_state, default=str)}\n\n"
-        while True:
-            try:
-                data = await asyncio.wait_for(_sse_queue.get(), timeout=30.0)
-                yield f"data: {data}\n\n"
-            except asyncio.TimeoutError:
-                yield ": heartbeat\n\n"
+        try:
+            if _state:
+                yield f"data: {json.dumps(_state, default=str)}\n\n"
+            while True:
+                try:
+                    data = await asyncio.wait_for(q.get(), timeout=30.0)
+                    yield f"data: {data}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        finally:
+            _subscribers.discard(q)
 
     return StreamingResponse(generator(), media_type="text/event-stream")
 
@@ -1442,16 +1488,17 @@ function applyState(state) {
     posBody.innerHTML = posKeys.map(sym => {
       const p = pos[sym];
       const pct = p.unrealized_pnl_pct || 0;
+      const rawSym = sym.replace(/\s*\[.*?\]/,'');
       return `<tr class="tr-hover">
-        <td class="accent">${sym}</td>
+        <td class="accent">${escHtml(sym)}</td>
         <td class="txt-right">${fmt(p.quantity,4)}</td>
         <td class="txt-right">${fmtDollar(p.entry_price)}</td>
         <td class="txt-right">${fmtDollar(p.current_price)}</td>
         <td class="txt-right ${pnlClass(pct)}">${pct >= 0 ? '+' : ''}${fmt(pct)}%</td>
         <td class="txt-right muted">${fmtDollar(p.stop_loss_price)}</td>
         <td class="txt-center">
-          <button class="btn btn-danger" style="padding:5px 11px;font-size:11px;font-weight:700" onclick="confirmClose('${sym.replace(/\s*\[.*?\]/,'')}')">Close</button>
-          ${(p.account||'').toLowerCase()==='default' ? `<button class="btn-promote" onclick="promotePosition('${sym.replace(/\s*\[.*?\]/,'')}','default')" title="Sell here, re-buy on Agentic">Promote ↑</button>` : ''}
+          <button class="btn btn-danger" style="padding:5px 11px;font-size:11px;font-weight:700" onclick="confirmClose('${escHtml(rawSym)}')">Close</button>
+          ${(p.account||'').toLowerCase()==='default' ? `<button class="btn-promote" onclick="promotePosition('${escHtml(rawSym)}','default')" title="Sell here, re-buy on Agentic">Promote ↑</button>` : ''}
         </td>
       </tr>`;
     }).join('');
@@ -1468,7 +1515,7 @@ function applyState(state) {
       const hist = s.macd_hist != null ? fmt(s.macd_hist,4) : '—';
       const sig = s.composite || 'neutral';
       return `<tr class="tr-hover">
-        <td class="accent">${s.symbol}</td>
+        <td class="accent">${escHtml(s.symbol)}</td>
         <td class="txt-right">${fmtDollar(s.price)}</td>
         <td class="txt-right">${rsi}</td>
         <td class="txt-right">${hist}</td>
@@ -1486,9 +1533,9 @@ function applyState(state) {
     trBody.innerHTML = trades.slice(0,15).map(t => {
       const side = t.side || '';
       return `<tr class="tr-hover">
-        <td class="muted">${t.time || ''}</td>
-        <td class="accent">${t.symbol}</td>
-        <td class="txt-center">${pill(side.toUpperCase(), side)}</td>
+        <td class="muted">${escHtml(t.time || '')}</td>
+        <td class="accent">${escHtml(t.symbol)}</td>
+        <td class="txt-center">${pill(escHtml(side.toUpperCase()), side)}</td>
         <td class="txt-right">${fmt(t.quantity,4)}</td>
         <td class="txt-right">${fmtDollar(t.price)}</td>
         <td class="txt-right muted" style="font-size:11px">${t.account || ''}</td>
@@ -1509,13 +1556,13 @@ function applyState(state) {
       const side = a.action || 'BUY';
       return `<div class="approval-item">
         <div class="approval-header">
-          <span class="approval-symbol">${side} ${a.symbol}</span>
-          <span class="pill ${riskCls}">${(a.risk_level||'medium').toUpperCase()} RISK</span>
+          <span class="approval-symbol">${escHtml(side)} ${escHtml(a.symbol)}</span>
+          <span class="pill ${riskCls}">${escHtml((a.risk_level||'medium').toUpperCase())} RISK</span>
         </div>
         <div class="approval-meta">
-          ${fmtDollar(a.dollar_amount)} &middot; Confidence ${fmt((a.confidence||0)*100,0)}% &middot; ${a.account_label||'Default'}
+          ${fmtDollar(a.dollar_amount)} &middot; Confidence ${fmt((a.confidence||0)*100,0)}% &middot; ${escHtml(a.account_label||'Default')}
         </div>
-        <div class="approval-reasoning">${a.reasoning||''}</div>
+        <div class="approval-reasoning">${escHtml(a.reasoning||'')}</div>
         <div class="approval-actions">
           <button class="btn btn-primary" onclick="decideApproval('${id}','approve')">✓ Approve</button>
           <button class="btn btn-danger"  onclick="decideApproval('${id}','deny')">✗ Deny</button>
@@ -1606,10 +1653,10 @@ function renderFlashcards(state) {
     return `<div class="fc ${borderCls}" data-trade-id="${c.trade_id||''}" onclick="this.classList.toggle('expanded')">
       <div class="fc-front">
         <div class="fc-top">
-          <span class="fc-symbol">${c.symbol}</span>
+          <span class="fc-symbol">${escHtml(c.symbol)}</span>
           <div class="fc-badges">
-            <span class="pill pill-${(c.action||'buy').toLowerCase()}">${c.action}</span>
-            <span class="pill pill-risk-${c.risk_level||'medium'}">${(c.risk_level||'medium').toUpperCase()}</span>
+            <span class="pill pill-${escHtml((c.action||'buy').toLowerCase())}">${escHtml(c.action)}</span>
+            <span class="pill pill-risk-${escHtml(c.risk_level||'medium')}">${escHtml((c.risk_level||'medium').toUpperCase())}</span>
           </div>
         </div>
         <div class="fc-indicators">
@@ -1626,9 +1673,9 @@ function renderFlashcards(state) {
         </div>
       </div>
       <div class="fc-back">
-        <div class="fc-reasoning">${c.reasoning||'No reasoning recorded.'}</div>
+        <div class="fc-reasoning">${escHtml(c.reasoning||'No reasoning recorded.')}</div>
         <div class="fc-meta">
-          <span class="private">Entry $${(c.entry_price||0).toFixed(2)} · $${(c.dollar_amount||0).toFixed(2)}</span> · ${c.account||''} · ${ts}
+          <span class="private">Entry $${(c.entry_price||0).toFixed(2)} · $${(c.dollar_amount||0).toFixed(2)}</span> · ${escHtml(c.account||'')} · ${escHtml(ts)}
         </div>
       </div>
     </div>`;
@@ -1939,5 +1986,5 @@ async def index() -> str:
     return _HTML
 
 
-def main(host: str = "0.0.0.0", port: int = 8000) -> None:
+def main(host: str = "127.0.0.1", port: int = 8000) -> None:
     uvicorn.run(app, host=host, port=port, log_level="warning")

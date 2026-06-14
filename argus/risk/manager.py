@@ -45,6 +45,14 @@ class RiskManager:
     def kill_switch_active(self) -> bool:
         return self._kill_switch
 
+    @property
+    def session_entry_equity(self) -> float:
+        return self._session_entry_equity
+
+    @property
+    def day_trade_count(self) -> int:
+        return self._day_trade_count
+
     def reset_kill_switch(self) -> None:
         self._kill_switch = False
         logger.warning("Kill switch manually reset")

@@ -117,6 +117,10 @@ class FlashcardStore:
             with self._path.open("w") as f:
                 for card in self._cards.values():
                     f.write(json.dumps(card.as_dict()) + "\n")
+            # Restrict to owner-only — file contains sensitive financial data
+            import stat as _stat
+            import os as _os
+            _os.chmod(self._path, _stat.S_IRUSR | _stat.S_IWUSR)
         except Exception as exc:
             logger.warning("Could not save flashcards: %s", exc)
 

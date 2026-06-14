@@ -20,6 +20,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -53,7 +54,8 @@ class Position(Base):
     __tablename__ = "positions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    symbol = Column(String(20), nullable=False, unique=True, index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    account_label = Column(String(50), nullable=False, default="main")
     quantity = Column(Float, nullable=False)
     entry_price = Column(Float, nullable=False)
     current_price = Column(Float, default=0.0)
@@ -62,6 +64,8 @@ class Position(Base):
     unrealized_pnl_pct = Column(Float, default=0.0)
     opened_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (UniqueConstraint("symbol", "account_label", name="uq_position_symbol_account"),)
 
 
 class Signal(Base):
@@ -88,7 +92,7 @@ class DailyStats(Base):
     __tablename__ = "daily_stats"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    date = Column(Date, nullable=False, unique=True, index=True)   # use SQLAlchemy Date type
+    date = Column(Date, nullable=False, unique=True, index=True)
     starting_equity = Column(Float, default=0.0)
     current_equity = Column(Float, default=0.0)
     realized_pnl = Column(Float, default=0.0)
@@ -116,13 +120,49 @@ _engine = None
 _SessionLocal = None
 
 
+def _apply_migrations(engine) -> None:
+    """Apply incremental schema migrations for existing databases."""
+    with engine.connect() as conn:
+        # --- positions: add account_label column ---
+        cols = {r[1] for r in conn.execute(text("PRAGMA table_info(positions)")).fetchall()}
+        if "account_label" not in cols:
+            conn.execute(text(
+                "ALTER TABLE positions ADD COLUMN account_label VARCHAR(50) NOT NULL DEFAULT 'main'"
+            ))
+            # Rebuild table to replace the old UNIQUE(symbol) with UNIQUE(symbol, account_label)
+            conn.execute(text("""
+                CREATE TABLE positions_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol VARCHAR(20) NOT NULL,
+                    account_label VARCHAR(50) NOT NULL DEFAULT 'main',
+                    quantity FLOAT NOT NULL,
+                    entry_price FLOAT NOT NULL,
+                    current_price FLOAT DEFAULT 0.0,
+                    stop_loss_price FLOAT NOT NULL,
+                    unrealized_pnl FLOAT DEFAULT 0.0,
+                    unrealized_pnl_pct FLOAT DEFAULT 0.0,
+                    opened_at DATETIME,
+                    updated_at DATETIME,
+                    CONSTRAINT uq_position_symbol_account UNIQUE (symbol, account_label)
+                )
+            """))
+            conn.execute(text("""
+                INSERT INTO positions_new
+                SELECT id, symbol, 'main', quantity, entry_price, current_price,
+                       stop_loss_price, unrealized_pnl, unrealized_pnl_pct, opened_at, updated_at
+                FROM positions
+            """))
+            conn.execute(text("DROP TABLE positions"))
+            conn.execute(text("ALTER TABLE positions_new RENAME TO positions"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_positions_symbol ON positions (symbol)"))
+        conn.commit()
+
+
 def init_db(url: str = "sqlite:///argus.db") -> None:
     global _engine, _SessionLocal
     connect_args: dict = {}
     if url.startswith("sqlite"):
-        # Single connection for SQLite — avoids concurrency issues
         connect_args = {"check_same_thread": False}
-        # Ensure the file directory exists and restrict permissions
         if url.startswith("sqlite:////") or url.startswith("sqlite:///"):
             db_path = url.replace("sqlite:///", "", 1).replace("sqlite:////", "/", 1)
             if db_path and not db_path.startswith(":"):
@@ -131,6 +171,12 @@ def init_db(url: str = "sqlite:///argus.db") -> None:
 
     _engine = create_engine(url, connect_args=connect_args, echo=False)
     Base.metadata.create_all(_engine)
+    if url.startswith("sqlite"):
+        _apply_migrations(_engine)
+        # Enable WAL mode for concurrent read/write between main loop and FastAPI thread
+        with _engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.commit()
     _SessionLocal = sessionmaker(bind=_engine, autocommit=False, autoflush=False)
 
     # Restrict DB file permissions to owner-only (0600)
@@ -160,10 +206,23 @@ def get_session() -> Generator[Session, None, None]:
 
 # ── Convenience queries ──────────────────────────────────────────────────────
 
-def upsert_position(session: Session, symbol: str, quantity: float, entry_price: float, stop_loss_price: float) -> Position:
-    pos = session.query(Position).filter_by(symbol=symbol).first()
+def upsert_position(
+    session: Session,
+    symbol: str,
+    quantity: float,
+    entry_price: float,
+    stop_loss_price: float,
+    account_label: str = "main",
+) -> Position:
+    pos = session.query(Position).filter_by(symbol=symbol, account_label=account_label).first()
     if pos is None:
-        pos = Position(symbol=symbol, quantity=quantity, entry_price=entry_price, stop_loss_price=stop_loss_price)
+        pos = Position(
+            symbol=symbol,
+            account_label=account_label,
+            quantity=quantity,
+            entry_price=entry_price,
+            stop_loss_price=stop_loss_price,
+        )
         session.add(pos)
     else:
         pos.quantity = quantity
@@ -172,8 +231,8 @@ def upsert_position(session: Session, symbol: str, quantity: float, entry_price:
     return pos
 
 
-def delete_position(session: Session, symbol: str) -> None:
-    session.query(Position).filter_by(symbol=symbol).delete()
+def delete_position(session: Session, symbol: str, account_label: str = "main") -> None:
+    session.query(Position).filter_by(symbol=symbol, account_label=account_label).delete()
 
 
 def get_or_create_daily_stats(session: Session, date_val: datetime.date, starting_equity: float) -> DailyStats:
@@ -182,6 +241,13 @@ def get_or_create_daily_stats(session: Session, date_val: datetime.date, startin
         stats = DailyStats(date=date_val, starting_equity=starting_equity, current_equity=starting_equity)
         session.add(stats)
     return stats
+
+
+def increment_day_trades(session: Session) -> None:
+    today = datetime.date.today()
+    stats = session.query(DailyStats).filter_by(date=today).first()
+    if stats:
+        stats.day_trades = (stats.day_trades or 0) + 1
 
 
 def count_day_trades_last_5_days(session: Session) -> int:

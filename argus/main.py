@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import datetime
 import logging
 import os
@@ -30,6 +31,7 @@ from argus.storage.models import (
     get_or_create_account_daily_stats,
     get_or_create_daily_stats,
     get_session,
+    increment_day_trades,
     init_db,
     mark_account_kill_switch,
     upsert_position,
@@ -57,12 +59,38 @@ def _et_tz():
     return _ET
 
 
+_NYSE_CAL = None
+def _get_nyse_cal():
+    global _NYSE_CAL
+    if _NYSE_CAL is None:
+        try:
+            import pandas_market_calendars as mcal
+            _NYSE_CAL = mcal.get_calendar("NYSE")
+        except Exception:
+            pass
+    return _NYSE_CAL
+
+
+def _is_trading_day(date: datetime.date) -> bool:
+    cal = _get_nyse_cal()
+    if cal is None:
+        return date.weekday() < 5
+    try:
+        schedule = cal.schedule(
+            start_date=date.strftime("%Y-%m-%d"),
+            end_date=date.strftime("%Y-%m-%d"),
+        )
+        return not schedule.empty
+    except Exception:
+        return date.weekday() < 5
+
+
 def get_market_session() -> str:
     """Return the current NYSE market session in ET."""
     try:
         import datetime as _dt
         now = _dt.datetime.now(_et_tz())
-        if now.weekday() >= 5:
+        if now.weekday() >= 5 or not _is_trading_day(now.date()):
             return "closed"
         t = now.time()
         if _dt.time(4, 0) <= t < _dt.time(9, 30):
@@ -73,7 +101,8 @@ def get_market_session() -> str:
             return "afterhours"
         return "closed"
     except Exception:
-        return "open"   # fail open
+        logger.error("get_market_session() failed — defaulting to closed", exc_info=True)
+        return "closed"   # fail closed: safer than fail open
 
 
 def _is_market_hours() -> bool:
@@ -98,10 +127,11 @@ class Autopilot:
         self._cfg = get_settings()
         self._running = False
         self._paused = False
-        self._scan_interval_override: Optional[int] = None  # session-only manual override
+        self._scan_interval_override: Optional[int] = None
         self._next_scan_at: Optional[datetime.datetime] = None
         self._current_interval: int = self._cfg.scan_interval_seconds
         self._market_session: str = "closed"
+        self._current_day: datetime.date = datetime.date.today()
 
         logger.info(
             "Argus starting — mode=%s watchlist=%s",
@@ -111,8 +141,6 @@ class Autopilot:
 
         init_db(self._cfg.database_url)
 
-        # Shared signal engine (market data only, no account context)
-        # Uses a broker instance just for price/history lookups
         _shared_broker = RobinhoodBroker(
             username=self._cfg.robinhood_username,
             password=self._cfg.robinhood_password,
@@ -163,7 +191,6 @@ class Autopilot:
                 auto_trade=False,
             ))
 
-        # Fallback: single account mode (original behaviour)
         if not self._accounts:
             self._accounts.append(AccountContext(
                 label="main",
@@ -192,7 +219,7 @@ class Autopilot:
             else TerminalDashboard()
         )
         self._flashcards = FlashcardStore()
-        self._recent_trades: list[dict] = []
+        self._recent_trades: collections.deque = collections.deque(maxlen=200)
         self._latest_signals: list[dict] = []
 
         for acct in self._accounts:
@@ -208,16 +235,13 @@ class Autopilot:
         signal.signal(signal.SIGINT, self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
 
-        # Expose this instance so web API can set interval override
         web_dashboard.register_autopilot(self)
 
-        # Register chart data source using first account's broker
         _history_broker = self._accounts[0].broker
         web_dashboard.register_chart_source(
             lambda sym: _history_broker.get_historical_prices(sym, span="month", interval="day")
         )
 
-        # Start web dashboard in background thread
         web_thread = threading.Thread(
             target=web_dashboard.main,
             kwargs={"host": self._cfg.web_host, "port": self._cfg.web_port},
@@ -235,15 +259,21 @@ class Autopilot:
                     equity = acct.broker.get_portfolio_equity()
                     if not first_equity:
                         first_equity = equity
-                    acct.risk.set_session_equity(equity)  # temporary baseline until DB row loaded
+                    acct.risk.set_session_equity(equity)
                 except Exception as exc:
                     logger.error("[%s] Could not fetch initial equity: %s", acct.label, exc)
             self._init_daily_stats(first_equity)
-            self._restore_session_state()  # override baseline from DB, restore kill switch
-            self._update_dashboard()  # seed web dashboard before first tick
+            self._restore_session_state()
+            self._update_dashboard()
 
             while self._running:
                 try:
+                    # Day-boundary rollover
+                    today = datetime.date.today()
+                    if today != self._current_day:
+                        self._handle_day_rollover(today)
+                        self._current_day = today
+
                     self._market_session = get_market_session()
                     self._check_force_close()
                     self._check_promotions()
@@ -285,7 +315,6 @@ class Autopilot:
         }.get(self._market_session, self._cfg.scan_interval_seconds)
 
     def set_scan_interval(self, seconds: Optional[int]) -> None:
-        """Set or clear the manual interval override (session-only)."""
         self._scan_interval_override = seconds
         logger.info(
             "Scan interval %s",
@@ -299,7 +328,6 @@ class Autopilot:
             self._update_dashboard(trading=False)
             return
 
-        # Compute signals once (market data is account-agnostic)
         signals = []
         signal_map: dict[str, SignalResult] = {}
         for symbol in self._cfg.watchlist:
@@ -315,7 +343,6 @@ class Autopilot:
 
         self._latest_signals = signals
 
-        # Run each account
         for acct in self._accounts:
             try:
                 self._tick_account(acct, signal_map)
@@ -376,7 +403,8 @@ class Autopilot:
                 )
 
                 if decision.action == "BUY":
-                    db_day_trades = count_day_trades_last_5_days(self._get_session_ref())
+                    with get_session() as session:
+                        db_day_trades = count_day_trades_last_5_days(session)
                     risk_check = acct.risk.approve_buy(symbol, equity, open_positions, db_day_trades)
                     if not risk_check.allowed:
                         logger.info("[%s][%s] BUY blocked: %s", acct.label, symbol, risk_check.reason)
@@ -402,7 +430,6 @@ class Autopilot:
         sig: SignalResult,
         signal_obj: Optional[SignalResult] = None,
     ) -> None:
-        """Execute immediately (auto_trade) or queue for approval."""
         needs_approval = (
             not acct.auto_trade
             and _RISK_ORDER.get(decision.risk_level, 1) >= _RISK_ORDER.get(self._cfg.approval_threshold, 1)
@@ -412,7 +439,6 @@ class Autopilot:
             self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
             return
 
-        # Queue for dashboard approval
         trade_id = str(uuid.uuid4())
         trade_info = {
             "trade_id": trade_id,
@@ -436,7 +462,6 @@ class Autopilot:
         )
 
     def _poll_approvals(self) -> None:
-        """Check for dashboard approval decisions and execute approved trades."""
         for acct in self._accounts:
             if acct.auto_trade:
                 continue
@@ -475,7 +500,7 @@ class Autopilot:
             trade_id = result.order_id
             stop_price = acct.risk.stop_loss_price(result.price)
             with get_session() as session:
-                upsert_position(session, symbol, result.quantity, result.price, stop_price)
+                upsert_position(session, symbol, result.quantity, result.price, stop_price, acct.label)
                 session.add(Trade(
                     symbol=symbol,
                     side="buy",
@@ -488,7 +513,6 @@ class Autopilot:
                 ))
                 self._increment_trade_count(session)
 
-            # Create flashcard for learning
             if signal is not None and decision is not None:
                 self._flashcards.record_trade(
                     trade_id=trade_id,
@@ -501,7 +525,7 @@ class Autopilot:
                     dollar_amount=dollar_amount,
                 )
 
-            self._recent_trades.insert(0, {
+            self._recent_trades.appendleft({
                 "time": datetime.datetime.now(_UTC).strftime("%H:%M:%S"),
                 "symbol": symbol,
                 "side": "buy",
@@ -516,22 +540,22 @@ class Autopilot:
         except Exception as exc:
             logger.error("[%s] Execute buy failed for %s: %s", acct.label, symbol, exc)
 
-    def _execute_sell(self, acct: AccountContext, symbol: str, quantity: float, reason: str = "") -> None:
+    def _execute_sell(self, acct: AccountContext, symbol: str, quantity: float, reason: str = "") -> bool:
+        """Returns True if the sell was successfully filled."""
         try:
             result = acct.broker.sell(symbol, quantity)
             if not result.filled:
                 logger.warning("[%s][%s] Sell order not filled", acct.label, symbol)
-                return
+                return False
 
             outcome = "stop-loss" if "stop-loss" in reason.lower() else "sell"
-            # Close any open flashcard for this symbol on this account
             for card in self._flashcards.get_all():
                 if card.symbol == symbol and card.account == acct.label and card.exit_price is None:
                     self._flashcards.close_trade(card.trade_id, result.price, outcome)
                     break
 
             with get_session() as session:
-                delete_position(session, symbol)
+                delete_position(session, symbol, acct.label)
                 session.add(Trade(
                     symbol=symbol,
                     side="sell",
@@ -543,8 +567,12 @@ class Autopilot:
                     reasoning=reason[:4000],
                 ))
                 self._increment_trade_count(session)
+                # Detect day trade: same symbol bought today on this account
+                if self._is_day_trade(symbol):
+                    acct.risk.record_day_trade()
+                    increment_day_trades(session)
 
-            self._recent_trades.insert(0, {
+            self._recent_trades.appendleft({
                 "time": datetime.datetime.now(_UTC).strftime("%H:%M:%S"),
                 "symbol": symbol,
                 "side": "sell",
@@ -556,8 +584,28 @@ class Autopilot:
                 f"[{acct.label.upper()}] SELL {symbol}",
                 f"Sold {result.quantity:.4f} {symbol} @ ${result.price:.4f} | {reason[:100]}",
             )
+            return True
         except Exception as exc:
             logger.error("[%s] Execute sell failed for %s: %s", acct.label, symbol, exc)
+            return False
+
+    def _is_day_trade(self, symbol: str) -> bool:
+        """True if there is a BUY trade for this symbol today (making this sell a day trade)."""
+        today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min, tzinfo=_UTC)
+        try:
+            with get_session() as session:
+                count = (
+                    session.query(Trade)
+                    .filter(
+                        Trade.symbol == symbol,
+                        Trade.side == "buy",
+                        Trade.created_at >= today_start,
+                    )
+                    .count()
+                )
+                return count > 0
+        except Exception:
+            return False
 
     # ── Force-close (web dashboard) ──────────────────────────────────────────
 
@@ -575,14 +623,19 @@ class Autopilot:
         req = web_dashboard.get_promote_request()
         if not req:
             return
-        symbol = req["symbol"]
+        symbol     = req["symbol"]
         from_label = req.get("from_account", "default")
         to_label   = req.get("to_account",   "agentic")
+
+        # Validate known account labels
+        valid_labels = {a.label for a in self._accounts}
+        if from_label not in valid_labels or to_label not in valid_labels:
+            logger.warning("Promote: invalid account labels %s → %s", from_label, to_label)
+            return
 
         from_acct = next((a for a in self._accounts if a.label == from_label), None)
         to_acct   = next((a for a in self._accounts if a.label == to_label),   None)
         if not from_acct or not to_acct:
-            logger.warning("Promote: could not find accounts %s → %s", from_label, to_label)
             return
 
         positions = from_acct.broker.get_open_positions()
@@ -590,23 +643,54 @@ class Autopilot:
             logger.warning("Promote: %s not found in %s positions", symbol, from_label)
             return
 
-        pos   = positions[symbol]
-        price = from_acct.broker.get_price(symbol)
-        qty   = pos["qty"]
+        pos          = positions[symbol]
+        price        = from_acct.broker.get_price(symbol)
+        qty          = pos["qty"]
         dollar_value = qty * price
 
         logger.info("Promoting %s from %s → %s ($%.2f)", symbol, from_label, to_label, dollar_value)
+
         # Step 1: sell on source account
-        self._execute_sell(from_acct, symbol, qty, reason=f"promote to {to_label}")
-        # Step 2: buy on target account
-        shares = to_acct.risk.position_size(dollar_value, price)
-        if shares > 0:
-            self._execute_buy(to_acct, symbol, shares, price, reason=f"promoted from {from_label}")
+        sell_ok = self._execute_sell(from_acct, symbol, qty, reason=f"promote to {to_label}")
+        if not sell_ok:
+            logger.error("Promote: sell of %s on %s failed — aborting re-buy", symbol, from_label)
+            return
+
+        # Step 2: run risk checks on the target account before buying
+        try:
+            to_equity    = to_acct.broker.get_portfolio_equity()
+            to_positions = to_acct.broker.get_open_positions()
+        except Exception as exc:
+            logger.critical(
+                "PROMOTE INCOMPLETE: sold %s on %s but cannot reach %s to re-buy — check positions! (%s)",
+                symbol, from_label, to_label, exc,
+            )
+            self._notifier.send(
+                "[PROMOTE] Incomplete — action required",
+                f"Sold {symbol} on {from_label} but could not fetch {to_label} state. Re-buy manually.",
+            )
+            return
+
+        with get_session() as session:
+            db_day_trades = count_day_trades_last_5_days(session)
+        risk_check = to_acct.risk.approve_buy(symbol, to_equity, to_positions, db_day_trades)
+        if not risk_check.allowed:
+            logger.critical(
+                "PROMOTE INCOMPLETE: sold %s on %s but re-buy on %s blocked — %s",
+                symbol, from_label, to_label, risk_check.reason,
+            )
+            self._notifier.send(
+                "[PROMOTE] Re-buy blocked — action required",
+                f"Sold {symbol} on {from_label}. Re-buy on {to_label} blocked: {risk_check.reason}. Re-buy manually.",
+            )
+            return
+
+        # Step 3: re-buy on target account
+        self._execute_buy(to_acct, symbol, dollar_value, f"promoted from {from_label}")
 
     # ── Dashboard state ──────────────────────────────────────────────────────
 
     def _update_dashboard(self, trading: bool = True) -> None:
-        # Aggregate equity and positions across all accounts
         total_equity = 0.0
         total_entry_equity = 0.0
         pos_display: dict = {}
@@ -616,7 +700,7 @@ class Autopilot:
             try:
                 eq = acct.broker.get_portfolio_equity()
                 total_equity += eq
-                total_entry_equity += acct.risk._session_entry_equity
+                total_entry_equity += acct.risk.session_entry_equity
                 kill_switch = kill_switch or acct.risk.kill_switch_active
 
                 for sym, pos in acct.broker.get_open_positions().items():
@@ -641,16 +725,15 @@ class Autopilot:
         daily_pnl = total_equity - total_entry_equity
         daily_pnl_pct = (daily_pnl / total_entry_equity * 100) if total_entry_equity else 0.0
 
-        day_trades = sum(a.risk._day_trade_count for a in self._accounts)
+        day_trades = sum(a.risk.day_trade_count for a in self._accounts)
 
-        # Per-account breakdown for terminal dashboard
         accounts_state = {}
         for acct in self._accounts:
             try:
                 eq = acct.broker.get_portfolio_equity()
             except Exception:
                 eq = 0.0
-            entry_eq = acct.risk._session_entry_equity
+            entry_eq = acct.risk.session_entry_equity
             acct_pnl = eq - entry_eq
             acct_pnl_pct = (acct_pnl / entry_eq * 100) if entry_eq else 0.0
             acct_positions = {}
@@ -672,10 +755,10 @@ class Autopilot:
                 "daily_pnl": acct_pnl,
                 "daily_pnl_pct": acct_pnl_pct,
                 "kill_switch": acct.risk.kill_switch_active,
-                "day_trades": acct.risk._day_trade_count,
+                "day_trades": acct.risk.day_trade_count,
                 "auto_trade": acct.auto_trade,
                 "positions": acct_positions,
-                "trades": [t for t in self._recent_trades if t.get("account") == acct.label][:10],
+                "trades": [t for t in list(self._recent_trades) if t.get("account") == acct.label][:10],
                 "pending_approvals": len(acct.pending_approvals),
                 "equity_goal": self._cfg.equity_goal,
             }
@@ -693,32 +776,22 @@ class Autopilot:
             "day_trades": day_trades,
             "positions": pos_display,
             "signals": self._latest_signals[-20:],
-            "recent_trades": self._recent_trades[:20],
+            "recent_trades": list(self._recent_trades)[:20],
             "accounts": accounts_state,
             "flashcards": [c.as_dict() for c in recent_cards],
             "flashcard_summary": self._flashcards.summary(),
-            # Scan timing
-            "market_session":      self._market_session,
-            "scan_interval":       self._current_interval,
-            "interval_override":   self._scan_interval_override,
-            "next_scan_at":        self._next_scan_at.isoformat() if self._next_scan_at else None,
-            # Token usage
-            "token_usage": _token_summary(),
-            # Goal tracking
-            "equity_goal": self._cfg.equity_goal,
-            # Performance analytics
-            "performance": self._flashcards.performance(),
+            "market_session":    self._market_session,
+            "scan_interval":     self._current_interval,
+            "interval_override": self._scan_interval_override,
+            "next_scan_at":      self._next_scan_at.isoformat() if self._next_scan_at else None,
+            "token_usage":       _token_summary(),
+            "equity_goal":       self._cfg.equity_goal,
+            "performance":       self._flashcards.performance(),
         }
         self._terminal.update(state)
         web_dashboard.push_state(state)
 
     # ── Storage helpers ──────────────────────────────────────────────────────
-
-    def _get_session_ref(self):
-        """Return a temporary session for read-only queries."""
-        from sqlalchemy.orm import Session as _S
-        from argus.storage.models import _SessionLocal
-        return _SessionLocal()
 
     def _restore_session_state(self) -> None:
         """Load per-account starting equity and kill switch from today's DB rows."""
@@ -727,7 +800,7 @@ class Autopilot:
         with get_session() as session:
             for acct in self._accounts:
                 row = get_or_create_account_daily_stats(
-                    session, today, acct.label, acct.risk._session_entry_equity
+                    session, today, acct.label, acct.risk.session_entry_equity
                 )
                 if row.starting_equity > 0:
                     acct.risk.set_session_equity(row.starting_equity)
@@ -746,6 +819,20 @@ class Autopilot:
                 mark_account_kill_switch(session, datetime.date.today(), acct.label)
         except Exception as exc:
             logger.warning("Could not persist kill switch for [%s]: %s", acct.label, exc)
+
+    def _handle_day_rollover(self, new_day: datetime.date) -> None:
+        logger.info("Day rollover — resetting session state for %s", new_day)
+        for acct in self._accounts:
+            acct.risk.reset_day_trade_count()
+            try:
+                equity = acct.broker.get_portfolio_equity()
+                acct.risk.set_session_equity(equity)
+            except Exception as exc:
+                logger.error("[%s] Could not fetch equity for day rollover: %s", acct.label, exc)
+        # Init daily stats for new day using first account's equity as reference
+        first_equity = self._accounts[0].risk.session_entry_equity if self._accounts else 0.0
+        self._init_daily_stats(first_equity)
+        self._restore_session_state()
 
     def _init_daily_stats(self, equity: float) -> None:
         today = datetime.date.today()
@@ -768,9 +855,9 @@ class Autopilot:
             return 0
 
     def _daily_pnl_pct(self, acct: AccountContext, equity: float) -> float:
-        if acct.risk._session_entry_equity <= 0:
+        if acct.risk.session_entry_equity <= 0:
             return 0.0
-        return (equity - acct.risk._session_entry_equity) / acct.risk._session_entry_equity * 100
+        return (equity - acct.risk.session_entry_equity) / acct.risk.session_entry_equity * 100
 
     def _persist_signal(self, sig) -> None:
         try:
@@ -795,11 +882,13 @@ class Autopilot:
 
     def _update_positions_in_db(self, positions: dict, acct: Optional[AccountContext] = None) -> None:
         risk = acct.risk if acct else self._accounts[0].risk
+        label = acct.label if acct else "main"
         with get_session() as session:
             for sym, pos in positions.items():
                 upsert_position(
                     session, sym, pos["qty"], pos["avg_price"],
                     risk.stop_loss_price(pos["avg_price"]),
+                    label,
                 )
 
 
@@ -816,6 +905,12 @@ def _setup_logging() -> None:
             logging.FileHandler("argus.log", mode="a"),
         ],
     )
+    # Restrict log file to owner-only
+    try:
+        import stat as _stat
+        os.chmod("argus.log", _stat.S_IRUSR | _stat.S_IWUSR)
+    except OSError:
+        pass
     _install_log_buffer()
 
 

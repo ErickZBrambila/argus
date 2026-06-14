@@ -19,9 +19,14 @@ WORKDIR /data
 EXPOSE 8000
 
 # WEB_HOST must be 0.0.0.0 inside the container so the port is reachable
-# from the host. ARGUS_NO_TERMINAL disables the Rich terminal UI (no TTY
-# in a detached container).
+# from the host via Docker's port mapping. ARGUS_NO_TERMINAL disables Rich
+# terminal UI (no TTY in a detached container).
 ENV WEB_HOST=0.0.0.0 \
     ARGUS_NO_TERMINAL=1
+
+# Run as non-root to limit blast radius if a dependency has a vulnerability
+RUN useradd --no-create-home --shell /bin/false argus \
+    && chown -R argus:argus /data
+USER argus
 
 CMD ["argus"]
