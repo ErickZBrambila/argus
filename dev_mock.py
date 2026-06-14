@@ -86,6 +86,61 @@ def _mock_search(query: str) -> list[dict]:
 
 dash.register_search(_mock_search)
 
+# ── Mock AI investigation ─────────────────────────────────────────────────────
+
+def _mock_investigate(symbol: str, signal: dict, headlines: list) -> dict:
+    import time, random
+    time.sleep(random.uniform(2.5, 5.0))  # simulate Claude thinking
+
+    comp = signal.get("composite", 0.0) if signal else 0.0
+    if comp > 0.3:
+        verdict, conf, tf = "Bullish — Buy dip", 0.78, "2–5 days"
+        summary = f"{symbol} shows strong momentum. RSI is elevated but not overbought. MACD recently crossed bullish. Price action confirms uptrend with higher lows."
+        findings = [
+            "MACD crossed bullish 2 bars ago with increasing histogram",
+            "Volume on up-days exceeds down-day volume 3:1 over last 5 sessions",
+            "Price held 20-day EMA as support on last pullback",
+        ]
+        risks = [
+            "Sector rotation out of tech could pressure near-term",
+            "Earnings in 3 weeks — implied volatility may expand",
+        ]
+    elif comp < -0.3:
+        verdict, conf, tf = "Bearish — Avoid", 0.71, "3–7 days"
+        summary = f"{symbol} is showing distribution. RSI momentum is declining and MACD is trending lower. Short-term risk outweighs reward."
+        findings = [
+            "MACD histogram declining for 4 consecutive bars",
+            "Price rejected at 50-day SMA resistance twice",
+            "Volume spike on down-day suggests institutional selling",
+        ]
+        risks = [
+            "Short squeeze possible if momentum reverses sharply",
+            "Macro tailwinds could override technical weakness",
+        ]
+    else:
+        verdict, conf, tf = "Neutral — Watch", 0.52, "1–3 days"
+        summary = f"{symbol} is range-bound with mixed signals. No clear edge right now — wait for a decisive break above resistance or below support before acting."
+        findings = [
+            "RSI near 50 — no clear momentum bias",
+            "Bollinger Bands tightening — volatility squeeze imminent",
+            "Price oscillating near 20-day EMA without conviction",
+        ]
+        risks = [
+            "False breakout risk in either direction",
+            "Low volume reduces signal reliability",
+        ]
+
+    return {
+        "verdict": verdict,
+        "confidence": round(conf, 2),
+        "summary": summary,
+        "findings": findings,
+        "risks": risks,
+        "timeframe": tf,
+    }
+
+dash.register_investigate(_mock_investigate)
+
 # Seed fake news headlines for mock mode
 with dash._news_lock:
     dash._news_cache[:] = [

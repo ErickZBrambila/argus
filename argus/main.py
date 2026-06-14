@@ -269,6 +269,64 @@ class Autopilot:
         except Exception:
             pass
 
+        # Register AI investigation function
+        _anthropic_key = self._cfg.anthropic_api_key.get_secret_value()
+        if _anthropic_key:
+            def _make_investigate_fn(api_key: str):
+                import anthropic, json as _json
+
+                _client = anthropic.Anthropic(api_key=api_key)
+
+                def _investigate(symbol: str, signal: dict, headlines: list) -> dict:
+                    signal_text = ""
+                    if signal:
+                        signal_text = (
+                            f"RSI={signal.get('rsi', 'N/A'):.1f}, "
+                            f"MACD={signal.get('macd', 'N/A'):.4f}, "
+                            f"Composite={signal.get('composite', 0):.2f}, "
+                            f"Trend={'UP' if signal.get('trend_up') else 'DOWN'}, "
+                            f"Volume={'HIGH' if signal.get('vol_spike') else 'normal'}"
+                        ) if isinstance(signal.get("rsi"), (int, float)) else str(signal)
+
+                    news_text = "\n".join(f"- {h.get('headline','')}" for h in (headlines or [])[:8]) or "No recent headlines available."
+
+                    prompt = f"""You are a professional equity analyst. Investigate {symbol} and produce a concise trading verdict.
+
+TECHNICAL SIGNALS:
+{signal_text or "No signal data available."}
+
+RECENT NEWS HEADLINES:
+{news_text}
+
+Respond ONLY with valid JSON matching this schema exactly:
+{{
+  "verdict": "string (e.g. 'Bullish — Buy dip', 'Bearish — Avoid', 'Neutral — Watch')",
+  "confidence": float (0.0–1.0),
+  "summary": "2–3 sentence plain-English analysis",
+  "findings": ["key bullish/neutral observation", ...],
+  "risks": ["key risk factor", ...],
+  "timeframe": "string (e.g. '1–3 days', '1 week')"
+}}
+
+Be concise. findings and risks should each have 2–4 items. Do not include any text outside the JSON."""
+
+                    msg = _client.messages.create(
+                        model="claude-sonnet-4-6",
+                        max_tokens=600,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    text = msg.content[0].text.strip()
+                    # Strip markdown code fences if present
+                    if text.startswith("```"):
+                        text = text.split("```")[1]
+                        if text.startswith("json"):
+                            text = text[4:]
+                    return _json.loads(text.strip())
+
+                return _investigate
+
+            web_dashboard.register_investigate(_make_investigate_fn(_anthropic_key))
+
         web_thread = threading.Thread(
             target=web_dashboard.main,
             kwargs={"host": self._cfg.web_host, "port": self._cfg.web_port, "token": self._cfg.dashboard_token},

@@ -140,6 +140,67 @@ def get_watchlist() -> list[str]:
         return list(_runtime_watchlist)
 
 
+# ── Investigations (up to 3 AI deep-dives) ───────────────────────────────────
+_MAX_INVESTIGATIONS = 3
+_investigations: dict[str, dict] = {}
+_investigation_lock = threading.Lock()
+_investigate_fn = None   # callable(symbol, signal, headlines) → dict
+
+
+def register_investigate(fn) -> None:
+    global _investigate_fn
+    _investigate_fn = fn
+
+
+def _run_investigation(symbol: str) -> None:
+    with _investigation_lock:
+        _investigations[symbol]["status"] = "running"
+        _investigations[symbol]["started_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    _push_investigation_state()
+
+    try:
+        signals = _state.get("signals", [])
+        signal = next((s for s in signals if s.get("symbol") == symbol), {})
+        with _news_lock:
+            all_headlines = list(_news_cache)
+        relevant = [h for h in all_headlines if symbol.lower() in h.get("headline", "").lower()]
+        headlines = relevant[:8] if relevant else all_headlines[:6]
+
+        if _investigate_fn is None:
+            raise RuntimeError("No investigation function registered — set ANTHROPIC_API_KEY")
+
+        result = _investigate_fn(symbol, signal, headlines)
+
+        with _investigation_lock:
+            _investigations[symbol].update({
+                "status": "complete",
+                "verdict":    result.get("verdict", "Unknown"),
+                "confidence": float(result.get("confidence") or 0),
+                "summary":    result.get("summary", ""),
+                "findings":   result.get("findings") or [],
+                "risks":      result.get("risks") or [],
+                "timeframe":  result.get("timeframe", ""),
+                "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            })
+    except Exception as exc:
+        logger.error("Investigation failed for %s: %s", symbol, exc)
+        with _investigation_lock:
+            _investigations[symbol].update({
+                "status": "error",
+                "error": str(exc),
+                "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            })
+
+    _push_investigation_state()
+
+
+def _push_investigation_state() -> None:
+    with _investigation_lock:
+        inv = dict(_investigations)
+    _state["investigations"] = inv
+    _sse_push(json.dumps(_state, default=str))
+
+
 def _sse_push(data: str) -> None:
     """Thread-safe push to SSE broadcaster. Drops oldest item if full."""
     try:
@@ -382,6 +443,42 @@ async def get_chart(symbol: str) -> dict:
     except Exception as exc:
         logger.warning("Chart data error for %s: %s", symbol, exc)
         return {"candles": [], "symbol": symbol}
+
+
+@app.get("/api/investigate")
+async def get_investigations() -> dict:
+    with _investigation_lock:
+        return {"investigations": dict(_investigations)}
+
+
+@app.post("/api/investigate", dependencies=[Depends(_require_auth)])
+async def start_investigation(body: dict) -> dict:
+    symbol = (body.get("symbol") or "").strip().upper()
+    if not symbol or not _SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=400, detail="Invalid symbol")
+    with _investigation_lock:
+        if len(_investigations) >= _MAX_INVESTIGATIONS and symbol not in _investigations:
+            raise HTTPException(status_code=400, detail=f"Maximum {_MAX_INVESTIGATIONS} investigations already active — remove one first")
+        _investigations[symbol] = {
+            "symbol": symbol,
+            "status": "queued",
+            "queued_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+    _push_investigation_state()
+    threading.Thread(target=_run_investigation, args=(symbol,), daemon=True, name=f"inv-{symbol}").start()
+    logger.info("Investigation queued: %s", symbol)
+    return {"status": "queued", "symbol": symbol}
+
+
+@app.delete("/api/investigate/{symbol}", dependencies=[Depends(_require_auth)])
+async def remove_investigation(symbol: str) -> dict:
+    symbol = symbol.upper().strip()
+    if not _SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=400, detail="Invalid symbol")
+    with _investigation_lock:
+        _investigations.pop(symbol, None)
+    _push_investigation_state()
+    return {"status": "removed", "symbol": symbol}
 
 
 @app.get("/api/news")
@@ -852,6 +949,54 @@ _HTML = """<!DOCTYPE html>
   .wl-dd-empty { padding: 10px 14px; font-size: 12px; color: var(--text-dim); }
   .wl-dd-searching { padding: 10px 14px; font-size: 12px; color: var(--muted); }
 
+  /* ── Investigations tab ─────────────────────────────────────────────────── */
+  #tab-investigations.active { display: flex !important; flex-direction: column; grid-template-columns: none; gap: 14px; }
+  .inv-add-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .inv-slots { font-size: 12px; color: var(--muted); margin-left: 4px; }
+  .inv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
+  .inv-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px 20px;
+    transition: border-color .2s, box-shadow .2s;
+  }
+  .inv-card.running  { border-color: rgba(210,153,34,.4); }
+  .inv-card.bullish  { border-color: rgba(0,212,170,.35); background: rgba(0,212,170,.03); }
+  .inv-card.bearish  { border-color: rgba(248,81,73,.35); background: rgba(248,81,73,.02); }
+  .inv-card.neutral  { border-color: rgba(88,166,255,.25); }
+  .inv-header { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  .inv-sym  { font-size: 20px; font-weight: 800; color: var(--accent); letter-spacing: .5px; }
+  .inv-status { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 999px; }
+  .inv-status.running { color: var(--yellow); background: rgba(210,153,34,.15); border: 1px solid rgba(210,153,34,.3); }
+  .inv-status.queued  { color: var(--muted);  background: var(--surface2); border: 1px solid var(--border); }
+  .inv-status.complete { color: var(--green); background: rgba(63,185,80,.12); border: 1px solid rgba(63,185,80,.25); }
+  .inv-status.error   { color: var(--danger); background: rgba(248,81,73,.12); border: 1px solid rgba(248,81,73,.25); }
+  .inv-age { font-size: 11px; color: var(--text-dim); }
+  .inv-actions { margin-left: auto; display: flex; gap: 6px; }
+  .inv-btn { background: none; border: 1px solid var(--border); color: var(--muted); cursor: pointer; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: var(--radius-sm); transition: all .15s; }
+  .inv-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .inv-btn.danger:hover { border-color: var(--danger); color: var(--danger); }
+  .inv-verdict { font-size: 17px; font-weight: 800; margin-bottom: 4px; }
+  .inv-verdict.bullish { color: var(--green); }
+  .inv-verdict.bearish { color: var(--danger); }
+  .inv-verdict.neutral { color: var(--blue); }
+  .inv-verdict.caution { color: var(--yellow); }
+  .inv-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 12px; color: var(--muted); }
+  .inv-conf-bar { flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .inv-conf-fill { height: 100%; border-radius: 2px; background: var(--accent); transition: width .6s ease; }
+  .inv-summary { font-size: 13px; color: var(--text); line-height: 1.65; margin-bottom: 16px; padding: 12px 14px; background: var(--surface2); border-radius: var(--radius-sm); border-left: 3px solid var(--accent); }
+  .inv-section { margin-bottom: 12px; }
+  .inv-section-lbl { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin-bottom: 6px; }
+  .inv-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 5px; }
+  .inv-list li { font-size: 12.5px; color: var(--text); display: flex; gap: 8px; line-height: 1.5; }
+  .inv-list li::before { content: '▸'; color: var(--accent); flex-shrink: 0; margin-top: 1px; }
+  .inv-risks li::before { content: '⚠'; color: var(--yellow); flex-shrink: 0; }
+  .inv-news-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+  .inv-news-item { font-size: 11.5px; color: var(--muted); padding: 5px 0; border-bottom: 1px solid var(--border-subtle); line-height: 1.5; }
+  .inv-news-item:last-child { border-bottom: none; }
+  .inv-thinking { display: flex; align-items: center; gap: 12px; padding: 20px 0; color: var(--muted); font-size: 13px; }
+  .inv-spinner { width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: inv-spin .75s linear infinite; flex-shrink: 0; }
+  @keyframes inv-spin { to { transform: rotate(360deg); } }
+
   .modal {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -1218,6 +1363,7 @@ _HTML = """<!DOCTYPE html>
     <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
     <button class="tab-btn" onclick="switchTab('performance')">Performance</button>
     <button class="tab-btn" onclick="switchTab('charts')">Charts</button>
+    <button class="tab-btn" onclick="switchTab('investigations')">Investigations</button>
   </nav>
   <main>
 
@@ -1433,6 +1579,33 @@ _HTML = """<!DOCTYPE html>
     </div>
 
   </div><!-- /tab-charts -->
+
+  <div class="tab-pane" id="tab-investigations">
+
+    <!-- Add symbol toolbar -->
+    <div class="card card-full">
+      <div class="inv-add-bar">
+        <div class="wl-search-wrap">
+          <input class="wl-add-input" id="inv-search-input" placeholder="Search symbol to investigate…"
+                 autocomplete="off" style="width:260px"
+                 oninput="invSearchDebounce(this.value)"
+                 onkeydown="invSearchKeydown(event)"
+                 onblur="setTimeout(invDropdownClose,150)">
+          <div class="wl-dropdown" id="inv-search-dd"></div>
+        </div>
+        <button class="wl-add-btn" onclick="invStartFromInput()">🔍 Investigate</button>
+        <span class="inv-slots" id="inv-slots">0 / 3 slots used</span>
+      </div>
+    </div>
+
+    <!-- Investigation cards grid -->
+    <div class="inv-grid" id="inv-grid">
+      <div class="empty" style="grid-column:1/-1;padding:48px 0">
+        No active investigations — search for a symbol above and Claude will deep-dive the technicals, news, and price action
+      </div>
+    </div>
+
+  </div><!-- /tab-investigations -->
 
   </main>
   <p class="timestamp" id="last-update" style="padding: 0 24px 16px;">Last update: —</p>
@@ -1879,6 +2052,7 @@ function applyState(state) {
   window._flashcards = state.flashcards || [];
   updateTicker(state.signals);
   if (state.watchlist) { ctApplyWatchlist(state.watchlist); buildChartTabs(state.watchlist); }
+  if (state.investigations) renderInvestigations(state.investigations);
   // Scan timing
   if (state.next_scan_at) _nextScanAt = new Date(state.next_scan_at);
   _updateSessionBadge(state.market_session || 'closed');
@@ -2731,6 +2905,202 @@ async function ctRemoveSymbol(symbol) {
     const r = await apiFetch(`/api/watchlist/${encodeURIComponent(symbol)}`, { method: 'DELETE' });
     const d = await r.json();
     if (d.watchlist) ctApplyWatchlist(d.watchlist);
+  } catch(e) { console.error(e); }
+}
+
+// ── Investigations tab ────────────────────────────────────────────────────────
+
+function _verdictClass(verdict) {
+  if (!verdict) return 'neutral';
+  const v = verdict.toLowerCase();
+  if (v.includes('strong buy') || v.includes('bullish')) return 'bullish';
+  if (v.includes('avoid') || v.includes('bearish')) return 'bearish';
+  if (v.includes('caution') || v.includes('wait')) return 'caution';
+  if (v.includes('watch') || v.includes('buy')) return 'bullish';
+  return 'neutral';
+}
+
+function buildInvCard(sym, d) {
+  const statusLabel = { queued:'⟳ Queued', running:'⟳ Analyzing…', complete:'✓ Complete', error:'✗ Error' }[d.status] || d.status;
+  const ts   = d.completed_at ? _timeAgo(new Date(d.completed_at)) : '';
+  const vc   = _verdictClass(d.verdict);
+  const conf = Math.round((d.confidence || 0) * 100);
+
+  let body = '';
+  if (d.status === 'queued' || d.status === 'running') {
+    body = `<div class="inv-thinking">
+      <div class="inv-spinner"></div>
+      <span>Claude is investigating <strong>${escHtml(sym)}</strong> — reading signals, news sentiment, and price action…</span>
+    </div>`;
+  } else if (d.status === 'error') {
+    body = `<div style="color:var(--danger);font-size:13px;padding:10px 0">${escHtml(d.error || 'Analysis failed — check logs')}</div>`;
+  } else {
+    const findings = (d.findings || []).map(f => `<li>${escHtml(f)}</li>`).join('');
+    const risks    = (d.risks    || []).map(r => `<li>${escHtml(r)}</li>`).join('');
+
+    // Filter news for this symbol
+    const symLower = sym.toLowerCase();
+    const relevant = _tickerHeadlines
+      .filter(h => h.headline.toLowerCase().includes(symLower))
+      .slice(0, 5);
+    const newsHtml = relevant.length
+      ? relevant.map(h => `<div class="inv-news-item">${escHtml(h.headline)}</div>`).join('')
+      : `<div class="inv-news-item" style="color:var(--text-dim)">No recent headlines found for ${escHtml(sym)}</div>`;
+
+    body = `
+      <div class="inv-verdict ${vc}">${escHtml(d.verdict || '—')}</div>
+      <div class="inv-meta">
+        <span>AI confidence: <strong>${conf}%</strong></span>
+        <span>·</span>
+        <span>Outlook: <strong>${escHtml(d.timeframe || '—')}</strong></span>
+        <div class="inv-conf-bar"><div class="inv-conf-fill" style="width:${conf}%"></div></div>
+      </div>
+      <div class="inv-summary">${escHtml(d.summary || '')}</div>
+      ${findings ? `<div class="inv-section">
+        <div class="inv-section-lbl">Key Findings</div>
+        <ul class="inv-list">${findings}</ul>
+      </div>` : ''}
+      ${risks ? `<div class="inv-section">
+        <div class="inv-section-lbl">Risk Factors</div>
+        <ul class="inv-list inv-risks">${risks}</ul>
+      </div>` : ''}
+      <div class="inv-news-section">
+        <div class="inv-section-lbl">Relevant News</div>
+        ${newsHtml}
+      </div>`;
+  }
+
+  const rerunBtn = (d.status === 'complete' || d.status === 'error')
+    ? `<button class="inv-btn" onclick="invRerun('${escHtml(sym)}')">↻ Re-run</button>` : '';
+
+  return `<div class="inv-card ${d.status || ''} ${vc}" id="inv-card-${escHtml(sym)}"
+              data-sym="${escHtml(sym)}" data-status="${escHtml(d.status||'')}">
+    <div class="inv-header">
+      <span class="inv-sym">${escHtml(sym)}</span>
+      <span class="inv-status ${d.status||'queued'}">${statusLabel}</span>
+      ${ts ? `<span class="inv-age">${ts}</span>` : ''}
+      <div class="inv-actions">
+        ${rerunBtn}
+        <button class="inv-btn danger" onclick="invRemove('${escHtml(sym)}')">✕ Remove</button>
+      </div>
+    </div>
+    ${body}
+  </div>`;
+}
+
+function renderInvestigations(investigations) {
+  const inv  = investigations || {};
+  const keys = Object.keys(inv);
+  const slotsEl = document.getElementById('inv-slots');
+  if (slotsEl) slotsEl.textContent = `${keys.length} / 3 slots used`;
+
+  const grid = document.getElementById('inv-grid');
+  if (!keys.length) {
+    grid.innerHTML = '<div class="empty" style="grid-column:1/-1;padding:48px 0">No active investigations — search for a symbol above</div>';
+    return;
+  }
+
+  // Remove stale cards
+  [...grid.querySelectorAll('.inv-card')].forEach(el => {
+    if (!inv[el.dataset.sym]) el.remove();
+  });
+
+  // Add or refresh cards
+  for (const sym of keys) {
+    const d = inv[sym];
+    const existing = document.getElementById('inv-card-' + sym);
+    if (!existing) {
+      const wrap = document.createElement('div');
+      wrap.innerHTML = buildInvCard(sym, d);
+      grid.appendChild(wrap.firstElementChild);
+    } else if (existing.dataset.status !== (d.status || '')) {
+      // Status changed — replace the whole card
+      const wrap = document.createElement('div');
+      wrap.innerHTML = buildInvCard(sym, d);
+      existing.replaceWith(wrap.firstElementChild);
+    }
+  }
+
+  // If all cards were removed, show empty state
+  if (!grid.querySelector('.inv-card')) {
+    grid.innerHTML = '<div class="empty" style="grid-column:1/-1;padding:48px 0">No active investigations</div>';
+  }
+}
+
+// ── Investigation search / autocomplete ───────────────────────────────────────
+let _invTimer = null, _invResults = [], _invSel = -1;
+
+function invSearchDebounce(val) {
+  clearTimeout(_invTimer); _invResults = []; _invSel = -1;
+  const dd = document.getElementById('inv-search-dd');
+  if (!val.trim()) { dd.classList.remove('open'); dd.innerHTML = ''; return; }
+  dd.innerHTML = '<div class="wl-dd-searching">Searching…</div>'; dd.classList.add('open');
+  _invTimer = setTimeout(async () => {
+    try {
+      const r = await fetch('/api/search?q=' + encodeURIComponent(val.trim()));
+      const d = await r.json();
+      _invResults = d.results || [];
+      dd.innerHTML = _invResults.length
+        ? _invResults.map((item, i) =>
+            `<div class="wl-dd-item${i===_invSel?' wl-dd-sel':''}" onmousedown="invPick('${escHtml(item.symbol)}')">
+              <span class="wl-dd-sym">${escHtml(item.symbol)}</span>
+              <span class="wl-dd-name">${escHtml(item.name||'')}</span>
+            </div>`).join('')
+        : '<div class="wl-dd-empty">No results — try the ticker directly (e.g. AAPL)</div>';
+    } catch(_) { dd.classList.remove('open'); }
+  }, 280);
+}
+
+function invDropdownClose() {
+  const dd = document.getElementById('inv-search-dd');
+  if (dd) { dd.classList.remove('open'); dd.innerHTML = ''; }
+}
+
+function invSearchKeydown(e) {
+  if (e.key === 'Escape') { invDropdownClose(); return; }
+  if (e.key === 'Enter') {
+    if (_invSel >= 0 && _invResults[_invSel]) invPick(_invResults[_invSel].symbol);
+    else invStartFromInput();
+    e.preventDefault(); return;
+  }
+  if (!_invResults.length) return;
+  if (e.key === 'ArrowDown') { _invSel = Math.min(_invSel+1, _invResults.length-1); invSearchDebounce(document.getElementById('inv-search-input').value); e.preventDefault(); }
+  else if (e.key === 'ArrowUp') { _invSel = Math.max(_invSel-1, 0); invSearchDebounce(document.getElementById('inv-search-input').value); e.preventDefault(); }
+}
+
+function invPick(symbol) {
+  document.getElementById('inv-search-input').value = '';
+  invDropdownClose();
+  invStart(symbol);
+}
+
+function invStartFromInput() {
+  const val = (document.getElementById('inv-search-input').value || '').trim().toUpperCase();
+  if (val) invPick(val);
+}
+
+async function invStart(symbol) {
+  invDropdownClose();
+  try {
+    const r = await apiFetch('/api/investigate', { method: 'POST', body: JSON.stringify({ symbol }) });
+    if (!r.ok) {
+      const err = await r.json();
+      alert(err.detail || 'Could not start investigation');
+    }
+  } catch(e) { console.error(e); }
+}
+
+async function invRemove(symbol) {
+  try {
+    await apiFetch(`/api/investigate/${encodeURIComponent(symbol)}`, { method: 'DELETE' });
+  } catch(e) { console.error(e); }
+}
+
+async function invRerun(symbol) {
+  try {
+    await apiFetch(`/api/investigate/${encodeURIComponent(symbol)}`, { method: 'DELETE' });
+    await new Promise(r => setTimeout(r, 150));
+    await apiFetch('/api/investigate', { method: 'POST', body: JSON.stringify({ symbol }) });
   } catch(e) { console.error(e); }
 }
 
