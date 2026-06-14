@@ -6,7 +6,7 @@ import datetime
 import os
 import stat
 from contextlib import contextmanager
-from typing import Generator
+from typing import Generator, Optional
 
 from sqlalchemy import (
     Boolean,
@@ -17,6 +17,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     create_engine,
     func,
 )
@@ -94,6 +95,19 @@ class DailyStats(Base):
     trade_count = Column(Integer, default=0)
     day_trades = Column(Integer, default=0)
     kill_switch_triggered = Column(Boolean, default=False)
+
+
+class AccountDailyStats(Base):
+    """Per-account starting equity and kill switch state — survives restarts."""
+    __tablename__ = "account_daily_stats"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date, nullable=False, index=True)
+    account_label = Column(String(50), nullable=False)
+    starting_equity = Column(Float, default=0.0)
+    kill_switch_triggered = Column(Boolean, default=False)
+
+    __table_args__ = (UniqueConstraint("date", "account_label", name="uq_account_daily"),)
 
 
 # ── Engine / session factory ─────────────────────────────────────────────────
@@ -178,3 +192,36 @@ def count_day_trades_last_5_days(session: Session) -> int:
         .scalar()
     )
     return int(result or 0)
+
+
+def get_or_create_account_daily_stats(
+    session: Session,
+    date_val: datetime.date,
+    account_label: str,
+    starting_equity: float,
+) -> AccountDailyStats:
+    row = (
+        session.query(AccountDailyStats)
+        .filter_by(date=date_val, account_label=account_label)
+        .first()
+    )
+    if row is None:
+        row = AccountDailyStats(
+            date=date_val,
+            account_label=account_label,
+            starting_equity=starting_equity,
+        )
+        session.add(row)
+    return row
+
+
+def mark_account_kill_switch(
+    session: Session, date_val: datetime.date, account_label: str
+) -> None:
+    row = (
+        session.query(AccountDailyStats)
+        .filter_by(date=date_val, account_label=account_label)
+        .first()
+    )
+    if row and not row.kill_switch_triggered:
+        row.kill_switch_triggered = True

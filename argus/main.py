@@ -21,14 +21,17 @@ from argus.dashboard import web as web_dashboard
 from argus.notifications.notifier import Notifier
 from argus.risk.manager import RiskManager
 from argus.storage.models import (
+    AccountDailyStats,
     DailyStats,
     Signal,
     Trade,
     count_day_trades_last_5_days,
     delete_position,
+    get_or_create_account_daily_stats,
     get_or_create_daily_stats,
     get_session,
     init_db,
+    mark_account_kill_switch,
     upsert_position,
 )
 from argus.learning.flashcards import FlashcardStore
@@ -226,13 +229,17 @@ class Autopilot:
 
         self._terminal.start()
         try:
+            first_equity = 0.0
             for acct in self._accounts:
                 try:
                     equity = acct.broker.get_portfolio_equity()
-                    acct.risk.set_session_equity(equity)
+                    if not first_equity:
+                        first_equity = equity
+                    acct.risk.set_session_equity(equity)  # temporary baseline until DB row loaded
                 except Exception as exc:
                     logger.error("[%s] Could not fetch initial equity: %s", acct.label, exc)
-            self._init_daily_stats(self._accounts[0].broker.get_portfolio_equity())
+            self._init_daily_stats(first_equity)
+            self._restore_session_state()  # override baseline from DB, restore kill switch
             self._update_dashboard()  # seed web dashboard before first tick
 
             while self._running:
@@ -328,6 +335,7 @@ class Autopilot:
             return
 
         if acct.risk.check_drawdown(equity):
+            self._persist_kill_switch(acct)
             self._notifier.send(
                 f"[{acct.label.upper()}] KILL SWITCH",
                 f"Daily drawdown limit hit. Equity: ${equity:,.2f}",
@@ -711,6 +719,33 @@ class Autopilot:
         from sqlalchemy.orm import Session as _S
         from argus.storage.models import _SessionLocal
         return _SessionLocal()
+
+    def _restore_session_state(self) -> None:
+        """Load per-account starting equity and kill switch from today's DB rows."""
+        today = datetime.date.today()
+        restored_ks: list[str] = []
+        with get_session() as session:
+            for acct in self._accounts:
+                row = get_or_create_account_daily_stats(
+                    session, today, acct.label, acct.risk._session_entry_equity
+                )
+                if row.starting_equity > 0:
+                    acct.risk.set_session_equity(row.starting_equity)
+                if row.kill_switch_triggered:
+                    acct.risk._kill_switch = True
+                    restored_ks.append(acct.label)
+        if restored_ks:
+            logger.warning(
+                "Kill switch restored for [%s] — drawdown limit was exceeded earlier today",
+                ", ".join(restored_ks),
+            )
+
+    def _persist_kill_switch(self, acct: AccountContext) -> None:
+        try:
+            with get_session() as session:
+                mark_account_kill_switch(session, datetime.date.today(), acct.label)
+        except Exception as exc:
+            logger.warning("Could not persist kill switch for [%s]: %s", acct.label, exc)
 
     def _init_daily_stats(self, equity: float) -> None:
         today = datetime.date.today()
