@@ -92,8 +92,8 @@ def _mock_investigate(symbol: str, signal: dict, headlines: list) -> dict:
     import time, random
     time.sleep(random.uniform(2.5, 5.0))  # simulate Claude thinking
 
-    comp = signal.get("composite", 0.0) if signal else 0.0
-    if comp > 0.3:
+    comp = (signal or {}).get("composite", "neutral")
+    if comp in ("bullish", "buy"):
         verdict, conf, tf = "Bullish — Buy dip", 0.78, "2–5 days"
         summary = f"{symbol} shows strong momentum. RSI is elevated but not overbought. MACD recently crossed bullish. Price action confirms uptrend with higher lows."
         findings = [
@@ -105,7 +105,7 @@ def _mock_investigate(symbol: str, signal: dict, headlines: list) -> dict:
             "Sector rotation out of tech could pressure near-term",
             "Earnings in 3 weeks — implied volatility may expand",
         ]
-    elif comp < -0.3:
+    elif comp in ("bearish", "sell", "avoid"):
         verdict, conf, tf = "Bearish — Avoid", 0.71, "3–7 days"
         summary = f"{symbol} is showing distribution. RSI momentum is declining and MACD is trending lower. Short-term risk outweighs reward."
         findings = [
