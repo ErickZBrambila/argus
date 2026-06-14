@@ -86,6 +86,21 @@ def _mock_search(query: str) -> list[dict]:
 
 dash.register_search(_mock_search)
 
+# Seed fake news headlines for mock mode
+with dash._news_lock:
+    dash._news_cache[:] = [
+        {"headline": "NVIDIA reports record Q4 earnings, beats estimates by 15% on AI chip demand"},
+        {"headline": "Federal Reserve holds rates steady, signals two cuts later this year"},
+        {"headline": "Apple unveils AI-powered features across iPhone and Mac product lines"},
+        {"headline": "Tesla slashes prices globally amid intensifying EV market competition"},
+        {"headline": "Bitcoin ETF sees record $2.4B inflows as institutional demand surges"},
+        {"headline": "S&P 500 hits new all-time high driven by tech and semiconductor rally"},
+        {"headline": "Goldman Sachs raises year-end S&P 500 target to 6,500 on earnings beat"},
+        {"headline": "SEC approves spot Ethereum ETFs, crypto markets rally 8% on news"},
+        {"headline": "Microsoft Azure cloud revenue jumps 31% on AI services growth"},
+        {"headline": "Amazon Web Services margins expand as AI workloads drive higher pricing"},
+    ]
+
 # ── Fake data generators ──────────────────────────────────────────────────────
 
 SYMBOLS = ["AAPL", "TSLA", "NVDA", "BTC", "ETH"]

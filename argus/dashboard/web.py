@@ -81,6 +81,48 @@ def _push_approvals_state() -> None:
     _sse_push(json.dumps(_state, default=str))
 
 
+# ── Financial news RSS (background poller) ────────────────────────────────────
+_news_cache: list[dict] = []
+_news_lock = threading.Lock()
+
+_NEWS_FEEDS = [
+    "https://feeds.finance.yahoo.com/rss/2.0/headline?region=US&lang=en-US",
+    "https://feeds.marketwatch.com/marketwatch/topstories/",
+    "https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best",
+]
+
+
+def _news_fetch_loop() -> None:
+    import urllib.request
+    import xml.etree.ElementTree as ET
+    import time as _time
+
+    while True:
+        for url in _NEWS_FEEDS:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Argus/0.5.3 (+financial-dashboard)"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    root = ET.fromstring(resp.read())
+                items = []
+                for item in root.findall(".//item")[:15]:
+                    title = (item.findtext("title") or "").strip()
+                    if title:
+                        items.append({"headline": title})
+                if items:
+                    with _news_lock:
+                        _news_cache[:] = items
+                    logger.debug("News: fetched %d headlines from %s", len(items), url)
+                    break
+            except Exception as exc:
+                logger.debug("News fetch failed (%s): %s", url, exc)
+        _time.sleep(300)  # refresh every 5 minutes
+
+
+def _start_news_poller() -> None:
+    t = threading.Thread(target=_news_fetch_loop, daemon=True, name="argus-news")
+    t.start()
+
+
 # ── Runtime watchlist (mutable; seeded from config at startup) ────────────────
 _watchlist_lock = threading.Lock()
 _runtime_watchlist: list[str] = []
@@ -342,6 +384,12 @@ async def get_chart(symbol: str) -> dict:
         return {"candles": [], "symbol": symbol}
 
 
+@app.get("/api/news")
+async def get_news() -> dict:
+    with _news_lock:
+        return {"headlines": list(_news_cache)}
+
+
 @app.get("/api/search")
 async def search_symbols(q: str = Query(default="", max_length=60)) -> dict:
     q = q.strip()
@@ -554,34 +602,40 @@ _HTML = """<!DOCTYPE html>
 
   /* ── Ticker bar ─────────────────────────────────────────────────────────── */
   .ticker-bar {
-    background: var(--bg);
+    background: #0d1117;
     border-bottom: 1px solid var(--border);
-    height: 30px;
+    height: 34px;
     overflow: hidden;
     position: sticky;
     top: 60px;
     z-index: 99;
     display: flex;
     align-items: center;
+    width: 100%;
   }
   .ticker-track {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     white-space: nowrap;
-    animation: ticker-scroll 40s linear infinite;
+    animation: ticker-scroll linear infinite;
     will-change: transform;
   }
   .ticker-track:hover { animation-play-state: paused; cursor: default; }
   @keyframes ticker-scroll {
     from { transform: translateX(0); }
-    to   { transform: translateX(-50%); }
+    to   { transform: translateX(-16.6667%); }  /* 1/6 of 6 copies = seamless */
   }
-  .ticker-item { display: inline-flex; align-items: center; gap: 5px; padding: 0 18px; font-size: 12px; font-family: var(--mono); }
-  .ticker-sym { font-weight: 700; color: var(--text); letter-spacing: .3px; }
+  .ticker-item { display: inline-flex; align-items: center; gap: 5px; padding: 0 16px; font-size: 12px; font-family: var(--mono); flex-shrink: 0; }
+  .ticker-sym   { font-weight: 700; color: var(--text); letter-spacing: .3px; }
   .ticker-price { color: var(--text); font-variant-numeric: tabular-nums; }
-  .ticker-up   { color: var(--green); font-size: 11px; }
-  .ticker-down { color: var(--danger); font-size: 11px; }
-  .ticker-dot  { color: var(--border); font-size: 10px; margin: 0 2px; }
+  .ticker-up    { color: var(--green); font-size: 10px; }
+  .ticker-down  { color: var(--danger); font-size: 10px; }
+  .ticker-flat  { color: var(--muted); font-size: 10px; }
+  .ticker-dot   { color: var(--border); font-size: 9px; padding: 0 4px; flex-shrink: 0; }
+  .ticker-divider { color: rgba(0,212,170,.4); font-size: 10px; padding: 0 14px; flex-shrink: 0; letter-spacing: 2px; }
+  .ticker-news-item { display: inline-flex; align-items: center; gap: 7px; padding: 0 16px; flex-shrink: 0; }
+  .ticker-news-badge { font-size: 9px; font-weight: 800; color: #000d0a; background: var(--accent); border-radius: 3px; padding: 1px 5px; letter-spacing: .5px; flex-shrink: 0; }
+  .ticker-headline { font-size: 12px; color: var(--muted); max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* ── Main grid ──────────────────────────────────────────────────────────── */
   main { padding: 16px; display: grid; gap: 16px; }
@@ -2348,25 +2402,55 @@ async function chartSearchPick(symbol) {
 }
 
 // ── Ticker bar ────────────────────────────────────────────────────────────────
+let _tickerHeadlines = [];
+
+async function fetchNewsHeadlines() {
+  try {
+    const r = await fetch('/api/news');
+    const d = await r.json();
+    _tickerHeadlines = d.headlines || [];
+    updateTicker(window._latestSignals || []);
+  } catch(_) {}
+}
+
 function updateTicker(signals) {
   const track = document.getElementById('ticker-track');
   if (!track || !signals || !signals.length) return;
-  const items = signals.map(s => {
-    const price  = s.price != null ? '$' + s.price.toFixed(s.price < 10 ? 4 : 2) : '—';
-    const bull   = s.composite === 'bullish';
-    const bear   = s.composite === 'bearish';
-    const arrow  = bull ? '▲' : bear ? '▼' : '●';
-    const cls    = bull ? 'ticker-up' : bear ? 'ticker-down' : 'ticker-dot';
+
+  // Price items
+  const priceHtml = signals.map(s => {
+    const price = s.price != null ? '$' + s.price.toFixed(s.price < 10 ? 4 : 2) : '—';
+    const bull  = s.composite === 'bullish', bear = s.composite === 'bearish';
+    const arrow = bull ? '▲' : bear ? '▼' : '—';
+    const cls   = bull ? 'ticker-up' : bear ? 'ticker-down' : 'ticker-flat';
     return `<span class="ticker-item">` +
-      `<span class="ticker-sym">${escHtml(s.symbol)}</span>` +
-      `<span class="ticker-price private">${price}</span>` +
+      `<span class="ticker-sym">${escHtml(s.symbol)}</span> ` +
+      `<span class="ticker-price private">${price}</span> ` +
       `<span class="${cls}">${arrow}</span>` +
       `</span><span class="ticker-dot">·</span>`;
   }).join('');
-  // Duplicate for seamless loop
-  track.innerHTML = items + items;
-  // Scale duration to content so scroll speed feels consistent
-  track.style.animationDuration = Math.max(20, signals.length * 6) + 's';
+
+  // News items
+  const newsHtml = _tickerHeadlines.slice(0, 12).map(h =>
+    `<span class="ticker-news-item">` +
+    `<span class="ticker-news-badge">NEWS</span>` +
+    `<span class="ticker-headline">${escHtml(h.headline)}</span>` +
+    `</span><span class="ticker-dot">·</span>`
+  ).join('');
+
+  const divider = newsHtml ? `<span class="ticker-divider">◆◆◆</span>` : '';
+  const single = priceHtml + divider + newsHtml;
+
+  // Use 6 copies so the track is always wider than the viewport — CSS animates
+  // exactly 1/6 of the total (translateX(-16.667%)) for a seamless infinite loop
+  track.innerHTML = single.repeat(6);
+
+  // Duration: target ~120px/s — measure actual track width after layout
+  requestAnimationFrame(() => {
+    const singleW = track.scrollWidth / 6;
+    const dur = Math.max(15, Math.round(singleW / 120));
+    track.style.animationDuration = dur + 's';
+  });
 }
 
 // ── Charts tab (draggable dashlets) ──────────────────────────────────────────
@@ -2672,6 +2756,8 @@ fetch('/api/version').then(r=>r.json()).then(d => {
 }).catch(()=>{});
 fetchAll();
 connectSSE();
+fetchNewsHeadlines();
+setInterval(fetchNewsHeadlines, 5 * 60 * 1000);
 </script>
 </body>
 </html>"""
@@ -2690,4 +2776,5 @@ def main(host: str = "127.0.0.1", port: int = 8000, token: str = "") -> None:
     if token:
         _configure_auth(token)
         logger.info("Dashboard API authentication enabled")
+    _start_news_poller()
     uvicorn.run(app, host=host, port=port, log_level="warning")
