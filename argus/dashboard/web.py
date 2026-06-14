@@ -861,7 +861,7 @@ _HTML = """<!DOCTYPE html>
   .fc-stat { display: flex; flex-direction: column; gap: 2px; }
   .fc-stat .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
   .fc-stat-val { font-size: 20px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
-  .fc-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+  .fc-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
   .fc {
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -873,26 +873,40 @@ _HTML = """<!DOCTYPE html>
   .fc.fc-win  { border-left: 3px solid var(--green); }
   .fc.fc-loss { border-left: 3px solid var(--red); }
   .fc.fc-open { border-left: 3px solid var(--yellow); }
-  .fc-front { padding: 13px 15px; background: var(--surface2); }
+  .fc-front { padding: 14px 16px; background: var(--surface2); }
   .fc-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-  .fc-symbol { font-size: 14px; font-weight: 700; color: var(--accent); font-family: var(--mono); letter-spacing: 0.5px; }
-  .fc-badges { display: flex; gap: 5px; align-items: center; }
+  .fc-symbol { font-size: 15px; font-weight: 700; color: var(--accent); font-family: var(--mono); letter-spacing: 0.5px; }
+  .fc-confidence-row { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; flex-wrap: wrap; }
+  .fc-conf-label { font-size: 12px; color: var(--muted); }
+  .fc-reasoning-preview {
+    font-size: 12.5px;
+    color: var(--text);
+    font-style: italic;
+    line-height: 1.55;
+    margin-bottom: 10px;
+    padding: 8px 11px;
+    background: rgba(0,0,0,.18);
+    border-radius: var(--radius-sm);
+    border-left: 2px solid rgba(0,212,170,.35);
+  }
   .fc-indicators {
     display: grid;
-    grid-template-columns: max-content 1fr max-content 1fr;
-    gap: 4px 10px;
-    font-size: 11px;
+    grid-template-columns: max-content 1fr;
+    gap: 5px 12px;
+    font-size: 12px;
     margin-bottom: 10px;
   }
   .fc-indicators .muted { color: var(--text-dim); }
-  .fc-ind-val { color: var(--text); font-weight: 600; font-family: var(--mono); }
-  .fc-outcome { display: flex; justify-content: space-between; align-items: center; font-size: 12px; margin-top: 2px; }
-  .fc-expand-hint { font-size: 10px; color: var(--text-dim); transition: opacity .15s; }
+  .fc-ind-val { color: var(--text); font-weight: 600; }
+  .fc-outcome { display: flex; justify-content: space-between; align-items: center; font-size: 12px; margin-top: 2px; flex-wrap: wrap; gap: 4px; }
+  .fc-expand-hint { font-size: 10px; color: var(--text-dim); transition: opacity .15s; white-space: nowrap; }
   .fc.expanded .fc-expand-hint { opacity: 0; pointer-events: none; }
-  .fc-back { padding: 12px 15px; background: var(--surface3); border-top: 1px solid var(--border); display: none; }
+  .fc-back { padding: 14px 16px; background: var(--surface3); border-top: 1px solid var(--border); display: none; }
   .fc.expanded .fc-back { display: block; }
-  .fc-reasoning { font-size: 12.5px; color: var(--muted); line-height: 1.65; margin-bottom: 8px; }
-  .fc-meta { font-size: 11px; color: var(--text-dim); border-top: 1px solid var(--border-subtle); padding-top: 6px; margin-top: 4px; }
+  .fc-back-section { margin-bottom: 14px; }
+  .fc-back-title { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); margin-bottom: 7px; }
+  .fc-reasoning { font-size: 12.5px; color: var(--muted); line-height: 1.65; margin-bottom: 4px; }
+  .fc-meta { font-size: 11px; color: var(--text-dim); border-top: 1px solid var(--border-subtle); padding-top: 7px; margin-top: 4px; }
   .pill-win  { background: rgba(63,185,80,.14);  color: var(--green); }
   .pill-loss { background: rgba(248,81,73,.14);  color: var(--red); }
   .pill-open { background: rgba(210,153,34,.14); color: var(--yellow); }
@@ -1108,7 +1122,7 @@ _HTML = """<!DOCTYPE html>
 
     <!-- Flashcards -->
     <div class="card card-full">
-      <div class="card-title">Decision Flashcards <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-dim)">— tap a card to expand reasoning</span></div>
+      <div class="card-title">Trade Decisions <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-dim)">— what the AI did and why · click any card to see the full reasoning</span></div>
       <div class="fc-summary" id="fc-summary"></div>
       <div class="fc-grid" id="fc-grid"><div class="empty">No trades recorded yet</div></div>
     </div>
@@ -1619,25 +1633,34 @@ async function decideApproval(tradeId, decision) {
   await apiFetch(`/api/${decision}/${encodeURIComponent(tradeId)}`, {method:'POST'});
 }
 
+function _timeAgo(date) {
+  const secs = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+  if (secs < 172800) return 'yesterday';
+  return Math.floor(secs / 86400) + ' days ago';
+}
+
 function renderFlashcards(state) {
   const cards = state.flashcards || [];
   const summary = state.flashcard_summary || {};
 
-  // Summary bar
+  // Summary bar — plain English labels
   const fcSum = document.getElementById('fc-summary');
   if (summary.total > 0) {
     const wr = summary.win_rate != null ? (summary.win_rate * 100).toFixed(0) + '%' : '—';
     const avgPnl = summary.avg_pnl_pct != null ? (summary.avg_pnl_pct >= 0 ? '+' : '') + summary.avg_pnl_pct.toFixed(2) + '%' : '—';
-    const best = summary.best_pnl_pct != null ? '+' + summary.best_pnl_pct.toFixed(2) + '%' : '—';
+    const best  = summary.best_pnl_pct  != null ? '+' + summary.best_pnl_pct.toFixed(2)  + '%' : '—';
     const worst = summary.worst_pnl_pct != null ? summary.worst_pnl_pct.toFixed(2) + '%' : '—';
     const wrClass = summary.win_rate >= 0.5 ? 'green' : summary.win_rate != null ? 'red' : '';
     fcSum.innerHTML = `
       <div class="fc-stat"><span class="label">Total Trades</span><span class="fc-stat-val">${summary.total}</span></div>
-      <div class="fc-stat"><span class="label">Closed</span><span class="fc-stat-val">${summary.closed}</span></div>
+      <div class="fc-stat"><span class="label">Completed</span><span class="fc-stat-val">${summary.closed}</span></div>
       <div class="fc-stat"><span class="label">Win Rate</span><span class="fc-stat-val ${wrClass}">${wr}</span></div>
-      <div class="fc-stat"><span class="label">Avg P&L</span><span class="fc-stat-val ${summary.avg_pnl_pct >= 0 ? 'green' : 'red'}">${avgPnl}</span></div>
-      <div class="fc-stat"><span class="label">Best</span><span class="fc-stat-val green">${best}</span></div>
-      <div class="fc-stat"><span class="label">Worst</span><span class="fc-stat-val red">${worst}</span></div>`;
+      <div class="fc-stat"><span class="label">Avg gain/loss %</span><span class="fc-stat-val ${(summary.avg_pnl_pct||0) >= 0 ? 'green' : 'red'}">${avgPnl}</span></div>
+      <div class="fc-stat"><span class="label">Best trade</span><span class="fc-stat-val green">${best}</span></div>
+      <div class="fc-stat"><span class="label">Worst trade</span><span class="fc-stat-val red">${worst}</span></div>`;
   } else {
     fcSum.innerHTML = '';
   }
@@ -1653,48 +1676,117 @@ function renderFlashcards(state) {
     [...grid.querySelectorAll('.fc.expanded')].map(el => el.dataset.tradeId)
   );
 
+  const _BB_LABELS = {
+    above_upper: 'stretched high',
+    below_lower: 'stretched low',
+    inside:      'normal range',
+    unknown:     '—',
+  };
+  const _RISK_LABELS = {
+    low:    'Low-risk trade',
+    medium: 'Medium-risk trade',
+    high:   'High-risk trade',
+  };
+
   grid.innerHTML = cards.map(c => {
     const closed = c.pnl_pct != null;
-    const won = closed && c.pnl_pct > 0;
+    const won    = closed && c.pnl_pct > 0;
     const borderCls = closed ? (won ? 'fc-win' : 'fc-loss') : 'fc-open';
-    const outcomeHtml = closed
-      ? `<span class="pill ${won ? 'pill-win' : 'pill-loss'}">${won ? '▲' : '▼'} ${(c.pnl_pct >= 0 ? '+' : '') + c.pnl_pct.toFixed(2)}%</span>
-         <span class="muted" style="font-size:11px">${c.hold_duration_hours ? c.hold_duration_hours.toFixed(1) + 'h held' : ''}</span>`
-      : `<span class="pill pill-open">OPEN</span>`;
 
-    const rsiVal = c.rsi != null ? c.rsi.toFixed(1) : '—';
-    const macdVal = c.macd_hist != null ? (c.macd_hist >= 0 ? '+' : '') + c.macd_hist.toFixed(4) : '—';
-    const macdCls = c.macd_hist > 0 ? 'green' : c.macd_hist < 0 ? 'red' : '';
-    const rsiCls = c.rsi < 30 ? 'green' : c.rsi > 70 ? 'red' : '';
-    const bbLabel = (c.bb_position || 'inside').replace(/_/g, ' ');
-    const ts = c.timestamp ? new Date(c.timestamp).toLocaleString() : '';
+    // Outcome in human terms: dollar gain/loss + hold time
+    let outcomeHtml;
+    if (closed) {
+      const dollarGain = (c.dollar_amount || 0) * ((c.pnl_pct || 0) / 100);
+      const gainSign   = dollarGain >= 0 ? '+' : '';
+      const pnlSign    = (c.pnl_pct || 0) >= 0 ? '+' : '';
+      let holdStr = '';
+      if (c.hold_duration_hours) {
+        holdStr = c.hold_duration_hours >= 24
+          ? Math.floor(c.hold_duration_hours / 24) + 'd ' + Math.round(c.hold_duration_hours % 24) + 'h'
+          : c.hold_duration_hours.toFixed(1) + 'h';
+      }
+      outcomeHtml = `
+        <span class="pill ${won ? 'pill-win' : 'pill-loss'}">${won ? '▲ Made' : '▼ Lost'} <span class="private">${gainSign}$${Math.abs(dollarGain).toFixed(2)}</span> (${pnlSign}${(c.pnl_pct||0).toFixed(2)}%)</span>
+        ${holdStr ? `<span class="muted" style="font-size:11px">${escHtml(holdStr)} held</span>` : ''}`;
+    } else {
+      const sinceStr = c.timestamp ? _timeAgo(new Date(c.timestamp)) : '';
+      outcomeHtml = `<span class="pill pill-open">In progress</span>${sinceStr ? `<span class="muted" style="font-size:11px">opened ${escHtml(sinceStr)}</span>` : ''}`;
+    }
+
+    // Plain-English indicator values
+    const rsiVal  = c.rsi != null ? c.rsi.toFixed(1) : '—';
+    const rsiCls  = c.rsi < 30 ? 'green' : c.rsi > 70 ? 'red' : '';
+    const rsiNote = c.rsi < 30 ? ' — oversold' : c.rsi > 70 ? ' — overbought' : '';
+
+    const macdRaw = c.macd_hist;
+    const macdCls = macdRaw > 0 ? 'green' : macdRaw < 0 ? 'red' : '';
+    const macdNote = macdRaw > 0 ? ' (building up)' : macdRaw < 0 ? ' (fading)' : '';
+
+    const bbLabel  = _BB_LABELS[c.bb_position] || (c.bb_position || 'normal range').replace(/_/g, ' ');
+    const smaLabel = c.price_vs_sma20 === 'above' ? 'above — bullish sign' : c.price_vs_sma20 === 'below' ? 'below — bearish sign' : '—';
+    const emaLabel = c.price_vs_ema50 === 'above' ? 'above — bullish sign' : c.price_vs_ema50 === 'below' ? 'below — bearish sign' : '—';
+
+    const condLabel = (c.signal_composite||'neutral').charAt(0).toUpperCase() + (c.signal_composite||'neutral').slice(1);
+    const signalConf = c.signal_confidence != null ? (c.signal_confidence * 100).toFixed(0) + '%' : '—';
+    const aiConf     = c.decision_confidence != null ? (c.decision_confidence * 100).toFixed(0) + '%' : '—';
+    const riskLabel  = _RISK_LABELS[c.risk_level] || (c.risk_level || 'medium');
+    const riskCls    = `pill-risk-${c.risk_level || 'medium'}`;
+
+    // AI reasoning: show first sentence as a visible preview on the card face
+    const reasoning = c.reasoning || '';
+    const firstDot  = reasoning.search(/[.!?]/);
+    const preview   = firstDot > 5
+      ? reasoning.slice(0, firstDot + 1).trim()
+      : reasoning.slice(0, 120).trim() + (reasoning.length > 120 ? '…' : '');
+
+    // Timestamps
+    const ts      = c.timestamp ? new Date(c.timestamp).toLocaleString() : '';
+    const timeAgo = c.timestamp ? _timeAgo(new Date(c.timestamp)) : '';
+    const actionLabel = (c.action || 'BUY').toUpperCase();
 
     return `<div class="fc ${borderCls}" data-trade-id="${c.trade_id||''}" onclick="this.classList.toggle('expanded')">
       <div class="fc-front">
         <div class="fc-top">
-          <span class="fc-symbol">${escHtml(c.symbol)}</span>
-          <div class="fc-badges">
-            <span class="pill pill-${escHtml((c.action||'buy').toLowerCase())}">${escHtml(c.action)}</span>
-            <span class="pill pill-risk-${escHtml(c.risk_level||'medium')}">${escHtml((c.risk_level||'medium').toUpperCase())}</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="fc-symbol">${escHtml(c.symbol)}</span>
+            <span class="pill pill-${escHtml(actionLabel.toLowerCase())}">${escHtml(actionLabel)}</span>
           </div>
+          <span class="muted" style="font-size:11px">${escHtml(timeAgo)}</span>
         </div>
-        <div class="fc-indicators">
-          <span class="muted">RSI</span><span class="fc-ind-val ${rsiCls}">${rsiVal}</span>
-          <span class="muted">MACD hist</span><span class="fc-ind-val ${macdCls}">${macdVal}</span>
-          <span class="muted">BB</span><span class="fc-ind-val">${bbLabel}</span>
-          <span class="muted">Signal</span><span class="fc-ind-val">${c.signal_composite} ${(c.signal_confidence*100).toFixed(0)}%</span>
-          <span class="muted">vs SMA20</span><span class="fc-ind-val">${c.price_vs_sma20||'—'}</span>
-          <span class="muted">vs EMA50</span><span class="fc-ind-val">${c.price_vs_ema50||'—'}</span>
+        <div class="fc-confidence-row">
+          <span class="pill ${riskCls}">${escHtml(riskLabel)}</span>
+          <span class="fc-conf-label">AI was <strong>${escHtml(aiConf)}</strong> confident</span>
         </div>
+        ${preview ? `<div class="fc-reasoning-preview">"${escHtml(preview)}"</div>` : ''}
         <div class="fc-outcome">
           ${outcomeHtml}
-          <span class="fc-expand-hint">tap to expand ↓</span>
+          <span class="fc-expand-hint">See AI reasoning ↓</span>
         </div>
       </div>
       <div class="fc-back">
-        <div class="fc-reasoning">${escHtml(c.reasoning||'No reasoning recorded.')}</div>
+        <div class="fc-back-section">
+          <div class="fc-back-title">Why the AI decided this</div>
+          <div class="fc-reasoning">${escHtml(reasoning || 'No reasoning recorded.')}</div>
+        </div>
+        <div class="fc-back-section">
+          <div class="fc-back-title">Market conditions at the time</div>
+          <div class="fc-indicators">
+            <span class="muted">Overall signal</span>
+            <span class="fc-ind-val">${escHtml(condLabel)} — signals were ${escHtml(signalConf)} sure</span>
+            <span class="muted">Momentum (RSI)</span>
+            <span class="fc-ind-val ${rsiCls}">${escHtml(rsiVal)}${escHtml(rsiNote)}</span>
+            <span class="muted">Trend strength</span>
+            <span class="fc-ind-val ${macdCls}">${escHtml(String(macdRaw != null ? (macdRaw >= 0 ? '+' : '') + macdRaw.toFixed(4) : '—'))}${escHtml(macdNote)}</span>
+            <span class="muted">Price range</span>
+            <span class="fc-ind-val">${escHtml(bbLabel)}</span>
+            <span class="muted">vs 20-day average</span>
+            <span class="fc-ind-val">${escHtml(smaLabel)}</span>
+            <span class="muted">vs 50-day trend line</span>
+            <span class="fc-ind-val">${escHtml(emaLabel)}</span>
+          </div>
+        </div>
         <div class="fc-meta">
-          <span class="private">Entry $${(c.entry_price||0).toFixed(2)} · $${(c.dollar_amount||0).toFixed(2)}</span> · ${escHtml(c.account||'')} · ${escHtml(ts)}
+          <span class="private">Entry $${(c.entry_price||0).toFixed(2)} · $${(c.dollar_amount||0).toFixed(2)} invested</span> · ${escHtml(c.account||'')} · ${escHtml(ts)}
         </div>
       </div>
     </div>`;
