@@ -35,7 +35,7 @@ class _RingBufferHandler(logging.Handler):
             if record.exc_info:
                 msg += " — " + self.formatException(record.exc_info)
             entry: LogEntry = {
-                "ts":    datetime.datetime.fromtimestamp(record.created).strftime("%H:%M:%S"),
+                "ts":    datetime.datetime.fromtimestamp(record.created, tz=datetime.timezone.utc).strftime("%H:%M:%SZ"),
                 "level": record.levelname,
                 "name":  record.name.split(".")[-1],
                 "msg":   msg,

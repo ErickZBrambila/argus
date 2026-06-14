@@ -221,6 +221,8 @@ class Autopilot:
         self._flashcards = FlashcardStore()
         self._recent_trades: collections.deque = collections.deque(maxlen=200)
         self._latest_signals: list[dict] = []
+        # Cache: label → {"equity": float, "positions": dict} — refreshed each tick
+        self._account_cache: dict[str, dict] = {}
 
         for acct in self._accounts:
             logger.info(
@@ -244,7 +246,7 @@ class Autopilot:
 
         web_thread = threading.Thread(
             target=web_dashboard.main,
-            kwargs={"host": self._cfg.web_host, "port": self._cfg.web_port},
+            kwargs={"host": self._cfg.web_host, "port": self._cfg.web_port, "token": self._cfg.dashboard_token},
             daemon=True,
             name="argus-web",
         )
@@ -330,16 +332,25 @@ class Autopilot:
 
         signals = []
         signal_map: dict[str, SignalResult] = {}
-        for symbol in self._cfg.watchlist:
-            try:
-                sig = self._strategy.compute(symbol)
-                if sig is None:
-                    continue
-                signals.append(sig.to_dict())
-                signal_map[symbol] = sig
+
+        def _compute_signal(symbol: str):
+            sig = self._strategy.compute(symbol)
+            if sig is not None:
                 self._persist_signal(sig)
-            except Exception as exc:
-                logger.error("Signal error for %s: %s", symbol, exc)
+            return symbol, sig
+
+        import concurrent.futures as _cf
+        watchlist = self._cfg.watchlist
+        with _cf.ThreadPoolExecutor(max_workers=min(len(watchlist), 8), thread_name_prefix="sig") as ex:
+            futures = {ex.submit(_compute_signal, sym): sym for sym in watchlist}
+            for fut in _cf.as_completed(futures):
+                try:
+                    sym, sig = fut.result()
+                    if sig is not None:
+                        signals.append(sig.to_dict())
+                        signal_map[sym] = sig
+                except Exception as exc:
+                    logger.error("Signal error for %s: %s", futures[fut], exc)
 
         self._latest_signals = signals
 
@@ -370,6 +381,8 @@ class Autopilot:
             return
 
         open_positions = acct.broker.get_open_positions()
+        # Cache so _update_dashboard can reuse without extra API calls
+        self._account_cache[acct.label] = {"equity": equity, "positions": open_positions}
 
         # Stop-loss sweep
         for sym, pos in list(open_positions.items()):
@@ -390,7 +403,18 @@ class Autopilot:
                     portfolio_equity=equity,
                     open_positions=open_positions,
                     daily_pnl_pct=daily_pnl_pct,
+                    max_positions=self._cfg.max_positions,
                 )
+
+                if decision.is_error:
+                    logger.critical(
+                        "[%s][%s] AI decision engine failed — both models errored, holding",
+                        acct.label, symbol,
+                    )
+                    self._notifier.send(
+                        f"[{acct.label.upper()}] AI ERROR — {symbol}",
+                        f"Both models failed to decide on {symbol}. Holding. Reason: {decision.reasoning[:200]}",
+                    )
 
                 logger.info(
                     "[%s][%s] %s → %s (conf %.0f%% risk=%s) | %s",
@@ -453,7 +477,13 @@ class Autopilot:
             "signal": sig.composite,
             "signal_confidence": sig.confidence,
         }
-        acct.pending_approvals[trade_id] = {**trade_info, "dollar_amount": dollar_amount, "_sig": sig, "_decision": decision}
+        acct.pending_approvals[trade_id] = {
+            **trade_info,
+            "dollar_amount": dollar_amount,
+            "_sig": sig,
+            "_decision": decision,
+            "queued_at": datetime.datetime.now(_UTC).isoformat(),
+        }
         web_dashboard.queue_approval(trade_id, trade_info)
         logger.info("[%s][%s] BUY queued for approval (risk=%s) id=%s", acct.label, symbol, decision.risk_level, trade_id)
         self._notifier.send(
@@ -461,11 +491,32 @@ class Autopilot:
             f"{decision.risk_level.upper()} RISK — ${dollar_amount:.2f} · conf {decision.confidence:.0%}\n{decision.reasoning[:200]}\nApprove at http://{self._cfg.web_host}:{self._cfg.web_port}",
         )
 
+    _APPROVAL_TTL_SECONDS = 1800  # 30 minutes
+
     def _poll_approvals(self) -> None:
+        now = datetime.datetime.now(_UTC)
         for acct in self._accounts:
             if acct.auto_trade:
                 continue
             for trade_id in list(acct.pending_approvals):
+                info = acct.pending_approvals[trade_id]
+
+                # Auto-deny stale approvals
+                queued_at_str = info.get("queued_at")
+                if queued_at_str:
+                    try:
+                        queued_at = datetime.datetime.fromisoformat(queued_at_str)
+                        if (now - queued_at).total_seconds() > self._APPROVAL_TTL_SECONDS:
+                            acct.pending_approvals.pop(trade_id)
+                            web_dashboard.clear_approval(trade_id)
+                            logger.warning(
+                                "[%s] Approval %s auto-denied (stale >30 min): %s",
+                                acct.label, trade_id, info.get("symbol"),
+                            )
+                            continue
+                    except Exception:
+                        pass
+
                 decision = web_dashboard.get_approval_decision(trade_id)
                 if decision is None:
                     continue
@@ -698,12 +749,14 @@ class Autopilot:
 
         for acct in self._accounts:
             try:
-                eq = acct.broker.get_portfolio_equity()
+                cached = self._account_cache.get(acct.label, {})
+                eq = cached.get("equity") or acct.broker.get_portfolio_equity()
+                positions_raw = cached.get("positions") or acct.broker.get_open_positions()
                 total_equity += eq
                 total_entry_equity += acct.risk.session_entry_equity
                 kill_switch = kill_switch or acct.risk.kill_switch_active
 
-                for sym, pos in acct.broker.get_open_positions().items():
+                for sym, pos in positions_raw.items():
                     try:
                         cur = acct.broker.get_price(sym)
                         pnl_pct = (cur - pos["avg_price"]) / pos["avg_price"] * 100 if pos["avg_price"] else 0
@@ -729,15 +782,17 @@ class Autopilot:
 
         accounts_state = {}
         for acct in self._accounts:
+            cached = self._account_cache.get(acct.label, {})
             try:
-                eq = acct.broker.get_portfolio_equity()
+                eq = cached.get("equity") or acct.broker.get_portfolio_equity()
             except Exception:
                 eq = 0.0
             entry_eq = acct.risk.session_entry_equity
             acct_pnl = eq - entry_eq
             acct_pnl_pct = (acct_pnl / entry_eq * 100) if entry_eq else 0.0
             acct_positions = {}
-            for sym, pos in acct.broker.get_open_positions().items():
+            positions_raw = cached.get("positions") or acct.broker.get_open_positions()
+            for sym, pos in positions_raw.items():
                 try:
                     cur = acct.broker.get_price(sym)
                     pnl_pct = (cur - pos["avg_price"]) / pos["avg_price"] * 100 if pos["avg_price"] else 0

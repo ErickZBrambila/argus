@@ -261,11 +261,37 @@ class RobinhoodBroker:
 
     # ── Live order helpers ───────────────────────────────────────────────────
 
+    _FILL_STATES   = frozenset({"filled", "partially_filled"})
+    _CANCEL_STATES = frozenset({"cancelled", "failed", "rejected"})
+
+    def _poll_until_filled(self, order_id: str, is_crypto: bool, timeout: float = 30.0) -> dict:
+        """Poll order status until filled, cancelled, or timeout. Returns last order dict."""
+        import robin_stocks.robinhood as rh
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                order = (
+                    rh.orders.get_crypto_order_info(order_id)
+                    if is_crypto
+                    else rh.orders.get_stock_order_info(order_id)
+                )
+                state = order.get("state", "")
+                if state in self._FILL_STATES or state in self._CANCEL_STATES:
+                    return order
+            except Exception as exc:
+                logger.warning("Poll order %s failed: %s", order_id, exc)
+            time.sleep(2)
+        logger.warning("Order %s did not fill within %.0fs", order_id, timeout)
+        return order  # return last known state
+
     def _live_buy(self, symbol: str, qty: float, price: float) -> OrderResult:
         import robin_stocks.robinhood as rh
 
+        is_crypto = symbol in CRYPTO_SYMBOLS
         try:
-            if symbol in CRYPTO_SYMBOLS:
+            if is_crypto:
                 order = rh.orders.order_buy_crypto_by_quantity(symbol, qty)
             else:
                 order = rh.orders.order_buy_fractional_by_quantity(
@@ -273,8 +299,10 @@ class RobinhoodBroker:
                 )
 
             order_id = order.get("id", str(uuid.uuid4()))
-            filled = order.get("state") in ("filled", "partially_filled")
-            logger.info("[LIVE] BUY %s %.4f @ $%.4f — id=%s", symbol, qty, price, order_id)
+            if order.get("state") not in self._FILL_STATES:
+                order = self._poll_until_filled(order_id, is_crypto)
+            filled = order.get("state") in self._FILL_STATES
+            logger.info("[LIVE] BUY %s %.4f @ $%.4f — id=%s state=%s", symbol, qty, price, order_id, order.get("state"))
             return OrderResult(order_id=order_id, symbol=symbol, side="buy", quantity=qty, price=price, filled=filled, paper=False, raw=order)
         except Exception as exc:
             logger.error("Live buy failed for %s: %s", symbol, exc)
@@ -283,8 +311,9 @@ class RobinhoodBroker:
     def _live_sell(self, symbol: str, qty: float, price: float) -> OrderResult:
         import robin_stocks.robinhood as rh
 
+        is_crypto = symbol in CRYPTO_SYMBOLS
         try:
-            if symbol in CRYPTO_SYMBOLS:
+            if is_crypto:
                 order = rh.orders.order_sell_crypto_by_quantity(symbol, qty)
             else:
                 order = rh.orders.order_sell_fractional_by_quantity(
@@ -292,8 +321,10 @@ class RobinhoodBroker:
                 )
 
             order_id = order.get("id", str(uuid.uuid4()))
-            filled = order.get("state") in ("filled", "partially_filled")
-            logger.info("[LIVE] SELL %s %.4f @ $%.4f — id=%s", symbol, qty, price, order_id)
+            if order.get("state") not in self._FILL_STATES:
+                order = self._poll_until_filled(order_id, is_crypto)
+            filled = order.get("state") in self._FILL_STATES
+            logger.info("[LIVE] SELL %s %.4f @ $%.4f — id=%s state=%s", symbol, qty, price, order_id, order.get("state"))
             return OrderResult(order_id=order_id, symbol=symbol, side="sell", quantity=qty, price=price, filled=filled, paper=False, raw=order)
         except Exception as exc:
             logger.error("Live sell failed for %s: %s", symbol, exc)

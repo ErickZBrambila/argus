@@ -14,7 +14,7 @@ from typing import AsyncGenerator
 import pathlib
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -94,6 +94,19 @@ app = FastAPI(title="Argus Dashboard", docs_url=None, redoc_url=None)
 # CORS intentionally omitted: frontend is served from the same origin as the API.
 _STATIC_DIR = pathlib.Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+_dashboard_token: str = ""
+
+
+def _configure_auth(token: str) -> None:
+    global _dashboard_token
+    _dashboard_token = token
+
+
+def _require_auth(x_argus_token: str = Header(default="")) -> None:
+    if _dashboard_token and x_argus_token != _dashboard_token:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Argus-Token header")
 
 
 @app.on_event("startup")
@@ -179,7 +192,7 @@ async def get_scan_interval() -> dict:
     }
 
 
-@app.post("/api/scan-interval")
+@app.post("/api/scan-interval", dependencies=[Depends(_require_auth)])
 async def set_scan_interval(body: dict) -> dict:
     if _autopilot is None:
         raise HTTPException(status_code=503, detail="Autopilot not available (mock mode?)")
@@ -209,21 +222,21 @@ async def get_signals() -> dict:
     return {"signals": _state.get("signals", [])}
 
 
-@app.post("/api/pause")
+@app.post("/api/pause", dependencies=[Depends(_require_auth)])
 async def pause_trading() -> dict:
     set_paused(True)
     logger.info("Autopilot paused via web dashboard")
     return {"status": "paused"}
 
 
-@app.post("/api/resume")
+@app.post("/api/resume", dependencies=[Depends(_require_auth)])
 async def resume_trading() -> dict:
     set_paused(False)
     logger.info("Autopilot resumed via web dashboard")
     return {"status": "running"}
 
 
-@app.post("/api/close/{symbol}")
+@app.post("/api/close/{symbol}", dependencies=[Depends(_require_auth)])
 async def force_close(symbol: str) -> dict:
     symbol = symbol.upper().strip()
     positions = _state.get("positions", {})
@@ -256,7 +269,7 @@ def get_promote_request() -> dict | None:
         return None
 
 
-@app.post("/api/promote/{symbol}")
+@app.post("/api/promote/{symbol}", dependencies=[Depends(_require_auth)])
 async def promote_position(symbol: str, body: dict = {}) -> dict:
     symbol = symbol.upper().strip()
     if not _SYMBOL_RE.match(symbol):
@@ -319,7 +332,7 @@ async def get_approvals() -> dict:
         return {"approvals": dict(_pending_approvals)}
 
 
-@app.post("/api/approve/{trade_id}")
+@app.post("/api/approve/{trade_id}", dependencies=[Depends(_require_auth)])
 async def approve_trade(trade_id: str) -> dict:
     with _approval_lock:
         if trade_id not in _pending_approvals:
@@ -330,7 +343,7 @@ async def approve_trade(trade_id: str) -> dict:
     return {"status": "approved", "trade_id": trade_id}
 
 
-@app.post("/api/deny/{trade_id}")
+@app.post("/api/deny/{trade_id}", dependencies=[Depends(_require_auth)])
 async def deny_trade(trade_id: str) -> dict:
     with _approval_lock:
         if trade_id not in _pending_approvals:
@@ -1161,6 +1174,14 @@ _HTML = """<!DOCTYPE html>
 let paused = false;
 let _equityGoal = 25000;
 
+// Attach X-Argus-Token header to all mutating requests when auth is enabled
+function apiFetch(url, opts = {}) {
+  const tok = window._ARGUS_TOKEN || '';
+  const headers = Object.assign({'Content-Type': 'application/json'}, opts.headers || {});
+  if (tok) headers['X-Argus-Token'] = tok;
+  return fetch(url, Object.assign({}, opts, {headers}));
+}
+
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.textContent.toLowerCase() === name));
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
@@ -1168,9 +1189,8 @@ function switchTab(name) {
 
 async function promotePosition(symbol, fromAccount) {
   if (!confirm(`Sell ${symbol} from ${fromAccount} and re-buy on Agentic?`)) return;
-  const r = await fetch('/api/promote/' + symbol, {
+  const r = await apiFetch('/api/promote/' + symbol, {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({from_account: fromAccount, to_account: 'agentic'})
   });
   const d = await r.json();
@@ -1289,9 +1309,8 @@ function _updateSessionBadge(session) {
 async function setScanInterval(val) {
   const body = val === 'auto' ? { seconds: null } : { seconds: parseInt(val) };
   try {
-    await fetch('/api/scan-interval', {
+    await apiFetch('/api/scan-interval', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
   } catch(e) { console.error('setScanInterval failed', e); }
@@ -1597,7 +1616,7 @@ function applyState(state) {
 }
 
 async function decideApproval(tradeId, decision) {
-  await fetch(`/api/${decision}/${encodeURIComponent(tradeId)}`, {method:'POST'});
+  await apiFetch(`/api/${decision}/${encodeURIComponent(tradeId)}`, {method:'POST'});
 }
 
 function renderFlashcards(state) {
@@ -1691,7 +1710,7 @@ function renderFlashcards(state) {
 
 async function togglePause() {
   const endpoint = paused ? '/api/resume' : '/api/pause';
-  await fetch(endpoint, {method:'POST'});
+  await apiFetch(endpoint, {method:'POST'});
   const status = await fetch('/api/status').then(r=>r.json());
   paused = status.paused;
   updateBadges(status);
@@ -1772,7 +1791,7 @@ function closeModal() {
 async function doClose(symbol) {
   closeModal();
   try {
-    await fetch(`/api/close/${encodeURIComponent(symbol)}`, {method:'POST'});
+    await apiFetch(`/api/close/${encodeURIComponent(symbol)}`, {method:'POST'});
   } catch(e) { console.error(e); }
 }
 
@@ -1983,8 +2002,15 @@ connectSSE();
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
-    return _HTML
+    # Inject the token so the JS can attach it to all mutating requests.
+    # The token is already known to anyone who can load the page (same-origin),
+    # so embedding it here does not widen the attack surface.
+    token_script = f"<script>window._ARGUS_TOKEN={json.dumps(_dashboard_token)};</script>"
+    return _HTML.replace("</head>", token_script + "\n</head>", 1)
 
 
-def main(host: str = "127.0.0.1", port: int = 8000) -> None:
+def main(host: str = "127.0.0.1", port: int = 8000, token: str = "") -> None:
+    if token:
+        _configure_auth(token)
+        logger.info("Dashboard API authentication enabled")
     uvicorn.run(app, host=host, port=port, log_level="warning")

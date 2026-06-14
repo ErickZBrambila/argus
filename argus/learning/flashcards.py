@@ -113,16 +113,30 @@ class FlashcardStore:
             logger.warning("Could not load flashcards: %s", exc)
 
     def _flush(self) -> None:
+        import os as _os
+        import stat as _stat
+        import tempfile as _tmp
+        tmp_path = None
         try:
-            with self._path.open("w") as f:
+            with _tmp.NamedTemporaryFile(
+                mode="w",
+                dir=self._path.parent,
+                prefix=".argus_fc_",
+                suffix=".tmp",
+                delete=False,
+            ) as f:
+                tmp_path = f.name
                 for card in self._cards.values():
                     f.write(json.dumps(card.as_dict()) + "\n")
-            # Restrict to owner-only — file contains sensitive financial data
-            import stat as _stat
-            import os as _os
+            _os.replace(tmp_path, self._path)  # atomic on same filesystem
             _os.chmod(self._path, _stat.S_IRUSR | _stat.S_IWUSR)
         except Exception as exc:
             logger.warning("Could not save flashcards: %s", exc)
+            if tmp_path:
+                try:
+                    _os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     def record_trade(
         self,

@@ -118,6 +118,8 @@ class Settings(BaseSettings):
     # Web dashboard — default localhost; set 0.0.0.0 only behind an auth proxy
     web_host: str = Field("127.0.0.1", alias="WEB_HOST")
     web_port: int = Field(8000, alias="WEB_PORT")
+    # If non-empty, all mutating API endpoints require X-Argus-Token: <value>
+    dashboard_token: str = Field("", alias="DASHBOARD_TOKEN")
 
     # Database
     database_url: str = Field("sqlite:///argus.db", alias="DATABASE_URL")

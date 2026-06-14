@@ -52,6 +52,7 @@ class TradeDecision:
     risk_level: str = "medium"    # "low" | "medium" | "high"
     models_used: str = "claude"   # "claude" | "gemini" | "ensemble"
     consensus: bool = True        # False when models disagreed → HOLD
+    is_error: bool = False        # True when both models failed — caller should alert
 
 
 def classify_risk(signal_confidence: float, decision_confidence: float, consensus: bool = True) -> str:
@@ -221,8 +222,9 @@ class DecisionEngine:
         portfolio_equity: float,
         open_positions: dict,
         daily_pnl_pct: float = 0.0,
+        max_positions: int = 5,
     ) -> TradeDecision:
-        prompt = _build_prompt(signal, portfolio_equity, open_positions, daily_pnl_pct)
+        prompt = _build_prompt(signal, portfolio_equity, open_positions, daily_pnl_pct, max_positions)
         try:
             if self._gemini:
                 import concurrent.futures
@@ -251,6 +253,7 @@ def _build_prompt(
     portfolio_equity: float,
     open_positions: dict,
     daily_pnl_pct: float,
+    max_positions: int = 5,
 ) -> str:
     holding = signal.symbol in open_positions
     pos_info = ""
@@ -283,7 +286,7 @@ Technical indicators:
 
 Portfolio context:
   Equity: ${portfolio_equity:,.2f}
-  Open positions: {len(open_positions)} / 5 max
+  Open positions: {len(open_positions)} / {max_positions} max
   Daily P&L: {daily_pnl_pct:+.2f}%
   Currently holding {signal.symbol}: {'YES' + pos_info if holding else 'NO'}
 
@@ -311,5 +314,5 @@ def _parse_response(symbol: str, raw: str) -> TradeDecision:
 def _error_hold(symbol: str, reason: str, model: str = "unknown") -> TradeDecision:
     return TradeDecision(
         symbol=symbol, action="HOLD", confidence=0.0,
-        reasoning=reason, risk_level="high", models_used=model,
+        reasoning=reason, risk_level="high", models_used=model, is_error=True,
     )

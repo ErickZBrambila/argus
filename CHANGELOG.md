@@ -8,6 +8,26 @@ Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH
 
 ---
 
+## [0.5.3] — 2026-06-14
+
+### Fixed — Reliability
+- **Parallel signal computation** — watchlist symbols now computed concurrently via `ThreadPoolExecutor(max_workers=8)` in `_tick()`; scan time scales with I/O latency of one symbol instead of N×latency
+- **Order fill polling** — `_live_buy()` and `_live_sell()` now poll `get_stock_order_info()` / `get_crypto_order_info()` every 2s (up to 30s) when the order state is not immediately `filled`; live trades no longer silently drop with `filled=False`
+- **Flashcard atomic writes** — `_flush()` now writes to a temp file in the same directory then `os.replace()`s it into place; corrupt-on-crash risk eliminated
+- **Approval TTL** — pending approvals on the Default account are auto-denied after 30 minutes; stale approvals no longer accumulate indefinitely
+- **`max_positions` in AI prompt** — `_build_prompt()` now uses the configured `MAX_POSITIONS` value (was hardcoded to 5)
+- **AI error alerting** — when both models fail (error-HOLD), logs at CRITICAL and sends a notification; previously silent
+- **Log timestamps UTC** — `log_buffer.py` now emits `HH:MM:SSZ` (UTC) instead of local time
+- **Broker call deduplication** — `_update_dashboard()` now reads equity and positions from `_account_cache` populated during the tick; eliminates 2× redundant API calls per account per scan cycle
+
+### Added — Security
+- **Dashboard API authentication** — set `DASHBOARD_TOKEN=<secret>` in `.env`; all mutating endpoints (`/api/pause`, `/api/resume`, `/api/close`, `/api/promote`, `/api/approve`, `/api/deny`, `/api/scan-interval`) then require `X-Argus-Token: <secret>` header; token is injected into the served HTML at page load so the browser attaches it automatically; read-only endpoints and SSE remain unauthenticated
+
+### Removed
+- **`argus/dashboard/server.py`** — dead code never imported by main; superseded by `web.py` since v0.3.0
+
+---
+
 ## [0.5.2] — 2026-06-14
 
 ### Fixed — Architecture
