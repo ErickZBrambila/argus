@@ -8,6 +8,17 @@ Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH
 
 ---
 
+## [0.5.1] — 2026-06-14
+
+### Fixed
+- **Session persistence across restarts** — daily P&L baseline and kill switch now survive process restarts
+  - New `account_daily_stats` table stores per-account `starting_equity` and `kill_switch_triggered`
+  - On startup, `_restore_session_state()` loads today's row: drawdown baseline is the real start-of-day equity, not whatever equity happens to be at restart time
+  - Kill switch state persists: if the -5% drawdown limit was hit before a restart, the restarted process cannot trade until the next day
+  - On kill switch fire, `_persist_kill_switch()` writes to DB immediately
+
+---
+
 ## [0.5.0] — 2026-06-13
 
 ### Added

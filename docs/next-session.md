@@ -1,6 +1,27 @@
-# Tomorrow's Plan — 2026-06-14
+# Session Plan — ongoing
 
-Pick up here when you get home. Work top to bottom.
+Work top to bottom.
+
+---
+
+## ✅ Done (2026-06-13)
+
+- Fullscreen layout bug fixed (tab panes now span full grid width)
+- Performance Analytics tab (win rate, streak, by-symbol, confidence accuracy)
+- Promote to Agentic button (sell on Default, re-buy on Agentic)
+- $25K PDT goal tracker per account (web + terminal)
+- Token Usage moved to top of dashboard
+- Docker support (`Dockerfile`, `docker-compose.yml`)
+- Headless mode (`ARGUS_NO_TERMINAL=1`)
+- Branding assets (logo, favicon, banner)
+- Terminal countdown fix (`_LiveRenderable` wrapper)
+- `argus-restart` shell alias
+
+## ✅ Done (2026-06-14)
+
+- Session persistence across restarts:
+  - Daily P&L baseline (starting equity) survives restart — drawdown kill switch recalibrates correctly
+  - Kill switch state persists — restarting after a drawdown breach doesn't re-enable trading
 
 ---
 
@@ -16,19 +37,7 @@ Keep the laptop alive while Argus runs unattended.
 
 ---
 
-## 2. Verify Argus survived the night (5 min)
-
-```bash
-argus-status          # should return JSON with equity + P&L
-argus-log             # check for errors overnight
-open http://127.0.0.1:8000  # web dashboard
-```
-
-If it crashed, just `argus-restart`.
-
----
-
-## 3. Phone Setup — Tailscale (10 min)
+## 2. Phone Setup — Tailscale (10 min)
 
 Access the dashboard from your iPhone without exposing anything to the internet.
 
@@ -50,15 +59,14 @@ tailscale up           # opens browser to log in — use GitHub or Google
 
 ---
 
-## 4. Docker Setup (20 min)
+## 3. Docker Setup (20 min)
 
-Get Argus running in Docker on the laptop — this is the exact same setup we'll use on the Mac Mini later, so it's worth validating now.
+Get Argus running in Docker on the laptop — same setup we'll use on the Mac Mini.
 
 **Install Docker Desktop:**
 ```bash
 brew install --cask docker
-# Open Docker Desktop and wait for it to start
-open -a Docker
+open -a Docker   # wait for it to start
 ```
 
 **Build and run:**
@@ -71,10 +79,8 @@ export ROBINHOOD_PASSWORD=$(security find-generic-password -a ROBINHOOD_PASSWORD
 export GEMINI_API_KEY=$(security find-generic-password -a GEMINI_API_KEY -s argus -w)
 export ROBINHOOD_MFA_SECRET=$(security find-generic-password -a ROBINHOOD_MFA_SECRET -s argus -w)
 
-# Stop native Argus first (can't both use port 8000)
-argus-stop
+argus-stop   # can't both use port 8000
 
-# Build and launch
 docker compose up -d
 docker compose logs -f
 ```
@@ -87,10 +93,10 @@ open http://localhost:8000
 
 ---
 
-## 5. Review overnight performance (10 min)
+## 4. Review performance (10 min)
 
-- Check flashcards — were any trades attempted?
-- Check token usage card — how much did Claude + Gemini cost overnight?
+- Check flashcards — any trades attempted?
+- Check token usage — how much did Claude + Gemini cost?
 - Check signals — is the watchlist producing meaningful signals?
 - Tweak watchlist in `.env` if needed (`WATCHLIST=AAPL,TSLA,NVDA,BTC,ETH`)
 
@@ -99,5 +105,6 @@ open http://localhost:8000
 ## Notes
 
 - Market opens 9:30 AM ET — scan interval drops to 90s automatically
+- Kill switch reset (if needed): `UPDATE account_daily_stats SET kill_switch_triggered = 0 WHERE date = date('now');`
 - If Docker works well on the laptop, Mac Mini migration is just `git clone` + `docker compose up -d`
 - Tailscale is free for personal use (up to 3 devices)
