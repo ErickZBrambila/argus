@@ -8,6 +8,30 @@ Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH
 
 ---
 
+## [0.5.2] — 2026-06-14
+
+### Fixed — Architecture
+- **PDT tracking now functional** — `_execute_sell` detects same-day trades, calls `record_day_trade()`, and persists to `DailyStats.day_trades`; PDT guard reads real data from DB across restarts
+- **Position table multi-account safe** — added `account_label` column with `UNIQUE(symbol, account_label)`; `_apply_migrations()` rebuilds existing tables at startup; two accounts can now hold the same symbol without DB corruption
+- **SQLite WAL mode** — enabled at startup to prevent read/write lock contention between main loop and FastAPI thread
+- **Market session fail-closed** — exception in `get_market_session()` now returns `"closed"` (was `"open"`, causing unintended scan + trade attempts)
+- **Market holidays** — `pandas-market-calendars` (already a dep) is now used to detect NYSE holidays; agent no longer scans on closed market days
+- **Overnight day rollover** — main loop detects midnight boundary, resets day-trade counter and refreshes session equity so drawdown baseline stays correct for multi-day continuous runs
+- **Promote crash fixed** — removed broken `position_size()` call; `_check_promotions` now passes `dollar_value` directly to `_execute_buy` with correct argument order; added `approve_buy()` risk check before re-buy; added error boundary with CRITICAL alert + notification if sell succeeds but re-buy fails; validates account labels
+- **`_recent_trades` bounded** — changed to `collections.deque(maxlen=200)` (was growing unbounded, serialized in full every SSE push)
+- **DB session leak eliminated** — `_get_session_ref()` removed; all queries use `get_session()` context manager
+
+### Fixed — Security
+- **CORS removed** — `CORSMiddleware` with `allow_origins=["*"]` deleted; frontend is same-origin as API so CORS is not needed and was a CSRF vector
+- **XSS hardened** — all AI reasoning, symbol names, actions, risk levels, and account labels now wrapped in `escHtml()` before `innerHTML` injection; crafted model output can no longer execute in the browser
+- **Thread-safe SSE** — `asyncio.Queue` (not thread-safe across threads) replaced with `stdlib.queue.Queue` for cross-thread state pushes; SSE switched to per-subscriber `asyncio.Queue` pattern — multiple browser tabs now all receive live updates
+- **Symbol + account label validation** — added to `GET /api/chart/{symbol}` and `POST /api/promote/{symbol}`; scan-interval capped at 3600s
+- **`argus-web` default host** — changed from `0.0.0.0` to `127.0.0.1`
+- **Docker hardened** — non-root `USER argus` added to Dockerfile; port changed to `127.0.0.1:8000:8000` (was binding all host interfaces)
+- **File permissions** — `argus.log` and `argus_flashcards.jsonl` now `chmod 0600` after write
+
+---
+
 ## [0.5.1] — 2026-06-14
 
 ### Fixed
