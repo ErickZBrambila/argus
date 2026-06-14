@@ -552,6 +552,37 @@ _HTML = """<!DOCTYPE html>
   .countdown-wrap { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted); }
   .countdown-val  { font-family: var(--mono); color: var(--text); font-weight: 700; min-width: 38px; letter-spacing: 0.5px; }
 
+  /* ── Ticker bar ─────────────────────────────────────────────────────────── */
+  .ticker-bar {
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    height: 30px;
+    overflow: hidden;
+    position: sticky;
+    top: 60px;
+    z-index: 99;
+    display: flex;
+    align-items: center;
+  }
+  .ticker-track {
+    display: flex;
+    align-items: center;
+    white-space: nowrap;
+    animation: ticker-scroll 40s linear infinite;
+    will-change: transform;
+  }
+  .ticker-track:hover { animation-play-state: paused; cursor: default; }
+  @keyframes ticker-scroll {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-50%); }
+  }
+  .ticker-item { display: inline-flex; align-items: center; gap: 5px; padding: 0 18px; font-size: 12px; font-family: var(--mono); }
+  .ticker-sym { font-weight: 700; color: var(--text); letter-spacing: .3px; }
+  .ticker-price { color: var(--text); font-variant-numeric: tabular-nums; }
+  .ticker-up   { color: var(--green); font-size: 11px; }
+  .ticker-down { color: var(--danger); font-size: 11px; }
+  .ticker-dot  { color: var(--border); font-size: 10px; margin: 0 2px; }
+
   /* ── Main grid ──────────────────────────────────────────────────────────── */
   main { padding: 16px; display: grid; gap: 16px; }
   @media (min-width: 640px)  { main { padding: 20px; gap: 18px; } }
@@ -1073,6 +1104,17 @@ _HTML = """<!DOCTYPE html>
   }
   .chart-tab:hover { border-color: var(--accent); color: var(--accent); }
   .chart-tab.active { background: var(--accent); color: #000d0a; border-color: var(--accent); font-weight: 700; }
+  .chart-tab { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px 4px 12px; }
+  .chart-tab-x { background: none; border: none; cursor: pointer; color: inherit; opacity: .55; font-size: 12px; line-height: 1; padding: 0 1px; }
+  .chart-tab-x:hover { opacity: 1; }
+  .chart-tab.active .chart-tab-x { color: #000d0a; }
+  .chart-add-btn { padding: 4px 10px; border-radius: 20px; font-size: 14px; font-weight: 700; cursor: pointer; border: 1px dashed var(--border); background: none; color: var(--muted); line-height: 1; transition: border-color .15s, color .15s; }
+  .chart-add-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .chart-search-wrap { position: relative; display: none; }
+  .chart-search-wrap.open { display: block; }
+  .chart-search-input { background: var(--surface2); border: 1px solid var(--accent); border-radius: var(--radius-sm); color: var(--text); font-size: 12px; padding: 4px 10px; font-family: var(--mono); width: 180px; }
+  .chart-search-input:focus { outline: none; }
+  .chart-search-dd { position: absolute; top: calc(100% + 4px); left: 0; min-width: 260px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm); z-index: 200; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,.55); }
   .chart-type-btns { display: flex; gap: 4px; }
   .chart-type-btn {
     padding: 4px 11px;
@@ -1117,6 +1159,7 @@ _HTML = """<!DOCTYPE html>
       <button class="btn-eye" id="btn-eye" onclick="toggleValues()" title="Show/hide dollar amounts">👁</button>
     </div>
   </header>
+  <div class="ticker-bar"><div class="ticker-track" id="ticker-track"></div></div>
   <nav class="tab-bar">
     <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
     <button class="tab-btn" onclick="switchTab('performance')">Performance</button>
@@ -1169,7 +1212,18 @@ _HTML = """<!DOCTYPE html>
     <div class="card card-full">
       <div class="card-title">Price Chart</div>
       <div class="chart-toolbar">
-        <div class="chart-tabs" id="chart-tabs"></div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1;">
+          <div class="chart-tabs" id="chart-tabs"></div>
+          <button class="chart-add-btn" onclick="chartSearchOpen()" title="Add symbol">＋</button>
+          <div class="chart-search-wrap" id="chart-search-wrap">
+            <input class="chart-search-input" id="chart-search-input" placeholder="Search name or ticker…"
+                   autocomplete="off"
+                   oninput="chartSearchDebounce(this.value)"
+                   onkeydown="chartSearchKeydown(event)"
+                   onblur="setTimeout(chartSearchClose,150)">
+            <div class="chart-search-dd" id="chart-search-dd"></div>
+          </div>
+        </div>
         <div class="chart-type-btns">
           <button class="chart-type-btn active" id="btn-candles" onclick="setChartType('candles')">Candles</button>
           <button class="chart-type-btn" id="btn-line" onclick="setChartType('line')">Line</button>
@@ -1769,7 +1823,8 @@ function applyState(state) {
   // Cache signals + flashcards globally for chart markers and charts tab
   window._latestSignals = state.signals || [];
   window._flashcards = state.flashcards || [];
-  if (state.watchlist) ctApplyWatchlist(state.watchlist);
+  updateTicker(state.signals);
+  if (state.watchlist) { ctApplyWatchlist(state.watchlist); buildChartTabs(state.watchlist); }
   // Scan timing
   if (state.next_scan_at) _nextScanAt = new Date(state.next_scan_at);
   _updateSessionBadge(state.market_session || 'closed');
@@ -1779,7 +1834,6 @@ function applyState(state) {
   renderTokenUsage(state.token_usage);
   renderPerformance(state.performance);
   renderFlashcards(state);
-  buildChartTabs(state.signals);
   renderLogs(state.logs || []);
   // Refresh markers if chart is showing (new closed trades may have arrived)
   if (_chartSymbol && _lastCandles[_chartSymbol]) {
@@ -2208,22 +2262,111 @@ function placeTradeMarkers(symbol, candles) {
   try { series.setMarkers(markers); } catch(_) {}
 }
 
-function buildChartTabs(signals) {
-  const syms = [...new Set((signals || []).map(s => s.symbol))];
+function buildChartTabs(watchlist) {
+  const syms = watchlist || [];
   if (!syms.length) return;
   const tabs = document.getElementById('chart-tabs');
-  const existing = new Set([...tabs.querySelectorAll('.chart-tab')].map(t => t.dataset.sym));
+  const existing = new Map([...tabs.querySelectorAll('.chart-tab')].map(t => [t.dataset.sym, t]));
+
+  // Remove tabs for symbols no longer in watchlist
+  for (const [sym, el] of existing) {
+    if (!syms.includes(sym)) el.remove();
+  }
+
+  // Add tabs for new symbols (preserve order)
   syms.forEach(sym => {
     if (!existing.has(sym)) {
       const btn = document.createElement('button');
       btn.className = 'chart-tab' + (sym === _chartSymbol ? ' active' : '');
       btn.dataset.sym = sym;
-      btn.textContent = sym;
       btn.onclick = () => loadChart(sym);
+      btn.innerHTML = `${escHtml(sym)}<button class="chart-tab-x" onclick="event.stopPropagation();ctRemoveSymbol('${escHtml(sym)}')" title="Remove from watchlist">✕</button>`;
       tabs.appendChild(btn);
     }
   });
+
   if (!_chartSymbol && syms.length) loadChart(syms[0]);
+}
+
+// ── Dashboard price chart inline search ──────────────────────────────────────
+let _csTimer = null, _csResults = [], _csSel = -1;
+
+function chartSearchOpen() {
+  const wrap = document.getElementById('chart-search-wrap');
+  wrap.classList.add('open');
+  const inp = document.getElementById('chart-search-input');
+  inp.value = ''; inp.focus();
+  _csResults = []; _csSel = -1;
+}
+
+function chartSearchClose() {
+  document.getElementById('chart-search-wrap').classList.remove('open');
+  document.getElementById('chart-search-dd').innerHTML = '';
+}
+
+function chartSearchDebounce(val) {
+  clearTimeout(_csTimer); _csResults = []; _csSel = -1;
+  if (!val.trim()) { document.getElementById('chart-search-dd').innerHTML = ''; return; }
+  const dd = document.getElementById('chart-search-dd');
+  dd.innerHTML = '<div class="wl-dd-searching">Searching…</div>';
+  _csTimer = setTimeout(async () => {
+    try {
+      const r = await fetch('/api/search?q=' + encodeURIComponent(val.trim()));
+      const d = await r.json();
+      _csResults = d.results || [];
+      dd.innerHTML = _csResults.length
+        ? _csResults.map((item, i) =>
+            `<div class="wl-dd-item${i===_csSel?' wl-dd-sel':''}" onmousedown="chartSearchPick('${escHtml(item.symbol)}')">
+              <span class="wl-dd-sym">${escHtml(item.symbol)}</span>
+              <span class="wl-dd-name">${escHtml(item.name||'')}</span>
+            </div>`).join('')
+        : '<div class="wl-dd-empty">No results</div>';
+    } catch(_) {}
+  }, 280);
+}
+
+function chartSearchKeydown(e) {
+  if (e.key === 'Escape') { chartSearchClose(); return; }
+  if (e.key === 'Enter') {
+    const val = document.getElementById('chart-search-input').value.trim().toUpperCase();
+    if (_csSel >= 0 && _csResults[_csSel]) chartSearchPick(_csResults[_csSel].symbol);
+    else if (val) chartSearchPick(val);
+    e.preventDefault(); return;
+  }
+  if (!_csResults.length) return;
+  if (e.key === 'ArrowDown') { _csSel = Math.min(_csSel+1, _csResults.length-1); chartSearchDebounce(document.getElementById('chart-search-input').value); e.preventDefault(); }
+  else if (e.key === 'ArrowUp') { _csSel = Math.max(_csSel-1, 0); chartSearchDebounce(document.getElementById('chart-search-input').value); e.preventDefault(); }
+}
+
+async function chartSearchPick(symbol) {
+  chartSearchClose();
+  try {
+    const r = await apiFetch('/api/watchlist', { method: 'POST', body: JSON.stringify({ symbol }) });
+    const d = await r.json();
+    if (d.watchlist) { ctApplyWatchlist(d.watchlist); buildChartTabs(d.watchlist); loadChart(symbol); }
+  } catch(e) { console.error(e); }
+}
+
+// ── Ticker bar ────────────────────────────────────────────────────────────────
+function updateTicker(signals) {
+  const track = document.getElementById('ticker-track');
+  if (!track || !signals || !signals.length) return;
+  const items = signals.map(s => {
+    const price  = s.price != null ? '$' + s.price.toFixed(s.price < 10 ? 4 : 2) : '—';
+    const bull   = s.composite === 'bullish';
+    const bear   = s.composite === 'bearish';
+    const arrow  = bull ? '▲' : bear ? '▼' : '●';
+    const cls    = bull ? 'ticker-up' : bear ? 'ticker-down' : 'ticker-dot';
+    return `<span class="ticker-item">` +
+      `<span class="ticker-sym">${escHtml(s.symbol)}</span>` +
+      `<span class="ticker-price private">${price}</span>` +
+      `<span class="${cls}">${arrow}</span>` +
+      `</span><span class="ticker-dot">·</span>`;
+  }).join('');
+  // Duplicate for seamless loop
+  track.innerHTML = items + items;
+  // Scale duration to content so scroll speed feels consistent
+  track.style.animationDuration = Math.max(20, signals.length * 6) + 's';
 }
 
 // ── Charts tab (draggable dashlets) ──────────────────────────────────────────
