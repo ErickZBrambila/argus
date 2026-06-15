@@ -2778,7 +2778,7 @@ async function fetchNewsHeadlines() {
     const d = await r.json();
     _tickerHeadlines = d.headlines || [];
     updateTicker(window._latestSignals || []);
-  } catch(_) {}
+  } catch(e) { console.warn('fetchNewsHeadlines failed', e); }
 }
 
 let _tickerSpeedMult = 1;
@@ -2796,7 +2796,9 @@ function tickerSpeed(btn, mult) {
 
 function updateTicker(signals) {
   const track = document.getElementById('ticker-track');
-  if (!track || !signals || !signals.length) return;
+  if (!track) return;
+  signals = signals || [];
+  if (!signals.length && !_tickerHeadlines.length) return;
 
   // Price items
   const priceHtml = signals.map(s => {
