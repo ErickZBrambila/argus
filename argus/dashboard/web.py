@@ -38,6 +38,7 @@ _autopilot = None         # Autopilot instance for runtime control
 # Equity curve — ring buffer of {time, value} points for the session
 import collections as _collections
 _equity_history: collections.deque = _collections.deque(maxlen=480)  # ~8h at 60s interval
+_equity_history_by_account: dict = {}  # label → deque(maxlen=480)
 
 
 def register_chart_source(fn) -> None:
@@ -143,6 +144,34 @@ def set_watchlist_base(symbols: list[str]) -> None:
     with _watchlist_lock:
         _runtime_watchlist = list(symbols)
     _state["watchlist"] = list(symbols)
+
+
+def prefill_state(cfg: dict | None = None) -> None:
+    """Populate _state with boot-time data so /api/status has real values
+    before the first scan cycle completes."""
+    try:
+        from argus.dashboard.token_tracker import get_summary as _tok
+        _state["token_usage"] = _tok()
+    except Exception:
+        pass
+    try:
+        from argus.agent.decision import get_ai_status, get_model_info
+        _state["ai_status"] = get_ai_status()
+        _state["ai_models"] = get_model_info()
+    except Exception:
+        pass
+    if cfg:
+        _state.setdefault("paper_trade", cfg.get("paper_trade", True))
+        _state.setdefault("equity_goal", cfg.get("equity_goal", 0))
+    try:
+        from argus.main import get_market_session
+        _state["market_session"] = get_market_session()
+    except Exception:
+        _state.setdefault("market_session", "closed")
+    _state.setdefault("kill_switch", False)
+    _state.setdefault("paused", False)
+    _state.setdefault("signals", [])
+    _state.setdefault("positions", {})
 
 
 def get_watchlist() -> list[str]:
@@ -273,11 +302,13 @@ async def _sse_broadcaster() -> None:
             pass
 
 
-_AUTO_TRIGGER_THRESHOLD = 0.55  # confidence threshold for auto-investigation
-_auto_triggered: set = set()    # symbols already auto-triggered this session
+_AUTO_TRIGGER_THRESHOLD = 0.55   # technical confidence threshold
+_AUTO_TRIGGER_AI_CONF   = 0.60   # AI decision confidence threshold
+_auto_triggered: set = set()     # symbols already auto-triggered this session
+
 
 def _auto_trigger_investigations(state: dict) -> None:
-    """Auto-queue an investigation when a signal is strong + confident enough."""
+    """Auto-queue an investigation when both the technical signal and AI decision agree."""
     if _investigate_fn is None:
         return
     signals = state.get("signals") or []
@@ -285,25 +316,40 @@ def _auto_trigger_investigations(state: dict) -> None:
         sym = sig.get("symbol", "")
         if not sym:
             continue
-        composite = sig.get("composite", "neutral")
+        composite  = sig.get("composite", "neutral")
         confidence = float(sig.get("confidence") or 0)
-        if composite not in ("bullish", "bearish"):
+        ai_action  = sig.get("ai_action")        # enriched by main.py after AI tick
+        ai_conf    = float(sig.get("ai_confidence") or 0)
+        ai_consensus = sig.get("ai_consensus", False)
+
+        # Technical gate: directional signal with meaningful confidence
+        tech_ok = composite in ("bullish", "bearish") and confidence >= _AUTO_TRIGGER_THRESHOLD
+
+        # AI gate: requires a real AI decision — suppress entirely if not yet available
+        if ai_action is None:
+            continue  # AI hasn't run yet for this symbol; wait for next tick
+        ai_ok = ai_action != "HOLD" and ai_conf >= _AUTO_TRIGGER_AI_CONF and ai_consensus
+
+        if not (tech_ok and ai_ok):
             continue
-        if confidence < _AUTO_TRIGGER_THRESHOLD:
-            continue
+
         with _investigation_lock:
             already_active = sym in _investigations and _investigations[sym].get("status") in ("queued", "running", "complete")
         if already_active or sym in _auto_triggered:
             continue
         if len(_investigations) >= _MAX_INVESTIGATIONS:
             continue
+
         _auto_triggered.add(sym)
+        logger.info("Auto-triggering investigation: %s (tech=%s %.0f%% AI=%s %.0f%% consensus=%s)",
+                    sym, composite, confidence*100, ai_action, ai_conf*100, ai_consensus)
         with _investigation_lock:
             _investigations[sym] = {
                 "symbol": sym,
                 "status": "queued",
                 "queued_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "auto_triggered": True,
+                "trigger_reason": f"{composite} {confidence:.0%} | AI {ai_action} {ai_conf:.0%}",
             }
         _push_investigation_state()
         threading.Thread(target=_run_investigation, args=(sym,), daemon=True, name=f"inv-{sym}").start()
@@ -317,15 +363,27 @@ def push_state(state: dict) -> None:
         state = {**state, "logs": get_recent(100)}
     except Exception:
         pass
-    equity = state.get("equity")
-    if equity:
-        _equity_history.append({
-            "time": int(datetime.datetime.now(datetime.timezone.utc).timestamp()),
-            "value": float(equity),
-        })
+    # Preserve keys that are managed outside the scan loop
+    for _k in ("watchlist", "investigations"):
+        if _k not in state and _k in _state:
+            state = {**state, _k: _state[_k]}
+    now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
     with _state_lock:
+        equity = state.get("equity")
+        if equity:
+            _equity_history.append({"time": now_ts, "value": float(equity)})
+        for _label, _acct_data in (state.get("accounts") or {}).items():
+            _eq = _acct_data.get("equity")
+            if _eq:
+                if _label not in _equity_history_by_account:
+                    _equity_history_by_account[_label] = _collections.deque(maxlen=480)
+                _equity_history_by_account[_label].append({"time": now_ts, "value": float(_eq)})
         _state = state
-        snapshot = {**state, "equity_history": list(_equity_history)}
+        snapshot = {
+            **state,
+            "equity_history": list(_equity_history),
+            "equity_history_by_account": {k: list(v) for k, v in _equity_history_by_account.items()},
+        }
     _sse_push(json.dumps(snapshot, default=str))
     _auto_trigger_investigations(state)
 
@@ -360,17 +418,11 @@ async def get_version() -> dict:
 
 @app.get("/api/status")
 async def get_status() -> dict:
-    return {
-        "paused": _paused,
-        "kill_switch": _state.get("kill_switch", False),
-        "paper_trade": _state.get("paper_trade", True),
-        "equity": _state.get("equity", 0.0),
-        "daily_pnl": _state.get("daily_pnl", 0.0),
-        "daily_pnl_pct": _state.get("daily_pnl_pct", 0.0),
-        "trade_count": _state.get("trade_count", 0),
-        "day_trades": _state.get("day_trades", 0),
-        "timestamp": datetime.datetime.utcnow().isoformat(),
-    }
+    with _state_lock:
+        snap = dict(_state)
+    snap["paused"] = _paused
+    snap["timestamp"] = datetime.datetime.utcnow().isoformat()
+    return snap
 
 
 @app.get("/api/logs")
@@ -661,7 +713,11 @@ async def sse_stream() -> StreamingResponse:
         try:
             if _state:
                 with _state_lock:
-                    initial = {**_state, "equity_history": list(_equity_history)}
+                    initial = {
+                        **_state,
+                        "equity_history": list(_equity_history),
+                        "equity_history_by_account": {k: list(v) for k, v in _equity_history_by_account.items()},
+                    }
                 yield f"data: {json.dumps(initial, default=str)}\n\n"
             while True:
                 try:
@@ -783,14 +839,52 @@ _HTML = """<!DOCTYPE html>
   .market-countdown .mc-label { white-space: nowrap; }
   .market-countdown .mc-val { font-family: var(--mono); font-weight: 700; font-size: 12px; color: var(--text); letter-spacing: 0.5px; min-width: 52px; }
 
-  /* ── Ticker bar ─────────────────────────────────────────────────────────── */
+  /* ── Price chip rail ────────────────────────────────────────────────────── */
+  .price-chip-rail {
+    background: #0d1117;
+    border-bottom: 1px solid var(--border);
+    height: 36px;
+    position: sticky;
+    top: 60px;
+    z-index: 99;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .price-chip-rail::-webkit-scrollbar { display: none; }
+  .price-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 3px 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: border-color .15s;
+  }
+  .price-chip:hover { border-color: rgba(0,212,170,.35); }
+  .price-chip-sym   { font-weight: 700; color: var(--accent); letter-spacing: .3px; }
+  .price-chip-price { color: var(--text); font-variant-numeric: tabular-nums; }
+  .price-chip-price.up, .price-chip-arrow.up   { color: var(--green); }
+  .price-chip-price.down, .price-chip-arrow.down { color: var(--danger); }
+  .price-chip-price.flat, .price-chip-arrow.flat { color: var(--muted); }
+  .price-chip-arrow { font-size: 10px; }
+
+  /* ── News ticker bar ─────────────────────────────────────────────────────── */
   .ticker-bar {
     background: #0d1117;
     border-bottom: 1px solid var(--border);
     height: 34px;
     position: sticky;
-    top: 60px;
-    z-index: 99;
+    top: 96px;
+    z-index: 98;
     display: flex;
     align-items: center;
     width: 100%;
@@ -1404,6 +1498,16 @@ _HTML = """<!DOCTYPE html>
     transition: border-color .15s, color .15s;
   }
   .tz-select:hover, .tz-select:focus { border-color: var(--accent); color: var(--text); }
+  .ai-status-wrap { display: flex; align-items: center; gap: 3px; }
+  .ai-dot {
+    font-size: 13px; line-height: 1; cursor: default;
+    transition: color .3s;
+    color: var(--muted);
+  }
+  .ai-dot[data-status="green"]  { color: #4caf82; }
+  .ai-dot[data-status="yellow"] { color: #f0b429; }
+  .ai-dot[data-status="red"]    { color: #e05a5a; }
+  .ai-dot[data-status="gray"]   { color: var(--muted); }
 
   /* ── Price chart ────────────────────────────────────────────────────────── */
   .chart-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
@@ -1486,6 +1590,7 @@ _HTML = """<!DOCTYPE html>
       <button class="btn-eye" id="btn-eye" onclick="toggleValues()" title="Show/hide dollar amounts">👁</button>
     </div>
   </header>
+  <div class="price-chip-rail" id="price-chip-rail"></div>
   <div class="ticker-bar">
     <div class="ticker-scrollport">
       <div class="ticker-track" id="ticker-track"></div>
@@ -2061,9 +2166,20 @@ function renderTokenUsage(usage) {
   const fmtN = n => (n || 0).toLocaleString();
   const fmtC = n => '$' + (n || 0).toFixed(4);
 
+  const aiStatus = (window._argusState && window._argusState.ai_status) || {};
+  const aiModels = (window._argusState && window._argusState.ai_models) || {};
+  const statusDot = (model) => {
+    const s = aiStatus[model] || 'gray';
+    const colors = { green: '#4caf82', yellow: '#f0b429', red: '#e05a5a', gray: '#555' };
+    const labels = { green: 'OK', yellow: 'Billing/quota', red: 'Auth error', gray: 'Not yet called' };
+    return `<span style="color:${colors[s]};margin-right:5px" title="${labels[s]}">●</span>`;
+  };
+  const claudeModel = (aiModels.claude || 'claude').replace('claude-','').replace(/-\d+$/,'');
+  const geminiModel = (aiModels.gemini || 'gemini').replace('gemini-','');
+
   grid.innerHTML = `
     <div class="token-model">
-      <div class="token-model-title claude">Claude (Opus)</div>
+      <div class="token-model-title claude">${statusDot('claude')}Claude · ${claudeModel}</div>
       <div class="token-cost ${c.cost_usd > 0.5 ? 'red' : 'green'}">${fmtC(c.cost_usd)}</div>
       <div class="token-row"><span class="token-label">Calls</span><span class="token-val">${fmtN(c.calls)}</span></div>
       <div class="token-row"><span class="token-label">Input</span><span class="token-val">${fmtN(c.input_tokens)}</span></div>
@@ -2071,7 +2187,7 @@ function renderTokenUsage(usage) {
       <div class="token-row"><span class="token-label">Cache read</span><span class="token-val">${fmtN(c.cache_read_tokens)}</span></div>
     </div>
     <div class="token-model">
-      <div class="token-model-title gemini">Gemini (Flash)</div>
+      <div class="token-model-title gemini">${statusDot('gemini')}Gemini · ${geminiModel}</div>
       <div class="token-cost ${g.cost_usd > 0.1 ? 'yellow' : 'green'}">${fmtC(g.cost_usd)}</div>
       <div class="token-row"><span class="token-label">Calls</span><span class="token-val">${fmtN(g.calls)}</span></div>
       <div class="token-row"><span class="token-label">Input</span><span class="token-val">${fmtN(g.input_tokens)}</span></div>
@@ -2197,10 +2313,24 @@ function renderAccounts(accounts) {
   }).join('');
 }
 
+function updateAiStatus(ai) {
+  if (!ai) return;
+  ['claude', 'gemini'].forEach(model => {
+    const el = document.getElementById(`ai-dot-${model}`);
+    if (!el) return;
+    const status = ai[model] || 'gray';
+    el.dataset.status = status;
+    const labels = { green: 'OK', yellow: 'Billing/quota issue', red: 'Auth error', gray: 'Not yet called' };
+    el.title = `${model.charAt(0).toUpperCase() + model.slice(1)}: ${labels[status] || status}`;
+  });
+}
+
 function applyState(state) {
+  window._argusState = state;
   paused = state.paused || false;
   if (state.equity_goal) _equityGoal = state.equity_goal;
   updateBadges(state);
+  updateAiStatus(state.ai_status);
 
   // Per-account panels
   renderAccounts(state.accounts);
@@ -2321,10 +2451,11 @@ function applyState(state) {
   // Cache signals + flashcards globally for chart markers and charts tab
   window._latestSignals = state.signals || [];
   window._flashcards = state.flashcards || [];
+  updatePriceChips(state.signals, state.watchlist);
   updateTicker(state.signals);
   if (state.watchlist) { ctApplyWatchlist(state.watchlist); buildChartTabs(state.watchlist); }
   if (state.investigations) renderInvestigations(state.investigations);
-  if (state.equity_history) eqRender(state.equity_history);
+  if (state.equity_history) eqRender(state.equity_history, state.equity_history_by_account || {});
   // Scan timing
   if (state.next_scan_at) _nextScanAt = new Date(state.next_scan_at);
   _updateSessionBadge(state.market_session || 'closed');
@@ -2857,6 +2988,7 @@ async function fetchNewsHeadlines() {
     const r = await fetch('/api/news');
     const d = await r.json();
     _tickerHeadlines = d.headlines || [];
+    updatePriceChips(window._latestSignals || [], window._argusState && window._argusState.watchlist);
     updateTicker(window._latestSignals || []);
   } catch(e) { console.warn('fetchNewsHeadlines failed', e); }
 }
@@ -2874,26 +3006,68 @@ function tickerSpeed(btn, mult) {
   }
 }
 
+// updatePriceChips — one chip per watchlist symbol, price from signals, persists across scans
+function updatePriceChips(signals, watchlist) {
+  const rail = document.getElementById('price-chip-rail');
+  if (!rail) return;
+
+  // Build price lookup from signals
+  const priceMap = {};
+  (signals || []).forEach(s => { if (s.symbol) priceMap[s.symbol] = s; });
+
+  // Canonical symbol order: watchlist first, then any extra symbols in signals
+  const wl = watchlist || (window._argusState && window._argusState.watchlist) || [];
+  const signalSyms = (signals || []).map(s => s.symbol).filter(Boolean);
+  const order = [...new Set([...wl, ...signalSyms])];
+  if (!order.length) return;
+
+  const existing = new Map([...rail.querySelectorAll('.price-chip')].map(el => [el.dataset.sym, el]));
+  const seen = new Set();
+
+  order.forEach((sym, idx) => {
+    seen.add(sym);
+    const s = priceMap[sym];
+    const price = s && s.price != null ? '$' + s.price.toFixed(s.price < 10 ? 4 : 2) : '—';
+    const bull  = s && s.composite === 'bullish';
+    const bear  = s && s.composite === 'bearish';
+    const arrow = bull ? '▲' : bear ? '▼' : '—';
+    const arrowCls = bull ? 'up' : bear ? 'down' : 'flat';
+    const priceColor = bull ? 'var(--green)' : bear ? 'var(--danger)' : 'var(--muted)';
+
+    if (existing.has(sym)) {
+      // Update in-place
+      const chip = existing.get(sym);
+      const priceEl = chip.querySelector('.price-chip-price');
+      priceEl.textContent = price;
+      priceEl.style.color = priceColor;
+      const arr = chip.querySelector('.price-chip-arrow');
+      arr.textContent = arrow;
+      arr.className = 'price-chip-arrow ' + arrowCls;
+      // Ensure order matches watchlist order
+      rail.appendChild(chip);
+    } else {
+      const chip = document.createElement('span');
+      chip.className = 'price-chip';
+      chip.dataset.sym = sym;
+      chip.innerHTML =
+        `<span class="price-chip-sym">${escHtml(sym)}</span>` +
+        `<span class="price-chip-price" style="color:${priceColor}">${price}</span>` +
+        `<span class="price-chip-arrow ${arrowCls}">${arrow}</span>`;
+      rail.appendChild(chip);
+    }
+  });
+
+  // Remove chips for symbols no longer in watchlist or signals
+  existing.forEach((el, sym) => { if (!seen.has(sym)) el.remove(); });
+}
+
+// updateTicker — scrolling news marquee only (prices moved to price chip rail)
 function updateTicker(signals) {
   const track = document.getElementById('ticker-track');
   if (!track) return;
-  signals = signals || [];
-  if (!signals.length && !_tickerHeadlines.length) return;
+  if (!_tickerHeadlines.length) return;
 
-  // Price items
-  const priceHtml = signals.map(s => {
-    const price = s.price != null ? '$' + s.price.toFixed(s.price < 10 ? 4 : 2) : '—';
-    const bull  = s.composite === 'bullish', bear = s.composite === 'bearish';
-    const arrow = bull ? '▲' : bear ? '▼' : '—';
-    const cls   = bull ? 'ticker-up' : bear ? 'ticker-down' : 'ticker-flat';
-    return `<span class="ticker-item">` +
-      `<span class="ticker-sym">${escHtml(s.symbol)}</span> ` +
-      `<span class="ticker-price">${price}</span> ` +
-      `<span class="${cls}">${arrow}</span>` +
-      `</span><span class="ticker-dot">·</span>`;
-  }).join('');
-
-  // News items
+  // News items only
   const newsHtml = _tickerHeadlines.slice(0, 12).map(h => {
     const inner = h.url
       ? `<a class="ticker-headline" href="${escHtml(h.url)}" target="_blank" rel="noopener">${escHtml(h.headline)}</a>`
@@ -2901,14 +3075,11 @@ function updateTicker(signals) {
     return `<span class="ticker-news-item"><span class="ticker-news-badge">NEWS</span>${inner}</span><span class="ticker-dot">·</span>`;
   }).join('');
 
-  const divider = newsHtml ? `<span class="ticker-divider">◆◆◆</span>` : '';
-  const single = priceHtml + divider + newsHtml;
+  if (!newsHtml) return;
 
-  // Use 6 copies so the track is always wider than the viewport — CSS animates
-  // exactly 1/6 of the total (translateX(-16.667%)) for a seamless infinite loop
-  track.innerHTML = single.repeat(6);
+  // 6 copies for seamless infinite CSS scroll (translateX -16.667%)
+  track.innerHTML = newsHtml.repeat(6);
 
-  // Duration: target ~120px/s × speed multiplier — measure after layout
   requestAnimationFrame(() => {
     const singleW = track.scrollWidth / 6;
     const dur = Math.max(5, Math.round(singleW / (120 * _tickerSpeedMult)));
@@ -2918,7 +3089,13 @@ function updateTicker(signals) {
 
 // ── Equity curve ─────────────────────────────────────────────────────────────
 
-let _eqChart = null, _eqSeries = null, _eqHistory = [], _eqRange = 'session';
+const _EQ_COLORS = {
+  agentic: { line: '#00D4AA', top: 'rgba(0,212,170,.15)', bot: 'rgba(0,212,170,.01)' },
+  default: { line: '#c084fc', top: 'rgba(192,132,252,.10)', bot: 'rgba(192,132,252,.01)' },
+};
+
+let _eqChart = null, _eqSeriesByAcct = {}, _eqCombinedSeries = null;
+let _eqHistory = [], _eqHistoryByAcct = {}, _eqRange = 'session';
 
 function eqInit() {
   if (_eqChart || !window.LightweightCharts) return;
@@ -2942,56 +3119,97 @@ function eqInit() {
     localization: { timeFormatter: _fmtChartTime },
   });
   window._eqChart = _eqChart;
-  _eqSeries = _eqChart.addAreaSeries({
-    lineColor: '#00D4AA',
-    topColor: 'rgba(0,212,170,.18)',
-    bottomColor: 'rgba(0,212,170,.01)',
-    lineWidth: 2,
+  // Combined thin line behind everything
+  _eqCombinedSeries = _eqChart.addLineSeries({
+    color: 'rgba(255,255,255,0.18)',
+    lineWidth: 1,
     priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+    lastValueVisible: false,
+    priceLineVisible: false,
   });
+  // Per-account area series — each in account color
+  for (const [label, c] of Object.entries(_EQ_COLORS)) {
+    _eqSeriesByAcct[label] = _eqChart.addAreaSeries({
+      lineColor: c.line,
+      topColor: c.top,
+      bottomColor: c.bot,
+      lineWidth: 2,
+      priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+    });
+  }
   new ResizeObserver(() => { if (_eqChart) _eqChart.resize(el.clientWidth, 160); }).observe(el);
 }
 
 function eqSetRange(r) {
   _eqRange = r;
   document.querySelectorAll('.eq-range-btn').forEach(b => b.classList.toggle('active', b.textContent.toLowerCase().replace(' ','') === r));
-  eqRender(_eqHistory);
+  eqRender(_eqHistory, _eqHistoryByAcct);
 }
 
-function eqRender(history) {
-  _eqHistory = history || [];
-  eqInit();
-  if (!_eqSeries || !_eqHistory.length) return;
-
+function _eqFilterSort(history) {
   const now = Math.floor(Date.now() / 1000);
   const cutoff = _eqRange === '30m' ? now - 1800
                : _eqRange === '1h'  ? now - 3600
-               : 0;  // 'session' = all
-
-  let pts = _eqHistory.filter(p => p.time >= cutoff);
-  if (!pts.length) pts = _eqHistory.slice(-1);  // always show at least one point
-
-  // LightweightCharts requires strictly ascending, unique timestamps
+               : 0;
+  let pts = (history || []).filter(p => p.time >= cutoff);
+  if (!pts.length) pts = (history || []).slice(-1);
   const seen = new Set();
-  pts = pts
+  return pts
     .sort((a, b) => a.time - b.time)
     .filter(p => { if (seen.has(p.time)) return false; seen.add(p.time); return true; });
+}
 
-  _eqSeries.setData(pts);
+function eqRender(history, historyByAcct) {
+  _eqHistory = history || [];
+  _eqHistoryByAcct = historyByAcct || {};
+  eqInit();
+  if (!_eqChart) return;
+
+  const hasAcctData = Object.keys(_eqHistoryByAcct).length > 0;
+
+  if (hasAcctData) {
+    // Render per-account series
+    for (const [label, series] of Object.entries(_eqSeriesByAcct)) {
+      const pts = _eqFilterSort(_eqHistoryByAcct[label] || []);
+      series.setData(pts);
+    }
+    // Combined thin line
+    const cPts = _eqFilterSort(_eqHistory);
+    _eqCombinedSeries.setData(cPts);
+  } else {
+    // Fallback: show combined on the agentic series (no per-account data yet)
+    for (const series of Object.values(_eqSeriesByAcct)) series.setData([]);
+    const pts = _eqFilterSort(_eqHistory);
+    _eqCombinedSeries.setData(pts);
+  }
+
   _eqChart.timeScale().fitContent();
 
-  // Stats bar
-  const first = pts[0].value, last = pts[pts.length - 1].value;
-  const chg = last - first, chgPct = first ? (chg / first) * 100 : 0;
-  const high = Math.max(...pts.map(p => p.value));
-  const low  = Math.min(...pts.map(p => p.value));
-  const color = chg >= 0 ? 'var(--green)' : 'var(--danger)';
-  const sign  = chg >= 0 ? '+' : '';
-  document.getElementById('eq-stats').innerHTML =
-    `<span>P&L: <strong style="color:${color}">${sign}$${Math.abs(chg).toFixed(2)} (${sign}${chgPct.toFixed(2)}%)</strong></span>` +
-    `<span>High: <strong>$${high.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</strong></span>` +
-    `<span>Low: <strong>$${low.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</strong></span>` +
-    `<span>${pts.length} data points</span>`;
+  // Stats bar: per-account P&L in their colors
+  let statsHtml = '';
+  for (const [label, c] of Object.entries(_EQ_COLORS)) {
+    const pts = _eqFilterSort(_eqHistoryByAcct[label] || []);
+    if (!pts.length) continue;
+    const chg = pts[pts.length-1].value - pts[0].value;
+    const chgPct = pts[0].value ? (chg / pts[0].value) * 100 : 0;
+    const sign = chg >= 0 ? '+' : '';
+    const col  = chg >= 0 ? 'var(--green)' : 'var(--danger)';
+    statsHtml += `<span style="color:${c.line};font-weight:700;margin-right:4px">●</span>` +
+      `<span style="margin-right:12px">${label.toUpperCase()}: <strong style="color:${col}">${sign}$${Math.abs(chg).toFixed(2)}</strong></span>`;
+  }
+  if (_eqHistory.length) {
+    const pts = _eqFilterSort(_eqHistory);
+    if (pts.length) {
+      const chg = pts[pts.length-1].value - pts[0].value;
+      const chgPct = pts[0].value ? (chg / pts[0].value) * 100 : 0;
+      const sign = chg >= 0 ? '+' : '';
+      const col  = chg >= 0 ? 'var(--green)' : 'var(--danger)';
+      statsHtml += `<span style="color:rgba(255,255,255,.4);margin-right:4px">●</span>` +
+        `<span>Combined: <strong style="color:${col}">${sign}$${Math.abs(chg).toFixed(2)} (${sign}${chgPct.toFixed(2)}%)</strong></span>`;
+    }
+  }
+  const statsEl = document.getElementById('eq-stats');
+  if (statsEl) statsEl.innerHTML = statsHtml || '&nbsp;';
 }
 
 // ── Charts tab (draggable dashlets) ──────────────────────────────────────────

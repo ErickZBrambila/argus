@@ -23,6 +23,25 @@ from argus.strategy.indicators import SignalResult
 
 logger = logging.getLogger(__name__)
 
+# ── AI status tracking ────────────────────────────────────────────────────────
+# green = last call ok | yellow = billing/quota | red = auth/config error | gray = never called
+_ai_status: dict = {"claude": "gray", "gemini": "gray"}
+
+
+def get_ai_status() -> dict:
+    return dict(_ai_status)
+
+
+def _classify_error(exc: Exception) -> str:
+    msg = str(exc).lower()
+    if "401" in msg or ("invalid" in msg and "key" in msg):
+        return "red"
+    if "402" in msg or "credit" in msg or "balance" in msg or "billing" in msg:
+        return "yellow"
+    if "429" in msg or "503" in msg or "quota" in msg or "rate" in msg or "resource_exhausted" in msg or "unavailable" in msg:
+        return "yellow"
+    return "red"
+
 _SYSTEM_PROMPT = """You are Argus, an AI trading agent. You receive technical analysis signals
 and portfolio context, then decide whether to BUY, SELL, or HOLD a position.
 
@@ -65,6 +84,14 @@ def classify_risk(signal_confidence: float, decision_confidence: float, consensu
     return "high"
 
 
+CLAUDE_MODEL = "claude-sonnet-4-6"
+GEMINI_MODEL = "gemini-2.5-flash"
+
+
+def get_model_info() -> dict:
+    return {"claude": CLAUDE_MODEL, "gemini": GEMINI_MODEL}
+
+
 # ── Claude ────────────────────────────────────────────────────────────────────
 
 class _ClaudeEngine:
@@ -74,8 +101,8 @@ class _ClaudeEngine:
     def decide(self, symbol: str, prompt: str) -> TradeDecision:
         try:
             with self._client.messages.stream(
-                model="claude-opus-4-8",
-                max_tokens=512,
+                model=CLAUDE_MODEL,
+                max_tokens=1024,
                 thinking={"type": "adaptive"},
                 system=_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
@@ -98,9 +125,11 @@ class _ClaudeEngine:
 
             d = _parse_response(symbol, raw)
             d.models_used = "claude"
+            _ai_status["claude"] = "green"
             return d
         except Exception as exc:
             logger.error("Claude decision failed for %s: %s", symbol, exc)
+            _ai_status["claude"] = _classify_error(exc)
             return _error_hold(symbol, f"Claude error: {exc}", "claude")
 
 
@@ -114,13 +143,14 @@ class _GeminiEngine:
         self._config = _gt.GenerateContentConfig(
             system_instruction=_SYSTEM_PROMPT,
             temperature=0.2,
-            max_output_tokens=512,
+            max_output_tokens=1024,
+            thinking_config=_gt.ThinkingConfig(thinking_budget=0),
         )
 
     def decide(self, symbol: str, prompt: str) -> TradeDecision:
         try:
             response = self._client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=GEMINI_MODEL,
                 contents=prompt,
                 config=self._config,
             )
@@ -141,9 +171,11 @@ class _GeminiEngine:
 
             d = _parse_response(symbol, raw)
             d.models_used = "gemini"
+            _ai_status["gemini"] = "green"
             return d
         except Exception as exc:
             logger.error("Gemini decision failed for %s: %s", symbol, exc)
+            _ai_status["gemini"] = _classify_error(exc)
             return _error_hold(symbol, f"Gemini error: {exc}", "gemini")
 
 
@@ -295,7 +327,10 @@ Should I BUY, SELL, or HOLD {signal.symbol} right now?"""
 
 def _parse_response(symbol: str, raw: str) -> TradeDecision:
     try:
-        data = json.loads(raw.strip())
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = "\n".join(cleaned.split("\n")[1:]).rstrip("`").strip()
+        data = json.loads(cleaned)
         action = str(data.get("action", "HOLD")).upper()
         if action not in ("BUY", "SELL", "HOLD"):
             action = "HOLD"

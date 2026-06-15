@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
-from argus.agent.decision import DecisionEngine, TradeDecision
+from argus.agent.decision import DecisionEngine, TradeDecision, get_ai_status as _get_ai_status, get_model_info as _get_model_info
 from argus.broker.robinhood import RobinhoodBroker
 from argus.config import get_settings
 from argus.dashboard.terminal import NullTerminalDashboard, TerminalDashboard
@@ -239,6 +239,10 @@ class Autopilot:
 
         web_dashboard.register_autopilot(self)
         web_dashboard.set_watchlist_base(self._cfg.watchlist)
+        web_dashboard.prefill_state({
+            "paper_trade": self._cfg.paper_trade,
+            "equity_goal": self._cfg.equity_goal,
+        })
 
         _history_broker = self._accounts[0].broker
         web_dashboard.register_chart_source(
@@ -269,34 +273,26 @@ class Autopilot:
         except Exception:
             pass
 
-        # Register AI investigation function
+        # Register AI investigation function (Claude + Gemini ensemble)
         _anthropic_key = self._cfg.anthropic_api_key.get_secret_value()
+        _gemini_key    = self._cfg.gemini_api_key.get_secret_value() if self._cfg.gemini_api_key else ""
         if _anthropic_key:
-            def _make_investigate_fn(api_key: str):
-                import anthropic, json as _json
+            def _make_investigate_fn(anthropic_key: str, gemini_key: str):
+                import anthropic as _ant
+                import json as _json, re as _re
+                import concurrent.futures as _cf
 
-                _client = anthropic.Anthropic(api_key=api_key, timeout=30.0)
+                _claude_client = _ant.Anthropic(api_key=anthropic_key, timeout=45.0)
+                _gemini_client = None
+                if gemini_key:
+                    try:
+                        from google import genai as _genai
+                        _gemini_client = _genai.Client(api_key=gemini_key)
+                    except Exception as _e:
+                        logger.warning("Gemini investigation init failed: %s", _e)
 
-                def _investigate(symbol: str, signal: dict, headlines: list) -> dict:
-                    signal_text = ""
-                    if signal:
-                        signal_text = (
-                            f"RSI={signal.get('rsi', 'N/A'):.1f}, "
-                            f"MACD={signal.get('macd_hist', 'N/A'):.4f}, "
-                            f"Composite={signal.get('composite', 'N/A')}, "   # str — no format spec
-                            f"Trend={'UP' if signal.get('trend_up') else 'DOWN'}, "
-                            f"Volume={'HIGH' if signal.get('vol_spike') else 'normal'}"
-                        ) if isinstance(signal.get("rsi"), (int, float)) else str(signal)
-
-                    # Sanitize headlines before embedding in prompt (prompt-injection defence)
-                    clean_headlines = [
-                        h.get("headline", "")[:150].replace("\n", " ").replace("\r", " ")
-                        for h in (headlines or [])[:8]
-                        if h.get("headline")
-                    ]
-                    news_text = "\n".join(f"- {h}" for h in clean_headlines) or "No recent headlines available."
-
-                    prompt = f"""You are a professional equity analyst. Investigate {symbol} and produce a concise trading verdict.
+                def _build_prompt(symbol: str, signal_text: str, news_text: str) -> str:
+                    return f"""You are a professional equity analyst. Investigate {symbol} and produce a concise trading verdict.
 
 TECHNICAL SIGNALS:
 {signal_text or "No signal data available."}
@@ -313,27 +309,101 @@ Respond ONLY with valid JSON matching this schema exactly:
   "risks": ["key risk factor", ...],
   "timeframe": "string (e.g. '1–3 days', '1 week')"
 }}
+Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
-Be concise. findings and risks should each have 2–4 items. Do not include any text outside the JSON."""
+                def _parse(text: str) -> dict:
+                    text = text.strip()
+                    m = _re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+                    if m:
+                        text = m.group(1)
+                    return _json.loads(text)
 
-                    msg = _client.messages.create(
-                        model="claude-sonnet-4-6",
-                        max_tokens=600,
+                def _ask_claude(prompt: str) -> dict:
+                    msg = _claude_client.messages.create(
+                        model="claude-sonnet-4-6", max_tokens=700,
                         messages=[{"role": "user", "content": prompt}],
                     )
-                    if not msg.content:
-                        raise ValueError("Empty response from Anthropic API")
-                    text = msg.content[0].text.strip()
-                    # Strip markdown code fences robustly
-                    import re as _re
-                    fence_match = _re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
-                    if fence_match:
-                        text = fence_match.group(1)
-                    return _json.loads(text)
+                    return _parse(msg.content[0].text)
+
+                def _ask_gemini(prompt: str) -> dict:
+                    from google.genai import types as _gt
+                    resp = _gemini_client.models.generate_content(
+                        model="gemini-2.5-flash", contents=prompt,
+                        config=_gt.GenerateContentConfig(
+                            temperature=0.3, max_output_tokens=700,
+                            thinking_config=_gt.ThinkingConfig(thinking_budget=0),
+                        ),
+                    )
+                    return _parse(resp.text)
+
+                def _merge(c: dict, g: dict) -> dict:
+                    avg_conf = round((float(c.get("confidence", 0)) + float(g.get("confidence", 0))) / 2, 3)
+                    cv, gv = c.get("verdict", ""), g.get("verdict", "")
+                    cvl, gvl = cv.lower(), gv.lower()
+                    both_bull    = "bull"    in cvl and "bull"    in gvl
+                    both_bear    = "bear"    in cvl and "bear"    in gvl
+                    both_neutral = "neutral" in cvl and "neutral" in gvl
+                    if both_bull or both_bear or both_neutral:
+                        verdict = cv  # consensus — no penalty
+                    else:
+                        verdict = f"Split — {cv} / {gv}"
+                        avg_conf = round(avg_conf * 0.8, 3)  # disagreement penalty
+                    # Deduplicate findings/risks
+                    findings = list(dict.fromkeys(c.get("findings", []) + g.get("findings", [])))[:6]
+                    risks    = list(dict.fromkeys(c.get("risks", [])    + g.get("risks", [])))[:6]
+                    return {
+                        "verdict":    verdict,
+                        "confidence": avg_conf,
+                        "summary":    f"[Claude] {c.get('summary','')}  [Gemini] {g.get('summary','')}",
+                        "findings":   findings,
+                        "risks":      risks,
+                        "timeframe":  c.get("timeframe") or g.get("timeframe", ""),
+                        "models":     "ensemble",
+                    }
+
+                def _investigate(symbol: str, signal: dict, headlines: list) -> dict:
+                    if signal and isinstance(signal.get("rsi"), (int, float)):
+                        signal_text = (
+                            f"RSI={signal['rsi']:.1f}, "
+                            f"MACD_hist={signal.get('macd_hist', 0):.4f}, "
+                            f"Composite={signal.get('composite','N/A')}, "
+                            f"Price=${signal.get('price',0):.2f}, "
+                            f"SMA20={signal.get('sma_20','N/A')}, "
+                            f"AI_decision={signal.get('ai_action','N/A')} "
+                            f"(conf={signal.get('ai_confidence',0):.0%}, "
+                            f"consensus={'yes' if signal.get('ai_consensus') else 'no'})"
+                        )
+                    else:
+                        signal_text = str(signal or "")
+
+                    clean = [
+                        h.get("headline","")[:150].replace("\n"," ").replace("\r"," ")
+                        for h in (headlines or [])[:8] if h.get("headline")
+                    ]
+                    news_text = "\n".join(f"- {h}" for h in clean) or "No recent headlines."
+                    prompt = _build_prompt(symbol, signal_text, news_text)
+
+                    if _gemini_client:
+                        with _cf.ThreadPoolExecutor(max_workers=2) as ex:
+                            fc = ex.submit(_ask_claude, prompt)
+                            fg = ex.submit(_ask_gemini, prompt)
+                            claude_r, gemini_r = None, None
+                            try:
+                                claude_r = fc.result(timeout=45)
+                            except Exception as e:
+                                logger.warning("Claude investigation failed for %s: %s", symbol, e)
+                            try:
+                                gemini_r = fg.result(timeout=45)
+                            except Exception as e:
+                                logger.warning("Gemini investigation failed for %s: %s", symbol, e)
+                        if claude_r and gemini_r:
+                            return _merge(claude_r, gemini_r)
+                        return claude_r or gemini_r or (_ for _ in ()).throw(RuntimeError("Both models failed"))
+                    return _ask_claude(prompt)
 
                 return _investigate
 
-            web_dashboard.register_investigate(_make_investigate_fn(_anthropic_key))
+            web_dashboard.register_investigate(_make_investigate_fn(_anthropic_key, _gemini_key))
 
         web_thread = threading.Thread(
             target=web_dashboard.main,
@@ -441,29 +511,49 @@ Be concise. findings and risks should each have 2–4 items. Do not include any 
                 except Exception as exc:
                     logger.error("Signal error for %s: %s", futures[fut], exc)
 
-        self._latest_signals = signals
-
         if not _is_market_hours():
+            self._latest_signals = signals
             self._update_dashboard(trading=False)
             return
 
+        # Collect AI decisions across all accounts; keep highest-confidence per symbol
+        ai_decisions: dict[str, TradeDecision] = {}
         for acct in self._accounts:
             try:
-                self._tick_account(acct, signal_map)
+                acct_decisions = self._tick_account(acct, signal_map)
+                for sym, dec in acct_decisions.items():
+                    if sym not in ai_decisions or dec.confidence > ai_decisions[sym].confidence:
+                        ai_decisions[sym] = dec
             except Exception as exc:
                 logger.error("[%s] Account tick error: %s", acct.label, exc)
 
+        # Enrich signals with best AI decision so dashboard + auto-trigger can use them
+        enriched = []
+        for sig_dict in signals:
+            sym = sig_dict.get("symbol", "")
+            dec = ai_decisions.get(sym)
+            if dec:
+                sig_dict = {**sig_dict,
+                    "ai_action":     dec.action,
+                    "ai_confidence": round(dec.confidence, 3),
+                    "ai_consensus":  dec.consensus,
+                    "ai_models":     dec.models_used,
+                }
+            enriched.append(sig_dict)
+        self._latest_signals = enriched
+
         self._update_dashboard(trading=True)
 
-    def _tick_account(self, acct: AccountContext, signal_map: dict[str, SignalResult]) -> None:
+    def _tick_account(self, acct: AccountContext, signal_map: dict[str, SignalResult]) -> dict[str, TradeDecision]:
+        decisions: dict[str, TradeDecision] = {}
         if acct.risk.kill_switch_active:
-            return
+            return decisions
 
         try:
             equity = acct.broker.get_portfolio_equity()
         except Exception as exc:
             logger.error("[%s] Could not fetch equity: %s", acct.label, exc)
-            return
+            return decisions
 
         if acct.risk.check_drawdown(equity):
             self._persist_kill_switch(acct)
@@ -471,7 +561,7 @@ Be concise. findings and risks should each have 2–4 items. Do not include any 
                 f"[{acct.label.upper()}] KILL SWITCH",
                 f"Daily drawdown limit hit. Equity: ${equity:,.2f}",
             )
-            return
+            return decisions
 
         open_positions = acct.broker.get_open_positions()
         # Cache so _update_dashboard can reuse without extra API calls
@@ -533,10 +623,13 @@ Be concise. findings and risks should each have 2–4 items. Do not include any 
                     self._execute_sell(acct, symbol, open_positions[symbol]["qty"], reason=decision.reasoning)
                     open_positions.pop(symbol, None)
 
+                decisions[symbol] = decision
+
             except Exception as exc:
                 logger.error("[%s] Error processing %s: %s", acct.label, symbol, exc)
 
         self._update_positions_in_db(open_positions, acct)
+        return decisions
 
     def _route_buy(
         self,
@@ -935,6 +1028,9 @@ Be concise. findings and risks should each have 2–4 items. Do not include any 
             "token_usage":       _token_summary(),
             "equity_goal":       self._cfg.equity_goal,
             "performance":       self._flashcards.performance(),
+            "ai_status":         _get_ai_status(),
+            "ai_models":         _get_model_info(),
+            "watchlist":         web_dashboard.get_watchlist(),
         }
         self._terminal.update(state)
         web_dashboard.push_state(state)
