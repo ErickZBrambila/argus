@@ -1997,10 +1997,10 @@ function renderAccounts(accounts) {
 
     return `<div class="acct-panel ${cls}">
       <div class="acct-panel-title ${cls}">${label.toUpperCase()}</div>
-      <div class="acct-equity ${cls}">${'$' + equity.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+      <div class="acct-equity ${cls} private">${'$' + equity.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
       <div class="acct-row">
         <span class="acct-row-label">Daily P&L</span>
-        <span class="${pnlCls}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${pnlPct.toFixed(2)}%)</span>
+        <span class="${pnlCls} private">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${pnlPct.toFixed(2)}%)</span>
       </div>
       <div class="acct-row">
         <span class="acct-row-label">Mode</span>
