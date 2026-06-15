@@ -240,17 +240,22 @@ class RobinhoodBroker:
             raise ValueError(f"Invalid span {span!r}. Allowed: {_VALID_SPANS}")
         if interval not in _VALID_INTERVALS:
             raise ValueError(f"Invalid interval {interval!r}. Allowed: {_VALID_INTERVALS}")
-        try:
-            import robin_stocks.robinhood as rh
 
-            if symbol in CRYPTO_SYMBOLS:
-                data = rh.crypto.get_crypto_historicals(symbol, interval=interval, span=span)
-            else:
-                data = rh.stocks.get_stock_historicals(symbol, interval=interval, span=span)
-            if data:
-                return data
-        except Exception as exc:
-            logger.warning("Could not fetch historicals for %s: %s", symbol, exc)
+        # When not authenticated, skip the Robinhood call entirely for crypto —
+        # the yfinance fallback handles it without auth. Avoids a noisy warning
+        # every tick when the session is unauthenticated.
+        if self._logged_in:
+            try:
+                import robin_stocks.robinhood as rh
+
+                if symbol in CRYPTO_SYMBOLS:
+                    data = rh.crypto.get_crypto_historicals(symbol, interval=interval, span=span)
+                else:
+                    data = rh.stocks.get_stock_historicals(symbol, interval=interval, span=span)
+                if data:
+                    return data
+            except Exception as exc:
+                logger.warning("Could not fetch historicals for %s: %s", symbol, exc)
 
         # Fallback for crypto: Yahoo Finance requires no auth
         if symbol in CRYPTO_SYMBOLS:
