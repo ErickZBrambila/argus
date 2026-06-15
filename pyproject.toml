@@ -34,6 +34,9 @@ dependencies = [
     "keyrings.alt>=5.0.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest", "pytest-mock", "pytest-asyncio"]
+
 [project.scripts]
 argus         = "argus.main:main"
 argus-web     = "argus.dashboard.web:main"

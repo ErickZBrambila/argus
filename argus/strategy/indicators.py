@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Protocol
 
 import numpy as np
 import pandas as pd
@@ -46,9 +46,86 @@ class SignalResult:
         return self.__dict__.copy()
 
 
+class StrategyProtocol(Protocol):
+    def score(
+        self,
+        price: float,
+        rsi: Optional[float],
+        macd_hist: Optional[float],
+        bb_upper: Optional[float],
+        bb_lower: Optional[float],
+        sma_20: Optional[float],
+        ema_50: Optional[float],
+    ) -> tuple[str, float]:
+        ...
+
+
+class DefaultStrategy(StrategyProtocol):
+    def score(
+        self,
+        price: float,
+        rsi: Optional[float],
+        macd_hist: Optional[float],
+        bb_upper: Optional[float],
+        bb_lower: Optional[float],
+        sma_20: Optional[float],
+        ema_50: Optional[float],
+    ) -> tuple[str, float]:
+        """Simple vote-based composite signal."""
+        bullish = 0
+        bearish = 0
+        total = 0
+
+        if rsi is not None:
+            total += 1
+            if rsi < 30:
+                bullish += 1
+            elif rsi > 70:
+                bearish += 1
+
+        if macd_hist is not None:
+            total += 1
+            if macd_hist > 0:
+                bullish += 1
+            elif macd_hist < 0:
+                bearish += 1
+
+        if bb_upper is not None and bb_lower is not None:
+            total += 1
+            if price <= bb_lower:
+                bullish += 1
+            elif price >= bb_upper:
+                bearish += 1
+
+        if sma_20 is not None:
+            total += 1
+            if price > sma_20:
+                bullish += 1
+            elif price < sma_20:
+                bearish += 1
+
+        if ema_50 is not None:
+            total += 1
+            if price > ema_50:
+                bullish += 1
+            elif price < ema_50:
+                bearish += 1
+
+        if total == 0:
+            return "neutral", 0.0
+
+        confidence = max(bullish, bearish) / total
+        if bullish > bearish:
+            return "bullish", confidence
+        elif bearish > bullish:
+            return "bearish", confidence
+        return "neutral", confidence
+
+
 class SignalEngine:
-    def __init__(self, broker) -> None:
+    def __init__(self, broker, strategy: Optional[StrategyProtocol] = None) -> None:
         self._broker = broker
+        self._strategy = strategy or DefaultStrategy()
 
     def compute(self, symbol: str) -> Optional[SignalResult]:
         symbol = _validate_symbol(symbol)
@@ -111,7 +188,7 @@ class SignalEngine:
         sma_20 = _safe(sma_col)
         ema_50 = _safe(ema_col)
 
-        composite, confidence = _score(price, rsi, macd_hist, bb_upper, bb_lower, sma_20, ema_50)
+        composite, confidence = self._strategy.score(price, rsi, macd_hist, bb_upper, bb_lower, sma_20, ema_50)
 
         return SignalResult(
             symbol=symbol,
@@ -147,63 +224,3 @@ def _build_dataframe(raw: list[dict]) -> Optional[pd.DataFrame]:
     except Exception as exc:
         logger.warning("DataFrame build failed: %s", exc)
         return None
-
-
-def _score(
-    price: float,
-    rsi: Optional[float],
-    macd_hist: Optional[float],
-    bb_upper: Optional[float],
-    bb_lower: Optional[float],
-    sma_20: Optional[float],
-    ema_50: Optional[float],
-) -> tuple[str, float]:
-    """Simple vote-based composite signal."""
-    bullish = 0
-    bearish = 0
-    total = 0
-
-    if rsi is not None:
-        total += 1
-        if rsi < 30:
-            bullish += 1
-        elif rsi > 70:
-            bearish += 1
-
-    if macd_hist is not None:
-        total += 1
-        if macd_hist > 0:
-            bullish += 1
-        elif macd_hist < 0:
-            bearish += 1
-
-    if bb_upper is not None and bb_lower is not None:
-        total += 1
-        if price <= bb_lower:
-            bullish += 1
-        elif price >= bb_upper:
-            bearish += 1
-
-    if sma_20 is not None:
-        total += 1
-        if price > sma_20:
-            bullish += 1
-        elif price < sma_20:
-            bearish += 1
-
-    if ema_50 is not None:
-        total += 1
-        if price > ema_50:
-            bullish += 1
-        elif price < ema_50:
-            bearish += 1
-
-    if total == 0:
-        return "neutral", 0.0
-
-    confidence = max(bullish, bearish) / total
-    if bullish > bearish:
-        return "bullish", confidence
-    elif bearish > bullish:
-        return "bearish", confidence
-    return "neutral", confidence

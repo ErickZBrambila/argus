@@ -84,12 +84,11 @@ def classify_risk(signal_confidence: float, decision_confidence: float, consensu
     return "high"
 
 
-CLAUDE_MODEL = "claude-sonnet-4-6"
-GEMINI_MODEL = "gemini-2.5-flash"
-
+from argus.config import get_settings
 
 def get_model_info() -> dict:
-    return {"claude": CLAUDE_MODEL, "gemini": GEMINI_MODEL}
+    settings = get_settings()
+    return {"claude": settings.claude_model, "gemini": settings.gemini_model}
 
 
 # ── Claude ────────────────────────────────────────────────────────────────────
@@ -97,11 +96,12 @@ def get_model_info() -> dict:
 class _ClaudeEngine:
     def __init__(self, api_key: str) -> None:
         self._client = anthropic.Anthropic(api_key=api_key)
+        self._model = get_settings().claude_model
 
     def decide(self, symbol: str, prompt: str) -> TradeDecision:
         try:
             with self._client.messages.stream(
-                model=CLAUDE_MODEL,
+                model=self._model,
                 max_tokens=1024,
                 thinking={"type": "disabled"},
                 system=_SYSTEM_PROMPT,
@@ -140,6 +140,7 @@ class _GeminiEngine:
         from google import genai
         from google.genai import types as _gt
         self._client = genai.Client(api_key=api_key)
+        self._model = get_settings().gemini_model
         self._config = _gt.GenerateContentConfig(
             system_instruction=_SYSTEM_PROMPT,
             temperature=0.2,
@@ -150,7 +151,7 @@ class _GeminiEngine:
     def decide(self, symbol: str, prompt: str) -> TradeDecision:
         try:
             response = self._client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=self._model,
                 contents=prompt,
                 config=self._config,
             )

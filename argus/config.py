@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     max_positions: int = Field(5, alias="MAX_POSITIONS")
     daily_drawdown_limit: float = Field(-0.05, alias="DAILY_DRAWDOWN_LIMIT")
 
+    # Model overrides
+    claude_model: str = Field("claude-sonnet-4-6", alias="CLAUDE_MODEL")
+    gemini_model: str = Field("gemini-2.5-flash", alias="GEMINI_MODEL")
+
     # Scan loop — adaptive intervals per market session
     scan_interval_seconds: int = Field(300, alias="SCAN_INTERVAL_SECONDS")
     interval_open:         int = Field(90,  alias="INTERVAL_OPEN")
