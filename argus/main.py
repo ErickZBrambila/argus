@@ -275,20 +275,26 @@ class Autopilot:
             def _make_investigate_fn(api_key: str):
                 import anthropic, json as _json
 
-                _client = anthropic.Anthropic(api_key=api_key)
+                _client = anthropic.Anthropic(api_key=api_key, timeout=30.0)
 
                 def _investigate(symbol: str, signal: dict, headlines: list) -> dict:
                     signal_text = ""
                     if signal:
                         signal_text = (
                             f"RSI={signal.get('rsi', 'N/A'):.1f}, "
-                            f"MACD={signal.get('macd', 'N/A'):.4f}, "
-                            f"Composite={signal.get('composite', 0):.2f}, "
+                            f"MACD={signal.get('macd_hist', 'N/A'):.4f}, "
+                            f"Composite={signal.get('composite', 'N/A')}, "   # str — no format spec
                             f"Trend={'UP' if signal.get('trend_up') else 'DOWN'}, "
                             f"Volume={'HIGH' if signal.get('vol_spike') else 'normal'}"
                         ) if isinstance(signal.get("rsi"), (int, float)) else str(signal)
 
-                    news_text = "\n".join(f"- {h.get('headline','')}" for h in (headlines or [])[:8]) or "No recent headlines available."
+                    # Sanitize headlines before embedding in prompt (prompt-injection defence)
+                    clean_headlines = [
+                        h.get("headline", "")[:150].replace("\n", " ").replace("\r", " ")
+                        for h in (headlines or [])[:8]
+                        if h.get("headline")
+                    ]
+                    news_text = "\n".join(f"- {h}" for h in clean_headlines) or "No recent headlines available."
 
                     prompt = f"""You are a professional equity analyst. Investigate {symbol} and produce a concise trading verdict.
 
@@ -315,13 +321,15 @@ Be concise. findings and risks should each have 2–4 items. Do not include any 
                         max_tokens=600,
                         messages=[{"role": "user", "content": prompt}],
                     )
+                    if not msg.content:
+                        raise ValueError("Empty response from Anthropic API")
                     text = msg.content[0].text.strip()
-                    # Strip markdown code fences if present
-                    if text.startswith("```"):
-                        text = text.split("```")[1]
-                        if text.startswith("json"):
-                            text = text[4:]
-                    return _json.loads(text.strip())
+                    # Strip markdown code fences robustly
+                    import re as _re
+                    fence_match = _re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+                    if fence_match:
+                        text = fence_match.group(1)
+                    return _json.loads(text)
 
                 return _investigate
 
@@ -329,7 +337,7 @@ Be concise. findings and risks should each have 2–4 items. Do not include any 
 
         web_thread = threading.Thread(
             target=web_dashboard.main,
-            kwargs={"host": self._cfg.web_host, "port": self._cfg.web_port, "token": self._cfg.dashboard_token},
+            kwargs={"host": self._cfg.web_host, "port": self._cfg.web_port, "token": self._cfg.dashboard_token.get_secret_value()},
             daemon=True,
             name="argus-web",
         )

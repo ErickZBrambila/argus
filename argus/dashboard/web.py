@@ -106,13 +106,15 @@ def _news_fetch_loop() -> None:
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "Argus/0.5.3 (+financial-dashboard)"})
                 with urllib.request.urlopen(req, timeout=10) as resp:
-                    root = ET.fromstring(resp.read())
+                    root = ET.fromstring(resp.read(512 * 1024))  # 512 KB cap
                 items = []
                 for item in root.findall(".//item")[:15]:
                     title = (item.findtext("title") or "").strip()
                     link  = (item.findtext("link")  or "").strip()
+                    # Only allow https:// URLs — blocks javascript: and data: XSS vectors
+                    safe_url = link if link.startswith("https://") else None
                     if title:
-                        items.append({"headline": title, "url": link or None})
+                        items.append({"headline": title, "url": safe_url})
                 if items:
                     with _news_lock:
                         _news_cache[:] = items
@@ -159,6 +161,8 @@ def register_investigate(fn) -> None:
 
 def _run_investigation(symbol: str) -> None:
     with _investigation_lock:
+        if symbol not in _investigations:
+            return
         _investigations[symbol]["status"] = "running"
         _investigations[symbol]["started_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     _push_investigation_state()
@@ -177,6 +181,8 @@ def _run_investigation(symbol: str) -> None:
         result = _investigate_fn(symbol, signal, headlines)
 
         with _investigation_lock:
+            if symbol not in _investigations:
+                return  # user deleted the card while investigation was running
             _investigations[symbol].update({
                 "status": "complete",
                 "verdict":    result.get("verdict", "Unknown"),
@@ -190,6 +196,8 @@ def _run_investigation(symbol: str) -> None:
     except Exception as exc:
         logger.error("Investigation failed for %s: %s", symbol, exc)
         with _investigation_lock:
+            if symbol not in _investigations:
+                return
             _investigations[symbol].update({
                 "status": "error",
                 "error": str(exc),
@@ -203,7 +211,8 @@ def _push_investigation_state() -> None:
     with _investigation_lock:
         inv = dict(_investigations)
     _state["investigations"] = inv
-    _sse_push(json.dumps(_state, default=str))
+    # Push a snapshot to avoid racing with push_state on the main thread
+    _sse_push(json.dumps({**_state, "investigations": inv}, default=str))
 
 
 def _sse_push(data: str) -> None:
@@ -427,7 +436,7 @@ _force_close_queue: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=10)
 _promote_queue: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=10)
 
 _KNOWN_ACCOUNTS = {"agentic", "default", "main"}
-_SYMBOL_RE = re.compile(r"^[A-Z0-9.]{1,10}$")
+_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,9}$")
 
 
 def get_force_close_symbol() -> str | None:
@@ -526,6 +535,7 @@ async def remove_investigation(symbol: str) -> dict:
         raise HTTPException(status_code=400, detail="Invalid symbol")
     with _investigation_lock:
         _investigations.pop(symbol, None)
+    _auto_triggered.discard(symbol)   # allow re-trigger if signals re-emerge
     _push_investigation_state()
     return {"status": "removed", "symbol": symbol}
 
@@ -536,7 +546,7 @@ async def get_news() -> dict:
         return {"headlines": list(_news_cache)}
 
 
-@app.get("/api/search")
+@app.get("/api/search", dependencies=[Depends(_require_auth)])
 async def search_symbols(q: str = Query(default="", max_length=60)) -> dict:
     q = q.strip()
     if not q or _search_fn is None:
@@ -2634,7 +2644,7 @@ function chartSearchDebounce(val) {
   dd.innerHTML = '<div class="wl-dd-searching">Searching…</div>';
   _csTimer = setTimeout(async () => {
     try {
-      const r = await fetch('/api/search?q=' + encodeURIComponent(val.trim()));
+      const r = await apiFetch('/api/search?q=' + encodeURIComponent(val.trim()));
       const d = await r.json();
       _csResults = d.results || [];
       dd.innerHTML = _csResults.length
@@ -3095,7 +3105,7 @@ function ctSearchDebounce(val) {
 
 async function ctSearchFetch(q) {
   try {
-    const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+    const r = await apiFetch('/api/search?q=' + encodeURIComponent(q));
     const d = await r.json();
     _ctSearchResults = d.results || [];
     ctDropdownRender();
@@ -3305,7 +3315,7 @@ function invSearchDebounce(val) {
   dd.innerHTML = '<div class="wl-dd-searching">Searching…</div>'; dd.classList.add('open');
   _invTimer = setTimeout(async () => {
     try {
-      const r = await fetch('/api/search?q=' + encodeURIComponent(val.trim()));
+      const r = await apiFetch('/api/search?q=' + encodeURIComponent(val.trim()));
       const d = await r.json();
       _invResults = d.results || [];
       dd.innerHTML = _invResults.length
