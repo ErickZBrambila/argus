@@ -660,7 +660,9 @@ async def sse_stream() -> StreamingResponse:
     async def generator() -> AsyncGenerator[str, None]:
         try:
             if _state:
-                yield f"data: {json.dumps(_state, default=str)}\n\n"
+                with _state_lock:
+                    initial = {**_state, "equity_history": list(_equity_history)}
+                yield f"data: {json.dumps(initial, default=str)}\n\n"
             while True:
                 try:
                     data = await asyncio.wait_for(q.get(), timeout=30.0)
