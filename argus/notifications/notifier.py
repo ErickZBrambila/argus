@@ -1,9 +1,12 @@
-"""Notification dispatcher — email (SMTP), SMS (Twilio), Slack."""
+"""Notification dispatcher — macOS, Discord, ntfy, email (SMTP), SMS (Twilio), Slack."""
 
 from __future__ import annotations
 
+import json
 import logging
 import smtplib
+import subprocess
+import urllib.request
 from email.mime.text import MIMEText
 from typing import Optional
 
@@ -32,6 +35,8 @@ class Notifier:
         twilio_to: str = "",
         slack_bot_token: SecretStr | str = "",
         slack_channel: str = "#argus-alerts",
+        discord_webhook_url: str = "",
+        ntfy_url: str = "",
     ) -> None:
         self._email = notify_email
         self._smtp_host = smtp_host
@@ -47,10 +52,73 @@ class Notifier:
         self._slack_token = slack_bot_token
         self._slack_channel = slack_channel
 
+        self._discord_webhook = discord_webhook_url
+        self._ntfy_url = ntfy_url
+
     def send(self, subject: str, body: str) -> None:
+        self._try_macos(subject, body)
+        self._try_discord(subject, body)
+        self._try_ntfy(subject, body)
         self._try_email(subject, body)
         self._try_sms(f"{subject}: {body}")
         self._try_slack(f"*{subject}*\n{body}")
+
+    # ── macOS native notification ────────────────────────────────────────────
+
+    def _try_macos(self, subject: str, body: str) -> None:
+        try:
+            script = (
+                f'display notification "{body}" '
+                f'with title "Argus" subtitle "{subject}"'
+            )
+            subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, timeout=5,
+            )
+        except Exception as exc:
+            logger.debug("macOS notification failed: %s", exc)
+
+    # ── Discord webhook ──────────────────────────────────────────────────────
+
+    def _try_discord(self, subject: str, body: str) -> None:
+        if not self._discord_webhook:
+            return
+        try:
+            payload = json.dumps({
+                "username": "Argus",
+                "embeds": [{
+                    "title": subject,
+                    "description": body,
+                    "color": 0x00b4d8,
+                }],
+            }).encode()
+            req = urllib.request.Request(
+                self._discord_webhook, data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=10)
+            logger.info("Discord notification sent")
+        except Exception as exc:
+            logger.warning("Discord notification failed: %s", exc)
+
+    # ── ntfy.sh ──────────────────────────────────────────────────────────────
+
+    def _try_ntfy(self, subject: str, body: str) -> None:
+        if not self._ntfy_url:
+            return
+        try:
+            req = urllib.request.Request(
+                self._ntfy_url, data=body.encode(),
+                headers={
+                    "Title": subject,
+                    "Priority": "default",
+                    "Tags": "chart_with_upwards_trend",
+                },
+            )
+            urllib.request.urlopen(req, timeout=10)
+            logger.info("ntfy notification sent")
+        except Exception as exc:
+            logger.warning("ntfy notification failed: %s", exc)
 
     # ── Email ────────────────────────────────────────────────────────────────
 

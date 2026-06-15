@@ -119,6 +119,12 @@ class Settings(BaseSettings):
     # Slack
     slack_channel: str = Field("#argus-alerts", alias="SLACK_CHANNEL")
 
+    # Discord webhook (paste URL from Server Settings → Integrations → Webhooks)
+    discord_webhook_url: str = Field("", alias="DISCORD_WEBHOOK_URL")
+
+    # ntfy.sh push notifications (e.g. https://ntfy.sh/your-topic-name)
+    ntfy_url: str = Field("", alias="NTFY_URL")
+
     # Web dashboard — default localhost; set 0.0.0.0 only behind an auth proxy
     web_host: str = Field("127.0.0.1", alias="WEB_HOST")
     web_port: int = Field(8000, alias="WEB_PORT")
