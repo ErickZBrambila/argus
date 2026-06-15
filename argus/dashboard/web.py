@@ -1904,16 +1904,20 @@ function _marketCountdown() {
   const valEl   = document.getElementById('mc-val');
   if (!labelEl || !valEl) return;
 
-  // All times in ET (America/New_York)
-  const now = new Date();
-  const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false,
+  // Use formatToParts — avoids toLocaleString string-parsing fragility and the
+  // Safari "24:00:00" midnight bug when hour12:false is used.
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
     year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  // Parse "MM/DD/YYYY, HH:MM:SS"
-  const [datePart, timePart] = etStr.split(', ');
-  const [m, d, y] = datePart.split('/').map(Number);
-  const [h, min, s] = timePart.split(':').map(Number);
-  const dow = new Date(`${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}T${timePart}`).getDay();
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+  const p = {};
+  parts.forEach(({ type, value }) => { p[type] = parseInt(value); });
+  const h   = p.hour % 24;   // formatToParts can give 24 for midnight; normalise to 0
+  const min = p.minute;
+  const s   = p.second;
+  const dow = new Date(p.year, p.month - 1, p.day).getDay();
   const secOfDay = h * 3600 + min * 60 + s;
 
   const OPEN  = 9  * 3600 + 30 * 60;  // 9:30 AM ET
@@ -2540,6 +2544,11 @@ const _CHART_OPTS = {
   rightPriceScale: { borderColor: '#2a2f3e' },
   timeScale: { borderColor: '#2a2f3e', timeVisible: true },
   handleScroll: true, handleScale: true,
+  localization: {
+    timeFormatter: ts => new Date(ts * 1000).toLocaleTimeString('en-US', {
+      timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
+    }),
+  },
 };
 
 function initChart() {
@@ -2854,6 +2863,11 @@ function eqInit() {
     crosshair: { mode: LightweightCharts.CrosshairMode.Magnet },
     handleScroll: false,
     handleScale: false,
+    localization: {
+      timeFormatter: ts => new Date(ts * 1000).toLocaleTimeString('en-US', {
+        timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
+      }),
+    },
   });
   _eqSeries = _eqChart.addAreaSeries({
     lineColor: '#00D4AA',
