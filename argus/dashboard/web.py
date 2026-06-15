@@ -110,8 +110,9 @@ def _news_fetch_loop() -> None:
                 items = []
                 for item in root.findall(".//item")[:15]:
                     title = (item.findtext("title") or "").strip()
+                    link  = (item.findtext("link")  or "").strip()
                     if title:
-                        items.append({"headline": title})
+                        items.append({"headline": title, "url": link or None})
                 if items:
                     with _news_lock:
                         _news_cache[:] = items
@@ -791,7 +792,8 @@ _HTML = """<!DOCTYPE html>
   .ticker-divider { color: rgba(0,212,170,.4); font-size: 10px; padding: 0 14px; flex-shrink: 0; letter-spacing: 2px; }
   .ticker-news-item { display: inline-flex; align-items: center; gap: 7px; padding: 0 16px; flex-shrink: 0; }
   .ticker-news-badge { font-size: 9px; font-weight: 800; color: #000d0a; background: var(--accent); border-radius: 3px; padding: 1px 5px; letter-spacing: .5px; flex-shrink: 0; }
-  .ticker-headline { font-size: 12px; color: var(--muted); max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ticker-headline { font-size: 12px; color: var(--muted); max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; }
+  a.ticker-headline:hover { color: var(--text); text-decoration: underline; cursor: pointer; }
 
   /* ── Main grid ──────────────────────────────────────────────────────────── */
   main { padding: 16px; display: grid; gap: 16px; }
@@ -1923,11 +1925,11 @@ function fmt(n, decimals=2) {
 }
 function fmtDollar(n) {
   if (n == null) return '—';
-  return '<span class="private">$' + Number(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) + '</span>';
+  return '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
 }
 function fmtPnl(val, pct) {
   const sign = val >= 0 ? '+' : '';
-  return `<span class="private">${sign}$${Math.abs(val).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})} (${sign}${Number(pct).toFixed(2)}%)</span>`;
+  return `${sign}$${Math.abs(val).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})} (${sign}${Number(pct).toFixed(2)}%)`;
 }
 function pnlClass(n) {
   return n > 0 ? 'green' : n < 0 ? 'red' : '';
@@ -1959,7 +1961,7 @@ function renderGoalBar(equity, goal, cls) {
     <div class="goal-track"><div class="goal-fill ${fillCls}" style="width:${pct}%"></div></div>
     ${done
       ? '<div class="goal-done-badge">PDT restriction lifted</div>'
-      : `<div class="goal-remaining private">$${remaining.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})} remaining</div>`
+      : `<div class="goal-remaining">$${remaining.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})} remaining</div>`
     }
   </div>`;
 }
@@ -1988,17 +1990,17 @@ function renderAccounts(accounts) {
       const pct = p.unrealized_pnl_pct || 0;
       return `<div class="acct-pos-row">
         <span class="acct-pos-sym">${sym}</span>
-        <span class="private muted">${fmtDollar(p.current_price)}</span>
+        <span class="muted">${fmtDollar(p.current_price)}</span>
         <span class="${pnlClass(pct)}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</span>
       </div>`;
     }).join('') || '<div style="color:var(--muted);font-size:12px;padding:4px 0">No open positions</div>';
 
     return `<div class="acct-panel ${cls}">
       <div class="acct-panel-title ${cls}">${label.toUpperCase()}</div>
-      <div class="acct-equity ${cls} private">${'$' + equity.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+      <div class="acct-equity ${cls}">${'$' + equity.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
       <div class="acct-row">
         <span class="acct-row-label">Daily P&L</span>
-        <span class="${pnlCls} private">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${pnlPct.toFixed(2)}%)</span>
+        <span class="${pnlCls}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${pnlPct.toFixed(2)}%)</span>
       </div>
       <div class="acct-row">
         <span class="acct-row-label">Mode</span>
@@ -2242,7 +2244,7 @@ function renderFlashcards(state) {
           : c.hold_duration_hours.toFixed(1) + 'h';
       }
       outcomeHtml = `
-        <span class="pill ${won ? 'pill-win' : 'pill-loss'}">${won ? '▲ Made' : '▼ Lost'} <span class="private">${gainSign}$${Math.abs(dollarGain).toFixed(2)}</span> (${pnlSign}${(c.pnl_pct||0).toFixed(2)}%)</span>
+        <span class="pill ${won ? 'pill-win' : 'pill-loss'}">${won ? '▲ Made' : '▼ Lost'} ${gainSign}$${Math.abs(dollarGain).toFixed(2)} (${pnlSign}${(c.pnl_pct||0).toFixed(2)}%)</span>
         ${holdStr ? `<span class="muted" style="font-size:11px">${escHtml(holdStr)} held</span>` : ''}`;
     } else {
       const sinceStr = c.timestamp ? _timeAgo(new Date(c.timestamp)) : '';
@@ -2322,7 +2324,7 @@ function renderFlashcards(state) {
           </div>
         </div>
         <div class="fc-meta">
-          <span class="private">Entry $${(c.entry_price||0).toFixed(2)} · $${(c.dollar_amount||0).toFixed(2)} invested</span> · ${escHtml(c.account||'')} · ${escHtml(ts)}
+          Entry $${(c.entry_price||0).toFixed(2)} · $${(c.dollar_amount||0).toFixed(2)} invested · ${escHtml(c.account||'')} · ${escHtml(ts)}
         </div>
       </div>
     </div>`;
@@ -2705,18 +2707,18 @@ function updateTicker(signals) {
     const cls   = bull ? 'ticker-up' : bear ? 'ticker-down' : 'ticker-flat';
     return `<span class="ticker-item">` +
       `<span class="ticker-sym">${escHtml(s.symbol)}</span> ` +
-      `<span class="ticker-price private">${price}</span> ` +
+      `<span class="ticker-price">${price}</span> ` +
       `<span class="${cls}">${arrow}</span>` +
       `</span><span class="ticker-dot">·</span>`;
   }).join('');
 
   // News items
-  const newsHtml = _tickerHeadlines.slice(0, 12).map(h =>
-    `<span class="ticker-news-item">` +
-    `<span class="ticker-news-badge">NEWS</span>` +
-    `<span class="ticker-headline">${escHtml(h.headline)}</span>` +
-    `</span><span class="ticker-dot">·</span>`
-  ).join('');
+  const newsHtml = _tickerHeadlines.slice(0, 12).map(h => {
+    const inner = h.url
+      ? `<a class="ticker-headline" href="${escHtml(h.url)}" target="_blank" rel="noopener">${escHtml(h.headline)}</a>`
+      : `<span class="ticker-headline">${escHtml(h.headline)}</span>`;
+    return `<span class="ticker-news-item"><span class="ticker-news-badge">NEWS</span>${inner}</span><span class="ticker-dot">·</span>`;
+  }).join('');
 
   const divider = newsHtml ? `<span class="ticker-divider">◆◆◆</span>` : '';
   const single = priceHtml + divider + newsHtml;
@@ -3207,7 +3209,10 @@ function buildInvCard(sym, d) {
       .filter(h => h.headline.toLowerCase().includes(symLower))
       .slice(0, 5);
     const newsHtml = relevant.length
-      ? relevant.map(h => `<div class="inv-news-item">${escHtml(h.headline)}</div>`).join('')
+      ? relevant.map(h => h.url
+          ? `<div class="inv-news-item"><a href="${escHtml(h.url)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">${escHtml(h.headline)}</a></div>`
+          : `<div class="inv-news-item">${escHtml(h.headline)}</div>`
+        ).join('')
       : `<div class="inv-news-item" style="color:var(--text-dim)">No recent headlines found for ${escHtml(sym)}</div>`;
 
     body = `

@@ -169,16 +169,16 @@ dash.register_investigate(_mock_investigate)
 # Seed fake news headlines for mock mode
 with dash._news_lock:
     dash._news_cache[:] = [
-        {"headline": "NVIDIA reports record Q4 earnings, beats estimates by 15% on AI chip demand"},
-        {"headline": "Federal Reserve holds rates steady, signals two cuts later this year"},
-        {"headline": "Apple unveils AI-powered features across iPhone and Mac product lines"},
-        {"headline": "Tesla slashes prices globally amid intensifying EV market competition"},
-        {"headline": "Bitcoin ETF sees record $2.4B inflows as institutional demand surges"},
-        {"headline": "S&P 500 hits new all-time high driven by tech and semiconductor rally"},
-        {"headline": "Goldman Sachs raises year-end S&P 500 target to 6,500 on earnings beat"},
-        {"headline": "SEC approves spot Ethereum ETFs, crypto markets rally 8% on news"},
-        {"headline": "Microsoft Azure cloud revenue jumps 31% on AI services growth"},
-        {"headline": "Amazon Web Services margins expand as AI workloads drive higher pricing"},
+        {"headline": "NVIDIA reports record Q4 earnings, beats estimates by 15% on AI chip demand", "url": "https://finance.yahoo.com/news/nvidia"},
+        {"headline": "Federal Reserve holds rates steady, signals two cuts later this year", "url": "https://finance.yahoo.com/news/fed"},
+        {"headline": "Apple unveils AI-powered features across iPhone and Mac product lines", "url": "https://finance.yahoo.com/news/apple"},
+        {"headline": "Tesla slashes prices globally amid intensifying EV market competition", "url": "https://finance.yahoo.com/news/tesla"},
+        {"headline": "Bitcoin ETF sees record $2.4B inflows as institutional demand surges", "url": "https://finance.yahoo.com/news/bitcoin"},
+        {"headline": "S&P 500 hits new all-time high driven by tech and semiconductor rally", "url": "https://finance.yahoo.com/news/sp500"},
+        {"headline": "Goldman Sachs raises year-end S&P 500 target to 6,500 on earnings beat", "url": "https://finance.yahoo.com/news/goldman"},
+        {"headline": "SEC approves spot Ethereum ETFs, crypto markets rally 8% on news", "url": "https://finance.yahoo.com/news/ethereum"},
+        {"headline": "Microsoft Azure cloud revenue jumps 31% on AI services growth", "url": "https://finance.yahoo.com/news/microsoft"},
+        {"headline": "Amazon Web Services margins expand as AI workloads drive higher pricing", "url": "https://finance.yahoo.com/news/amazon"},
     ]
 
 # ── Fake data generators ──────────────────────────────────────────────────────
