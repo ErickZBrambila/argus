@@ -16,3 +16,4 @@ logs/
 *.log
 robinhood.pickle
 token_usage.json
+equity_history.json

@@ -37,8 +37,39 @@ _autopilot = None         # Autopilot instance for runtime control
 
 # Equity curve — ring buffer of {time, value} points for the session
 import collections as _collections
+import pathlib as _pathlib
 _equity_history: collections.deque = _collections.deque(maxlen=480)  # ~8h at 60s interval
 _equity_history_by_account: dict = {}  # label → deque(maxlen=480)
+_EQUITY_PERSIST_PATH = _pathlib.Path(__file__).parent.parent.parent / "equity_history.json"
+
+def _equity_load() -> None:
+    """Load today's equity history from disk on startup."""
+    global _equity_history, _equity_history_by_account
+    try:
+        if not _EQUITY_PERSIST_PATH.exists():
+            return
+        data = json.loads(_EQUITY_PERSIST_PATH.read_text())
+        if data.get("date") != datetime.date.today().isoformat():
+            return  # stale — start fresh
+        pts = data.get("combined", [])
+        _equity_history = _collections.deque(pts, maxlen=480)
+        for label, acct_pts in data.get("by_account", {}).items():
+            _equity_history_by_account[label] = _collections.deque(acct_pts, maxlen=480)
+    except Exception as exc:
+        logger.debug("Equity history load failed: %s", exc)
+
+def _equity_save() -> None:
+    """Persist current equity history to disk (called inside _state_lock)."""
+    try:
+        _EQUITY_PERSIST_PATH.write_text(json.dumps({
+            "date": datetime.date.today().isoformat(),
+            "combined": list(_equity_history),
+            "by_account": {k: list(v) for k, v in _equity_history_by_account.items()},
+        }))
+    except Exception as exc:
+        logger.debug("Equity history save failed: %s", exc)
+
+_equity_load()  # restore on module import
 
 
 def register_chart_source(fn) -> None:
@@ -384,6 +415,7 @@ def push_state(state: dict) -> None:
             "equity_history": list(_equity_history),
             "equity_history_by_account": {k: list(v) for k, v in _equity_history_by_account.items()},
         }
+        _equity_save()
     _sse_push(json.dumps(snapshot, default=str))
     _auto_trigger_investigations(state)
 
@@ -3119,15 +3151,7 @@ function eqInit() {
     localization: { timeFormatter: _fmtChartTime },
   });
   window._eqChart = _eqChart;
-  // Combined thin line behind everything
-  _eqCombinedSeries = _eqChart.addLineSeries({
-    color: 'rgba(255,255,255,0.18)',
-    lineWidth: 1,
-    priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
-    lastValueVisible: false,
-    priceLineVisible: false,
-  });
-  // Per-account area series — each in account color
+  // Per-account area series — each in account color (no combined line; avoids 2× scale confusion)
   for (const [label, c] of Object.entries(_EQ_COLORS)) {
     _eqSeriesByAcct[label] = _eqChart.addAreaSeries({
       lineColor: c.line,
@@ -3168,19 +3192,15 @@ function eqRender(history, historyByAcct) {
   const hasAcctData = Object.keys(_eqHistoryByAcct).length > 0;
 
   if (hasAcctData) {
-    // Render per-account series
     for (const [label, series] of Object.entries(_eqSeriesByAcct)) {
-      const pts = _eqFilterSort(_eqHistoryByAcct[label] || []);
-      series.setData(pts);
+      series.setData(_eqFilterSort(_eqHistoryByAcct[label] || []));
     }
-    // Combined thin line
-    const cPts = _eqFilterSort(_eqHistory);
-    _eqCombinedSeries.setData(cPts);
   } else {
-    // Fallback: show combined on the agentic series (no per-account data yet)
-    for (const series of Object.values(_eqSeriesByAcct)) series.setData([]);
+    // No per-account data yet — show combined on the agentic (teal) series as placeholder
     const pts = _eqFilterSort(_eqHistory);
-    _eqCombinedSeries.setData(pts);
+    for (const [label, series] of Object.entries(_eqSeriesByAcct)) {
+      series.setData(label === 'agentic' ? pts : []);
+    }
   }
 
   _eqChart.timeScale().fitContent();
@@ -3196,17 +3216,6 @@ function eqRender(history, historyByAcct) {
     const col  = chg >= 0 ? 'var(--green)' : 'var(--danger)';
     statsHtml += `<span style="color:${c.line};font-weight:700;margin-right:4px">●</span>` +
       `<span style="margin-right:12px">${label.toUpperCase()}: <strong style="color:${col}">${sign}$${Math.abs(chg).toFixed(2)}</strong></span>`;
-  }
-  if (_eqHistory.length) {
-    const pts = _eqFilterSort(_eqHistory);
-    if (pts.length) {
-      const chg = pts[pts.length-1].value - pts[0].value;
-      const chgPct = pts[0].value ? (chg / pts[0].value) * 100 : 0;
-      const sign = chg >= 0 ? '+' : '';
-      const col  = chg >= 0 ? 'var(--green)' : 'var(--danger)';
-      statsHtml += `<span style="color:rgba(255,255,255,.4);margin-right:4px">●</span>` +
-        `<span>Combined: <strong style="color:${col}">${sign}$${Math.abs(chg).toFixed(2)} (${sign}${chgPct.toFixed(2)}%)</strong></span>`;
-    }
   }
   const statsEl = document.getElementById('eq-stats');
   if (statsEl) statsEl.innerHTML = statsHtml || '&nbsp;';

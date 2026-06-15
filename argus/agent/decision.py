@@ -103,7 +103,7 @@ class _ClaudeEngine:
             with self._client.messages.stream(
                 model=CLAUDE_MODEL,
                 max_tokens=1024,
-                thinking={"type": "adaptive"},
+                thinking={"type": "disabled"},
                 system=_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
