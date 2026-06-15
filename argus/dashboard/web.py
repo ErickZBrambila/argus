@@ -2616,7 +2616,7 @@ const _CHART_OPTS = {
   grid:   { vertLines: { color: '#2a2f3e' }, horzLines: { color: '#2a2f3e' } },
   crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   rightPriceScale: { borderColor: '#2a2f3e' },
-  timeScale: { borderColor: '#2a2f3e', timeVisible: true },
+  timeScale: { borderColor: '#2a2f3e', timeVisible: true, tickMarkFormatter: _fmtChartTime },
   handleScroll: true, handleScale: true,
   localization: { timeFormatter: _fmtChartTime },
 };
@@ -2930,7 +2930,12 @@ function eqInit() {
     layout: { background: { color: 'transparent' }, textColor: '#8b949e' },
     grid: { vertLines: { color: 'rgba(255,255,255,.05)' }, horzLines: { color: 'rgba(255,255,255,.05)' } },
     rightPriceScale: { borderColor: 'rgba(255,255,255,.08)' },
-    timeScale: { borderColor: 'rgba(255,255,255,.08)', timeVisible: true, secondsVisible: false },
+    timeScale: {
+      borderColor: 'rgba(255,255,255,.08)',
+      timeVisible: true,
+      secondsVisible: false,
+      tickMarkFormatter: _fmtChartTime,
+    },
     crosshair: { mode: LightweightCharts.CrosshairMode.Magnet },
     handleScroll: false,
     handleScale: false,
@@ -2965,6 +2970,12 @@ function eqRender(history) {
 
   let pts = _eqHistory.filter(p => p.time >= cutoff);
   if (!pts.length) pts = _eqHistory.slice(-1);  // always show at least one point
+
+  // LightweightCharts requires strictly ascending, unique timestamps
+  const seen = new Set();
+  pts = pts
+    .sort((a, b) => a.time - b.time)
+    .filter(p => { if (seen.has(p.time)) return false; seen.add(p.time); return true; });
 
   _eqSeries.setData(pts);
   _eqChart.timeScale().fitContent();
