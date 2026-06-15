@@ -992,9 +992,13 @@ _HTML = """<!DOCTYPE html>
   .ct-dashlet-footer { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 11px; flex-wrap: wrap; }
   .ct-stat { color: var(--muted); }
   .ct-stat span { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
-  .ct-type-btns { display: flex; gap: 3px; margin-left: auto; }
+  .ct-tf-btns { display: flex; gap: 2px; margin-left: auto; margin-right: 4px; }
+  .ct-tf-btn { background: none; border: 1px solid transparent; border-radius: 3px; color: var(--muted); font-size: 9px; font-weight: 700; padding: 1px 5px; cursor: pointer; letter-spacing: .3px; }
+  .ct-tf-btn.active, .ct-tf-btn:hover { background: var(--surface2); color: var(--text); border-color: var(--border); }
+  .ct-type-btns { display: flex; gap: 3px; }
   .ct-type-btn { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); font-size: 10px; font-weight: 700; padding: 2px 7px; cursor: pointer; }
   .ct-type-btn.active { background: var(--surface2); color: var(--text); border-color: var(--accent); }
+  .ct-crosshair-tooltip { display: none; position: absolute; top: 6px; background: rgba(13,17,23,.88); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; font-size: 10.5px; color: var(--text); font-family: var(--mono); pointer-events: none; white-space: nowrap; z-index: 10; }
   .eq-range-btn { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); font-size: 10px; font-weight: 700; padding: 2px 8px; cursor: pointer; transition: all .15s; }
   .eq-range-btn.active, .eq-range-btn:hover { background: var(--surface2); color: var(--text); border-color: var(--accent); }
 
@@ -2799,8 +2803,12 @@ const _POPULAR = ['MSFT','AMZN','GOOGL','META','NFLX','AMD','INTC','JPM','BAC',
                   'COIN','SOL','DOGE','XRP','SPY','QQQ','ROKU','UBER','PLTR','RIVN','SOFI'];
 
 let _ctWatchlist = [];   // current ordered watchlist
-let _ctCharts = {};      // symbol → {chart, candle, line, pred, type}
+let _ctCharts = {};      // symbol → {chart, candle, line, pred, type} | null (pending)
 let _ctSortable = null;
+let _ctTimeframe = '1M'; // global timeframe: '5D','1M','3M','All'
+let _ctCrosshairLocked = false; // prevent crosshair sync re-entrancy
+
+const _CT_TF_DAYS = { '5D': 5, '1M': 30, '3M': 90, 'All': Infinity };
 
 function ctInitSortable() {
   if (_ctSortable) return;
@@ -2844,14 +2852,23 @@ function ctAddDashlet(sym) {
   card.className = 'ct-dashlet';
   card.id = 'ct-card-' + sym;
   card.dataset.sym = sym;
+  const tfs = ['5D','1M','3M','All'];
+  const tfBtns = tfs.map(tf =>
+    `<button class="ct-tf-btn${tf===_ctTimeframe?' active':''}" onclick="ctSetTimeframe('${tf}')">${tf}</button>`
+  ).join('');
+
   card.innerHTML = `
     <div class="ct-dashlet-header">
       <span class="ct-dashlet-sym">${escHtml(sym)}</span>
       <span class="ct-dashlet-price" id="ct-price-${escHtml(sym)}">—</span>
       <span class="ct-dashlet-sig" id="ct-sig-${escHtml(sym)}"></span>
+      <div class="ct-tf-btns">${tfBtns}</div>
       <button class="ct-dashlet-remove" onclick="event.stopPropagation();ctRemoveSymbol('${escHtml(sym)}')" title="Remove from watchlist">✕</button>
     </div>
-    <div class="ct-chart-area" id="ct-chart-${escHtml(sym)}"></div>
+    <div style="position:relative">
+      <div class="ct-chart-area" id="ct-chart-${escHtml(sym)}"></div>
+      <div class="ct-crosshair-tooltip" id="ct-tip-${escHtml(sym)}"></div>
+    </div>
     <div class="ct-dashlet-footer">
       <span class="ct-stat">RSI <span id="ct-rsi-${escHtml(sym)}">—</span></span>
       <span class="ct-stat">MACD <span id="ct-macd-${escHtml(sym)}">—</span></span>
@@ -2861,8 +2878,12 @@ function ctAddDashlet(sym) {
       </div>
     </div>`;
   grid.appendChild(card);
-  // Defer chart creation until the tab is visible — creating at width=0 breaks LightweightCharts
   _ctCharts[sym] = null;  // pending init
+
+  // If Charts tab already active, init right away
+  if (document.getElementById('tab-charts')?.classList.contains('active')) {
+    requestAnimationFrame(() => ctInitChart(sym));
+  }
 }
 
 function ctInitChart(sym) {
@@ -2893,6 +2914,45 @@ function ctInitChart(sym) {
     if (el.clientWidth > 0) chart.applyOptions({ width: el.clientWidth });
   }).observe(el);
   _ctCharts[sym] = { chart, candle, line, pred, type: 'candles' };
+
+  // Synchronized crosshair — when this chart moves, update all others
+  chart.subscribeCrosshairMove(param => {
+    if (_ctCrosshairLocked) return;
+    _ctCrosshairLocked = true;
+    const tipEl = document.getElementById('ct-tip-' + sym);
+    if (!param.time) {
+      if (tipEl) tipEl.style.display = 'none';
+      Object.values(_ctCharts).forEach(inst => {
+        if (inst && inst !== _ctCharts[sym]) inst.chart.clearCrosshairPosition();
+      });
+      _ctCrosshairLocked = false;
+      return;
+    }
+    // Show tooltip on this chart
+    if (tipEl && param.seriesData) {
+      const d = param.seriesData.get(candle) || param.seriesData.get(line);
+      if (d) {
+        const o = d.open ?? d.value, c2 = d.close ?? d.value;
+        const chg = o ? ((c2 - o) / o * 100).toFixed(2) : null;
+        const col = (d.close ?? d.value) >= (d.open ?? d.value) ? '#00D4AA' : '#f85149';
+        tipEl.innerHTML = d.close != null
+          ? `O:${d.open?.toFixed(2)} H:${d.high?.toFixed(2)} L:${d.low?.toFixed(2)} <strong style="color:${col}">C:${d.close?.toFixed(2)}</strong>${chg ? ` <span style="color:${col}">${chg>=0?'+':''}${chg}%</span>` : ''}`
+          : `<strong style="color:${col}">${(d.value||0).toFixed(2)}</strong>`;
+        if (param.point) {
+          tipEl.style.display = 'block';
+          tipEl.style.left = Math.min(param.point.x, el.clientWidth - tipEl.offsetWidth - 8) + 'px';
+        }
+      }
+    }
+    // Push crosshair to all other initialized charts at same time
+    Object.entries(_ctCharts).forEach(([s, inst]) => {
+      if (s === sym || !inst) return;
+      const tgt = inst.type === 'candles' ? inst.candle : inst.line;
+      try { inst.chart.setCrosshairPosition(NaN, param.time, tgt); } catch(_){}
+    });
+    _ctCrosshairLocked = false;
+  });
+
   ctLoadChart(sym);
 }
 
@@ -2931,29 +2991,53 @@ async function ctLoadChart(sym) {
     const data = await res.json();
     const candles = (data.candles || []).sort((a, b) => a.time - b.time);
     _lastCandles[sym] = candles;
-    inst.candle.setData(candles);
-    inst.line.setData(candles.map(c => ({ time: c.time, value: c.close })));
-    if (candles.length >= 5) inst.pred.setData(buildPrediction(candles));
-    else inst.pred.setData([]);
+    ctApplyTimeframeToSym(sym);  // applies current _ctTimeframe + markers
 
-    // Trade markers
-    const cards = (window._flashcards || []).filter(c => c.symbol === sym);
-    const markers = [];
-    for (const c of cards) {
-      const ts = c.timestamp ? Math.floor(new Date(c.timestamp).getTime() / 1000) : null;
-      if (!ts || !candles.length) continue;
-      const nearest = candles.reduce((a,b) => Math.abs(b.time-ts)<Math.abs(a.time-ts)?b:a);
-      if (c.action === 'BUY') markers.push({ time: nearest.time, position: 'belowBar', color: '#3fb950', shape: 'arrowUp', text: 'B', size: 1 });
-      if (c.exit_price != null) {
-        const exitTs = ts + Math.round((c.hold_duration_hours || 1) * 3600);
-        const ne = candles.reduce((a,b) => Math.abs(b.time-exitTs)<Math.abs(a.time-exitTs)?b:a);
-        markers.push({ time: ne.time, position: 'aboveBar', color: c.pnl_pct>0?'#00D4AA':'#f85149', shape: 'arrowDown', text: c.pnl_pct!=null?(c.pnl_pct>=0?'+':'')+c.pnl_pct.toFixed(1)+'%':'S', size: 1 });
-      }
-    }
-    markers.sort((a,b) => a.time - b.time);
-    try { inst.candle.setMarkers(markers); } catch(_){}
-    inst.chart.timeScale().fitContent();
   } catch(e) { console.error('ct chart error', sym, e); }
+}
+
+function ctApplyTimeframeToSym(sym) {
+  const inst = _ctCharts[sym];
+  const all = _lastCandles[sym];
+  if (!inst || !all || !all.length) return;
+
+  const days = _CT_TF_DAYS[_ctTimeframe] ?? Infinity;
+  const cutoff = isFinite(days) ? (Date.now()/1000 - days * 86400) : 0;
+  const candles = all.filter(c => c.time >= cutoff);
+  if (!candles.length) return;
+
+  inst.candle.setData(candles);
+  inst.line.setData(candles.map(c => ({ time: c.time, value: c.close })));
+  if (candles.length >= 5) inst.pred.setData(buildPrediction(candles));
+  else inst.pred.setData([]);
+
+  // Trade markers
+  const cards = (window._flashcards || []).filter(c => c.symbol === sym);
+  const markers = [];
+  for (const c of cards) {
+    const ts = c.timestamp ? Math.floor(new Date(c.timestamp).getTime() / 1000) : null;
+    if (!ts || ts < cutoff) continue;
+    const nearest = candles.reduce((a,b) => Math.abs(b.time-ts)<Math.abs(a.time-ts)?b:a);
+    if (c.action === 'BUY') markers.push({ time: nearest.time, position: 'belowBar', color: '#3fb950', shape: 'arrowUp', text: 'B', size: 1 });
+    if (c.exit_price != null) {
+      const exitTs = ts + Math.round((c.hold_duration_hours || 1) * 3600);
+      const ne = candles.reduce((a,b) => Math.abs(b.time-exitTs)<Math.abs(a.time-exitTs)?b:a);
+      markers.push({ time: ne.time, position: 'aboveBar', color: c.pnl_pct>0?'#00D4AA':'#f85149', shape: 'arrowDown', text: c.pnl_pct!=null?(c.pnl_pct>=0?'+':'')+c.pnl_pct.toFixed(1)+'%':'S', size: 1 });
+    }
+  }
+  markers.sort((a,b) => a.time - b.time);
+  try { inst.candle.setMarkers(markers); } catch(_){}
+  inst.chart.timeScale().fitContent();
+}
+
+function ctSetTimeframe(tf) {
+  _ctTimeframe = tf;
+  // Update active state on every dashlet's TF buttons
+  document.querySelectorAll('.ct-tf-btn').forEach(b => b.classList.toggle('active', b.textContent === tf));
+  // Re-render all initialized charts with the new timeframe
+  Object.keys(_ctCharts).forEach(sym => {
+    if (_ctCharts[sym]) ctApplyTimeframeToSym(sym);
+  });
 }
 
 function ctRefreshSignals() {
