@@ -417,10 +417,8 @@ Be concise. findings and risks should each have 2–4 items. Do not include any 
     # ── Main tick ────────────────────────────────────────────────────────────
 
     def _tick(self) -> None:
-        if not _is_market_hours():
-            self._update_dashboard(trading=False)
-            return
-
+        # Always compute signals so the ticker and dashboard show live prices,
+        # even outside market hours.  Trading only executes when the market is open.
         signals = []
         signal_map: dict[str, SignalResult] = {}
 
@@ -444,6 +442,10 @@ Be concise. findings and risks should each have 2–4 items. Do not include any 
                     logger.error("Signal error for %s: %s", futures[fut], exc)
 
         self._latest_signals = signals
+
+        if not _is_market_hours():
+            self._update_dashboard(trading=False)
+            return
 
         for acct in self._accounts:
             try:

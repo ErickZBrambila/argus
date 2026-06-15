@@ -1390,6 +1390,21 @@ _HTML = """<!DOCTYPE html>
   body.hide-values .private { filter: blur(7px); user-select: none; transition: filter .2s; }
   body.hide-values .private:hover { filter: blur(0); transition: filter .05s; }
 
+  /* ── Timezone picker ────────────────────────────────────────────────────── */
+  .tz-select {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    font-family: var(--mono);
+    padding: 4px 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    outline: none;
+    transition: border-color .15s, color .15s;
+  }
+  .tz-select:hover, .tz-select:focus { border-color: var(--accent); color: var(--text); }
+
   /* ── Price chart ────────────────────────────────────────────────────────── */
   .chart-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
   .chart-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
@@ -1467,6 +1482,7 @@ _HTML = """<!DOCTYPE html>
         <span class="countdown-val" id="countdown">—</span>
       </div>
       <div class="badges" id="badges"></div>
+      <select class="tz-select" id="tz-select" onchange="applyTz(this.value)" title="Chart timezone"></select>
       <button class="btn-eye" id="btn-eye" onclick="toggleValues()" title="Show/hide dollar amounts">👁</button>
     </div>
   </header>
@@ -1873,6 +1889,64 @@ function renderPerformance(perf) {
 let pendingCloseSymbol = null;
 let valuesHidden = true;
 let _nextScanAt = null;
+
+// ── Timezone preference ────────────────────────────────────────────────────────
+// List of selectable timezones with short labels
+const _TZ_OPTIONS = [
+  { tz: 'America/New_York',    label: 'ET' },
+  { tz: 'America/Chicago',     label: 'CT' },
+  { tz: 'America/Denver',      label: 'MT' },
+  { tz: 'America/Los_Angeles', label: 'PT' },
+  { tz: 'America/Anchorage',   label: 'AKT' },
+  { tz: 'Pacific/Honolulu',    label: 'HT' },
+];
+
+function _detectTz() {
+  const sys = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return localStorage.getItem('argus_tz') || sys;
+}
+
+let _tz = _detectTz();
+
+function _fmtChartTime(ts) {
+  return new Date(ts * 1000).toLocaleTimeString('en-US', {
+    timeZone: _tz, hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+}
+
+function applyTz(tz) {
+  _tz = tz;
+  localStorage.setItem('argus_tz', tz);
+  const loc = { localization: { timeFormatter: _fmtChartTime } };
+  try { if (window._chart)   window._chart.applyOptions(loc);   } catch(_) {}
+  try { if (window._eqChart) window._eqChart.applyOptions(loc); } catch(_) {}
+  // Reapply to any open dashlet charts
+  if (typeof _ctCharts !== 'undefined') {
+    Object.values(_ctCharts).forEach(d => {
+      try { if (d && d.chart) d.chart.applyOptions(loc); } catch(_) {}
+    });
+  }
+}
+
+function _initTzSelect() {
+  const sel = document.getElementById('tz-select');
+  if (!sel) return;
+  const sys = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const saved = localStorage.getItem('argus_tz');
+  const current = saved || sys;
+  _tz = current;
+
+  // Build options list; add "System" entry if system TZ isn't in our list
+  const inList = _TZ_OPTIONS.some(o => o.tz === sys);
+  const opts = inList ? _TZ_OPTIONS
+    : [{ tz: sys, label: 'Auto' }, ..._TZ_OPTIONS];
+
+  sel.innerHTML = opts.map(o =>
+    `<option value="${o.tz}"${o.tz === current ? ' selected' : ''}>${o.label}</option>`
+  ).join('');
+}
+
+document.addEventListener('DOMContentLoaded', _initTzSelect);
 
 // ── Countdown timer (runs every second independently of SSE) ──────────────────
 function _updateCountdown() {
@@ -2544,16 +2618,13 @@ const _CHART_OPTS = {
   rightPriceScale: { borderColor: '#2a2f3e' },
   timeScale: { borderColor: '#2a2f3e', timeVisible: true },
   handleScroll: true, handleScale: true,
-  localization: {
-    timeFormatter: ts => new Date(ts * 1000).toLocaleTimeString('en-US', {
-      timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
-    }),
-  },
+  localization: { timeFormatter: _fmtChartTime },
 };
 
 function initChart() {
   const el = document.getElementById('price-chart');
   _chart = LightweightCharts.createChart(el, _CHART_OPTS);
+  window._chart = _chart;
 
   _candleSeries = _chart.addCandlestickSeries({
     upColor: '#00D4AA', downColor: '#f85149',
@@ -2863,12 +2934,9 @@ function eqInit() {
     crosshair: { mode: LightweightCharts.CrosshairMode.Magnet },
     handleScroll: false,
     handleScale: false,
-    localization: {
-      timeFormatter: ts => new Date(ts * 1000).toLocaleTimeString('en-US', {
-        timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
-      }),
-    },
+    localization: { timeFormatter: _fmtChartTime },
   });
+  window._eqChart = _eqChart;
   _eqSeries = _eqChart.addAreaSeries({
     lineColor: '#00D4AA',
     topColor: 'rgba(0,212,170,.18)',
