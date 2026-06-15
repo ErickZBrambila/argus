@@ -750,7 +750,6 @@ _HTML = """<!DOCTYPE html>
     background: #0d1117;
     border-bottom: 1px solid var(--border);
     height: 34px;
-    overflow: hidden;
     position: sticky;
     top: 60px;
     z-index: 99;
@@ -758,12 +757,21 @@ _HTML = """<!DOCTYPE html>
     align-items: center;
     width: 100%;
   }
+  .ticker-scrollport {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
   .ticker-track {
     display: inline-flex;
     align-items: center;
     white-space: nowrap;
     animation: ticker-scroll linear infinite;
     will-change: transform;
+    flex-shrink: 0;
   }
   .ticker-track:hover { animation-play-state: paused; cursor: default; }
   .ticker-speed-wrap { display: flex; gap: 2px; padding: 0 6px; flex-shrink: 0; background: #0d1117; border-left: 1px solid var(--border); height: 100%; align-items: center; }
@@ -1412,11 +1420,13 @@ _HTML = """<!DOCTYPE html>
     </div>
   </header>
   <div class="ticker-bar">
-    <div class="ticker-track" id="ticker-track"></div>
+    <div class="ticker-scrollport">
+      <div class="ticker-track" id="ticker-track"></div>
+    </div>
     <div class="ticker-speed-wrap">
-      <button class="ticker-speed-btn" onclick="tickerSpeed(0.4)" title="Slow">🐢</button>
-      <button class="ticker-speed-btn active" onclick="tickerSpeed(1)" title="Normal">▶</button>
-      <button class="ticker-speed-btn" onclick="tickerSpeed(2.5)" title="Fast">⚡</button>
+      <button class="ticker-speed-btn" onclick="tickerSpeed(this,0.4)" title="Slow">🐢</button>
+      <button class="ticker-speed-btn active" onclick="tickerSpeed(this,1)" title="Normal">▶</button>
+      <button class="ticker-speed-btn" onclick="tickerSpeed(this,2.5)" title="Fast">⚡</button>
     </div>
   </div>
   <nav class="tab-bar">
@@ -1714,16 +1724,8 @@ function switchTab(name) {
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
   if (name === 'charts') {
     ctInitSortable();
-    // Charts were created while tab was hidden (width=0) — resize now that they're visible
-    requestAnimationFrame(() => {
-      Object.keys(_ctCharts).forEach(sym => {
-        const el = document.getElementById('ct-chart-' + sym);
-        if (el && _ctCharts[sym]) {
-          _ctCharts[sym].chart.applyOptions({ width: el.clientWidth });
-          _ctCharts[sym].chart.timeScale().fitContent();
-        }
-      });
-    });
+    // Initialize any charts that were deferred (created while tab was hidden)
+    requestAnimationFrame(ctInitChartsForVisible);
   }
 }
 
@@ -2675,11 +2677,10 @@ async function fetchNewsHeadlines() {
 }
 
 let _tickerSpeedMult = 1;
-function tickerSpeed(mult) {
+function tickerSpeed(btn, mult) {
   _tickerSpeedMult = mult;
   document.querySelectorAll('.ticker-speed-btn').forEach(b => b.classList.remove('active'));
-  event.currentTarget.classList.add('active');
-  // Re-apply duration with new multiplier
+  btn.classList.add('active');
   const track = document.getElementById('ticker-track');
   if (track && track.scrollWidth) {
     const singleW = track.scrollWidth / 6;
@@ -2860,9 +2861,13 @@ function ctAddDashlet(sym) {
       </div>
     </div>`;
   grid.appendChild(card);
+  // Defer chart creation until the tab is visible — creating at width=0 breaks LightweightCharts
+  _ctCharts[sym] = null;  // pending init
+}
 
-  // Init chart instance
+function ctInitChart(sym) {
   const el = document.getElementById('ct-chart-' + sym);
+  if (!el || _ctCharts[sym]) return;  // already initialized or element gone
   const chart = LightweightCharts.createChart(el, {
     ..._CHART_OPTS,
     layout: { ..._CHART_OPTS.layout },
@@ -2884,10 +2889,18 @@ function ctAddDashlet(sym) {
     lineStyle: LightweightCharts.LineStyle.Dashed,
     lastValueVisible: false, priceLineVisible: false,
   });
-  new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth })).observe(el);
+  new ResizeObserver(() => {
+    if (el.clientWidth > 0) chart.applyOptions({ width: el.clientWidth });
+  }).observe(el);
   _ctCharts[sym] = { chart, candle, line, pred, type: 'candles' };
-
   ctLoadChart(sym);
+}
+
+function ctInitChartsForVisible() {
+  // Initialize any pending (null) charts now that the tab is visible
+  Object.keys(_ctCharts).forEach(sym => {
+    if (_ctCharts[sym] === null) ctInitChart(sym);
+  });
 }
 
 function ctRemoveDashlet(sym) {
