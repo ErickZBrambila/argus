@@ -588,13 +588,14 @@ async def get_chart(symbol: str) -> dict:
                         continue
                     import datetime as _dt
                     t = int(_dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
-                candles.append({
-                    "time":  t,
-                    "open":  float(bar.get("open_price")  or bar.get("open")  or 0),
-                    "high":  float(bar.get("high_price")  or bar.get("high")  or 0),
-                    "low":   float(bar.get("low_price")   or bar.get("low")   or 0),
-                    "close": float(bar.get("close_price") or bar.get("close") or 0),
-                })
+                o = float(bar.get("open_price")  or bar.get("open")  or 0)
+                h = float(bar.get("high_price")  or bar.get("high")  or 0)
+                lo= float(bar.get("low_price")   or bar.get("low")   or 0)
+                c = float(bar.get("close_price") or bar.get("close") or 0)
+                # Skip zero-price or zero-spread bars — Robinhood placeholder data
+                if not c or (o == h == lo == c):
+                    continue
+                candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c})
             except Exception:
                 pass
         return {"candles": candles, "symbol": symbol}
@@ -1389,6 +1390,9 @@ _HTML = """<!DOCTYPE html>
   .token-row:last-of-type { border-bottom: none; }
   .token-label { color: var(--muted); }
   .token-val { font-family: var(--mono); font-weight: 600; font-size: 12px; }
+  .token-val.green  { color: var(--green); }
+  .token-val.yellow { color: var(--yellow, #f0b429); }
+  .token-val.red    { color: var(--danger); }
   .token-cost { font-size: 20px; font-weight: 700; margin-top: 4px; margin-bottom: 10px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
   /* ── Log tail ───────────────────────────────────────────────────────────── */
@@ -1718,6 +1722,7 @@ _HTML = """<!DOCTYPE html>
         </div>
       </div>
       <div id="price-chart"></div>
+      <div id="chart-sparse-warn" style="display:none;margin:6px 0 0;padding:6px 10px;background:rgba(240,180,41,.08);border:1px solid rgba(240,180,41,.3);border-radius:6px;font-size:12px;color:#f0b429;"></div>
       <div class="chart-legend">
         <div class="legend-item"><div class="legend-dot" style="background:#00D4AA"></div> Price</div>
         <div class="legend-item"><div class="legend-dot" style="background:#3fb950"></div> BUY</div>
@@ -2045,8 +2050,17 @@ function _detectTz() {
 
 let _tz = _detectTz();
 
-function _fmtChartTime(ts) {
-  return new Date(ts * 1000).toLocaleTimeString('en-US', {
+function _fmtChartTime(ts, tickMarkType) {
+  // tickMarkFormatter receives (time, tickMarkType): 0=Year,1=Month,2=DayOfMonth,3=Time,4=TimeWithSeconds
+  // localization.timeFormatter receives only (time) — tickMarkType is undefined there.
+  // Daily candles from Robinhood are midnight UTC (hourUtc===0, minuteUtc===0).
+  const d = new Date(ts * 1000);
+  const isDaily = (d.getUTCHours() === 0 && d.getUTCMinutes() === 0)
+               || (tickMarkType !== undefined && tickMarkType <= 2);
+  if (isDaily) {
+    return d.toLocaleDateString('en-US', { timeZone: _tz, month: 'short', day: 'numeric' });
+  }
+  return d.toLocaleTimeString('en-US', {
     timeZone: _tz, hour: '2-digit', minute: '2-digit', hour12: false,
   });
 }
@@ -2197,6 +2211,17 @@ function renderTokenUsage(usage) {
   const g = usage.gemini || {};
   const fmtN = n => (n || 0).toLocaleString();
   const fmtC = n => '$' + (n || 0).toFixed(4);
+  const fmtAvg = n => '$' + (n || 0).toFixed(5);
+
+  // Avg cost per call
+  const cAvg = c.calls ? c.cost_usd / c.calls : 0;
+  const gAvg = g.calls ? g.cost_usd / g.calls : 0;
+  const totalAvg = usage.total_calls ? usage.total_cost_usd / usage.total_calls : 0;
+
+  // Color thresholds: Claude thinking-off ≈ $0.0025/call; thinking-on ≈ $0.010/call
+  const cAvgCls = cAvg > 0.005 ? 'red' : cAvg > 0.002 ? 'yellow' : cAvg > 0 ? 'green' : '';
+  // Gemini baseline ≈ $0.0001/call
+  const gAvgCls = gAvg > 0.001 ? 'red' : gAvg > 0.0005 ? 'yellow' : gAvg > 0 ? 'green' : '';
 
   const aiStatus = (window._argusState && window._argusState.ai_status) || {};
   const aiModels = (window._argusState && window._argusState.ai_models) || {};
@@ -2214,6 +2239,7 @@ function renderTokenUsage(usage) {
       <div class="token-model-title claude">${statusDot('claude')}Claude · ${claudeModel}</div>
       <div class="token-cost ${c.cost_usd > 0.5 ? 'red' : 'green'}">${fmtC(c.cost_usd)}</div>
       <div class="token-row"><span class="token-label">Calls</span><span class="token-val">${fmtN(c.calls)}</span></div>
+      <div class="token-row"><span class="token-label">Avg/call</span><span class="token-val ${cAvgCls}" title="${cAvg > 0.005 ? 'High — thinking may be on' : cAvg > 0.002 ? 'Moderate' : 'Normal'}">${fmtAvg(cAvg)}</span></div>
       <div class="token-row"><span class="token-label">Input</span><span class="token-val">${fmtN(c.input_tokens)}</span></div>
       <div class="token-row"><span class="token-label">Output</span><span class="token-val">${fmtN(c.output_tokens)}</span></div>
       <div class="token-row"><span class="token-label">Cache read</span><span class="token-val">${fmtN(c.cache_read_tokens)}</span></div>
@@ -2222,6 +2248,7 @@ function renderTokenUsage(usage) {
       <div class="token-model-title gemini">${statusDot('gemini')}Gemini · ${geminiModel}</div>
       <div class="token-cost ${g.cost_usd > 0.1 ? 'yellow' : 'green'}">${fmtC(g.cost_usd)}</div>
       <div class="token-row"><span class="token-label">Calls</span><span class="token-val">${fmtN(g.calls)}</span></div>
+      <div class="token-row"><span class="token-label">Avg/call</span><span class="token-val ${gAvgCls}">${fmtAvg(gAvg)}</span></div>
       <div class="token-row"><span class="token-label">Input</span><span class="token-val">${fmtN(g.input_tokens)}</span></div>
       <div class="token-row"><span class="token-label">Output</span><span class="token-val">${fmtN(g.output_tokens)}</span></div>
     </div>
@@ -2229,6 +2256,7 @@ function renderTokenUsage(usage) {
       <div class="token-model-title total">Total Today</div>
       <div class="token-cost">${fmtC(usage.total_cost_usd)}</div>
       <div class="token-row"><span class="token-label">Total calls</span><span class="token-val">${fmtN(usage.total_calls)}</span></div>
+      <div class="token-row"><span class="token-label">Avg/call</span><span class="token-val">${fmtAvg(totalAvg)}</span></div>
       <div class="token-row"><span class="token-label">Date</span><span class="token-val muted">${usage.date || '—'}</span></div>
     </div>`;
 }
@@ -2883,11 +2911,22 @@ async function loadChart(symbol) {
     _candleSeries.setData(candles);
     _lineSeries.setData(candles.map(c => ({ time: c.time, value: c.close })));
 
-    // Prediction line
+    // Prediction line — needs at least 5 points for a meaningful trend
     if (candles.length >= 5) {
       _predSeries.setData(buildPrediction(candles));
     } else {
       _predSeries.setData([]);
+    }
+
+    // Sparse data warning
+    const warn = document.getElementById('chart-sparse-warn');
+    if (warn) {
+      if (candles.length < 5) {
+        warn.textContent = `Only ${candles.length} day${candles.length === 1 ? '' : 's'} of data available for ${symbol} — recently listed or thinly traded.`;
+        warn.style.display = 'block';
+      } else {
+        warn.style.display = 'none';
+      }
     }
 
     placeTradeMarkers(symbol, candles);

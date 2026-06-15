@@ -5,7 +5,9 @@ Live mode uses robin_stocks; paper mode simulates orders locally.
 
 from __future__ import annotations
 
+import json
 import logging
+import pathlib
 import re
 import threading
 import uuid
@@ -69,6 +71,10 @@ class RobinhoodBroker:
         self._paper_positions: dict[str, dict] = {}
         self._paper_equity = 10_000.0
         self._paper_lock = threading.Lock()
+        # Persist path keyed by account number so multi-account paper states don't collide
+        _acct_suffix = f"_{account_number}" if account_number else ""
+        self._paper_state_path = pathlib.Path(__file__).parent.parent.parent / f"paper_state{_acct_suffix}.json"
+        self._paper_load()
 
         if not paper:
             self._login()
@@ -134,11 +140,51 @@ class RobinhoodBroker:
         data = rh.stocks.get_latest_price(symbol)
         return float(data[0])
 
+    def _paper_load(self) -> None:
+        try:
+            if not self._paper_state_path.exists():
+                return
+            data = json.loads(self._paper_state_path.read_text())
+            self._paper_equity    = float(data.get("equity", 10_000.0))
+            self._paper_positions = {
+                sym: {"qty": float(p["qty"]), "avg_price": float(p["avg_price"])}
+                for sym, p in data.get("positions", {}).items()
+            }
+            logger.info("[PAPER] Restored state: equity=$%.2f, %d position(s)",
+                        self._paper_equity, len(self._paper_positions))
+        except Exception as exc:
+            logger.warning("[PAPER] Could not load paper state: %s", exc)
+
+    def _paper_save(self) -> None:
+        """Must be called with _paper_lock held."""
+        try:
+            self._paper_state_path.write_text(json.dumps({
+                "equity":    round(self._paper_equity, 6),
+                "positions": {
+                    sym: {"qty": round(p["qty"], 8), "avg_price": round(p["avg_price"], 6)}
+                    for sym, p in self._paper_positions.items()
+                },
+            }))
+        except Exception as exc:
+            logger.debug("[PAPER] Could not save paper state: %s", exc)
+
     def _paper_get_price(self, symbol: str) -> float:
         try:
             return self._live_get_price(symbol)
         except Exception:
-            return 100.0
+            pass
+        # Fallback to yfinance for crypto (Robinhood auth may be unavailable)
+        if symbol in CRYPTO_SYMBOLS:
+            try:
+                import yfinance as yf
+                t = yf.Ticker(f"{symbol}-USD")
+                info = t.fast_info
+                px = float(info.last_price or info.previous_close or 0)
+                if px > 0:
+                    return px
+            except Exception:
+                pass
+        raise RuntimeError(f"Cannot determine price for {symbol} in paper mode")
 
     def get_portfolio_equity(self) -> float:
         if self.paper:
@@ -288,6 +334,7 @@ class RobinhoodBroker:
                 self._paper_positions[symbol] = {"qty": qty, "avg_price": price}
 
             self._paper_equity -= cost
+            self._paper_save()
 
         order_id = str(uuid.uuid4())
         logger.info("[PAPER] BUY %s %.4f @ $%.4f", symbol, qty, price)
@@ -308,6 +355,7 @@ class RobinhoodBroker:
                 del self._paper_positions[symbol]
             else:
                 self._paper_positions[symbol]["qty"] = remaining
+            self._paper_save()
 
         order_id = str(uuid.uuid4())
         logger.info("[PAPER] SELL %s %.4f @ $%.4f", symbol, qty, price)
