@@ -779,6 +779,9 @@ _HTML = """<!DOCTYPE html>
   .badge-session-closed     { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
   .countdown-wrap { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted); }
   .countdown-val  { font-family: var(--mono); color: var(--text); font-weight: 700; min-width: 38px; letter-spacing: 0.5px; }
+  .market-countdown { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted); padding: 3px 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; }
+  .market-countdown .mc-label { white-space: nowrap; }
+  .market-countdown .mc-val { font-family: var(--mono); font-weight: 700; font-size: 12px; color: var(--text); letter-spacing: 0.5px; min-width: 52px; }
 
   /* ── Ticker bar ─────────────────────────────────────────────────────────── */
   .ticker-bar {
@@ -1455,6 +1458,10 @@ _HTML = """<!DOCTYPE html>
     </span>
     <div class="header-right">
       <span class="badge badge-session-closed" id="session-badge">—</span>
+      <div class="market-countdown" id="market-countdown">
+        <span class="mc-label" id="mc-label">—</span>
+        <span class="mc-val" id="mc-val">—</span>
+      </div>
       <div class="countdown-wrap">
         <span>Next scan</span>
         <span class="countdown-val" id="countdown">—</span>
@@ -1890,6 +1897,60 @@ function _updateSessionBadge(session) {
   el.textContent = _SESSION_LABELS[session] || session.toUpperCase();
   el.className = `badge badge-session-${session || 'closed'}`;
 }
+
+// ── Market open/close countdown ───────────────────────────────────────────────
+function _marketCountdown() {
+  const labelEl = document.getElementById('mc-label');
+  const valEl   = document.getElementById('mc-val');
+  if (!labelEl || !valEl) return;
+
+  // All times in ET (America/New_York)
+  const now = new Date();
+  const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  // Parse "MM/DD/YYYY, HH:MM:SS"
+  const [datePart, timePart] = etStr.split(', ');
+  const [m, d, y] = datePart.split('/').map(Number);
+  const [h, min, s] = timePart.split(':').map(Number);
+  const dow = new Date(`${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}T${timePart}`).getDay();
+  const secOfDay = h * 3600 + min * 60 + s;
+
+  const OPEN  = 9  * 3600 + 30 * 60;  // 9:30 AM ET
+  const CLOSE = 16 * 3600;             // 4:00 PM ET
+  const isWeekday = dow >= 1 && dow <= 5;
+
+  function fmt(secs) {
+    secs = Math.max(0, secs);
+    const hh = Math.floor(secs / 3600);
+    const mm = Math.floor((secs % 3600) / 60);
+    const ss = secs % 60;
+    if (hh > 0) return `${hh}h ${String(mm).padStart(2,'0')}m`;
+    return `${String(mm).padStart(2,'0')}m ${String(ss).padStart(2,'0')}s`;
+  }
+
+  if (!isWeekday) {
+    // Weekend — find seconds until Monday 9:30 AM
+    const daysUntilMon = dow === 0 ? 1 : 2;
+    const secsUntilMon = daysUntilMon * 86400 + OPEN - secOfDay;
+    labelEl.textContent = 'Opens in';
+    valEl.textContent   = fmt(secsUntilMon);
+  } else if (secOfDay < OPEN) {
+    labelEl.textContent = 'Opens in';
+    valEl.textContent   = fmt(OPEN - secOfDay);
+  } else if (secOfDay < CLOSE) {
+    labelEl.textContent = 'Closes in';
+    valEl.textContent   = fmt(CLOSE - secOfDay);
+  } else {
+    // After close — next open is tomorrow (or Monday if Friday)
+    const daysAhead = dow === 5 ? 3 : 1;
+    const secsUntilNext = daysAhead * 86400 + OPEN - secOfDay;
+    labelEl.textContent = 'Opens in';
+    valEl.textContent   = fmt(secsUntilNext);
+  }
+}
+_marketCountdown();
+setInterval(_marketCountdown, 1000);
 
 // ── Interval selector ─────────────────────────────────────────────────────────
 async function setScanInterval(val) {
