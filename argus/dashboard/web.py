@@ -602,6 +602,23 @@ def _yf_chart_fallback(symbol: str, existing: list) -> list:
                 candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c})
             except Exception:
                 pass
+        # Patch today's candle with real-time price while market is open —
+        # the daily download snapshots whatever price was last baked in.
+        if candles:
+            import datetime as _dt
+            today_ts = int(_dt.datetime.combine(_dt.date.today(), _dt.time.min).timestamp())
+            last = candles[-1]
+            if last["time"] == today_ts:
+                try:
+                    live = float(yf.Ticker(yf_sym).fast_info.last_price or 0)
+                    if live > 0:
+                        last["close"] = live
+                        last["high"]  = max(last["high"], live)
+                        last["low"]   = min(last["low"],  live)
+                        logger.info("Patched %s today candle close → %.2f (live)", symbol, live)
+                except Exception:
+                    pass
+
         logger.info("yfinance fallback for %s: %d candles (vs %d from broker)", symbol, len(candles), len(existing))
         return candles if len(candles) > len(existing) else existing
     except Exception as exc:
