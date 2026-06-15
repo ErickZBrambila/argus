@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 CRYPTO_SYMBOLS = {"BTC", "ETH", "DOGE", "SOL", "LTC", "BCH", "ETC"}
 
+_YF_CRYPTO = {s: f"{s}-USD" for s in CRYPTO_SYMBOLS}  # yfinance ticker map
+
 _SYMBOL_RE = re.compile(r"^[A-Z0-9.]{1,10}$")
 
 
@@ -70,6 +72,17 @@ class RobinhoodBroker:
 
         if not paper:
             self._login()
+        else:
+            # Login even in paper mode — Robinhood requires auth for crypto
+            # historicals. Non-fatal: if credentials are missing, equity data
+            # still works and crypto degrades gracefully.
+            try:
+                self._login()
+            except Exception:
+                logger.warning(
+                    "Robinhood login failed in paper mode; "
+                    "crypto historicals will be unavailable"
+                )
 
     # ── Auth ────────────────────────────────────────────────────────────────
 
@@ -95,7 +108,7 @@ class RobinhoodBroker:
             raise
 
     def logout(self) -> None:
-        if not self.paper and self._logged_in:
+        if self._logged_in:
             try:
                 import robin_stocks.robinhood as rh
                 rh.logout()
@@ -188,9 +201,50 @@ class RobinhoodBroker:
                 data = rh.crypto.get_crypto_historicals(symbol, interval=interval, span=span)
             else:
                 data = rh.stocks.get_stock_historicals(symbol, interval=interval, span=span)
-            return data or []
+            if data:
+                return data
         except Exception as exc:
             logger.warning("Could not fetch historicals for %s: %s", symbol, exc)
+
+        # Fallback for crypto: Yahoo Finance requires no auth
+        if symbol in CRYPTO_SYMBOLS:
+            return self._yf_crypto_historicals(symbol, span)
+        return []
+
+    def _yf_crypto_historicals(self, symbol: str, span: str) -> list[dict]:
+        """Fetch crypto OHLCV from Yahoo Finance — no Robinhood auth needed."""
+        try:
+            import yfinance as yf
+            _period = {
+                'day': '5d', 'week': '1mo', 'month': '1mo',
+                '3month': '3mo', 'year': '1y', '5year': '5y',
+            }.get(span, '3mo')
+            df = yf.download(
+                _YF_CRYPTO.get(symbol, f"{symbol}-USD"),
+                period=_period, interval='1d',
+                progress=False, auto_adjust=True,
+            )
+            if df.empty:
+                return []
+            # Flatten MultiIndex columns produced by yfinance
+            if hasattr(df.columns, 'levels'):
+                df.columns = [c[0].lower() for c in df.columns]
+            else:
+                df.columns = [c.lower() for c in df.columns]
+            return [
+                {
+                    "begins_at": str(ts.date()),
+                    "open_price":  str(row.get("open",  0)),
+                    "close_price": str(row.get("close", 0)),
+                    "high_price":  str(row.get("high",  0)),
+                    "low_price":   str(row.get("low",   0)),
+                    "volume":      int(row.get("volume", 0)),
+                    "symbol":      symbol,
+                }
+                for ts, row in df.iterrows()
+            ]
+        except Exception as exc:
+            logger.warning("Yahoo Finance fallback failed for %s: %s", symbol, exc)
             return []
 
     # ── Order execution ──────────────────────────────────────────────────────
