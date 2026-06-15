@@ -567,6 +567,48 @@ async def promote_position(symbol: str, body: dict = {}) -> dict:
     return {"status": "queued", "symbol": symbol, "from": from_account, "to": to_account}
 
 
+def _yf_chart_fallback(symbol: str, existing: list) -> list:
+    """Fetch 3-month daily candles from yfinance.
+
+    Used when the primary broker source returns sparse/placeholder data for
+    newly-listed symbols (e.g. SPCX shortly after its IPO).  Returns the
+    richer dataset — yfinance result if it has more candles, else existing.
+    """
+    try:
+        import yfinance as yf
+        try:
+            from argus.broker.robinhood import CRYPTO_SYMBOLS as _CS
+        except Exception:
+            _CS: set = set()
+        yf_sym = f"{symbol}-USD" if symbol in _CS else symbol
+        df = yf.download(yf_sym, period="3mo", interval="1d", auto_adjust=True, progress=False)
+        if df.empty:
+            return existing
+        # Flatten MultiIndex columns produced by some yfinance versions
+        if hasattr(df.columns, "levels"):
+            df.columns = [c[0].lower() for c in df.columns]
+        else:
+            df.columns = [c.lower() for c in df.columns]
+        candles = []
+        for ts, row in df.iterrows():
+            try:
+                t = int(ts.timestamp())
+                o  = float(row.get("open",  0))
+                h  = float(row.get("high",  0))
+                lo = float(row.get("low",   0))
+                c  = float(row.get("close", 0))
+                if not c or (o == h == lo == c):
+                    continue
+                candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c})
+            except Exception:
+                pass
+        logger.info("yfinance fallback for %s: %d candles (vs %d from broker)", symbol, len(candles), len(existing))
+        return candles if len(candles) > len(existing) else existing
+    except Exception as exc:
+        logger.warning("yfinance chart fallback failed for %s: %s", symbol, exc)
+        return existing
+
+
 @app.get("/api/chart/{symbol}")
 async def get_chart(symbol: str) -> dict:
     symbol = symbol.upper().strip()
@@ -598,6 +640,14 @@ async def get_chart(symbol: str) -> dict:
                 candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c})
             except Exception:
                 pass
+
+        # Robinhood returns sparse or wrong data for newly-listed symbols;
+        # fall back to yfinance when fewer than 5 real candles survived filtering.
+        if len(candles) < 5:
+            candles = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _yf_chart_fallback(symbol, candles)
+            )
+
         return {"candles": candles, "symbol": symbol}
     except Exception as exc:
         logger.warning("Chart data error for %s: %s", symbol, exc)
