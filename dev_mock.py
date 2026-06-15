@@ -75,10 +75,35 @@ _SYMBOL_DB = [
 ]
 
 def _mock_search(query: str) -> list[dict]:
-    q = query.lower().strip()
+    import urllib.request, urllib.parse, json as _json
+    q = query.strip()
+    # Try Yahoo Finance first for real results
+    try:
+        url = (
+            "https://query1.finance.yahoo.com/v1/finance/search"
+            f"?q={urllib.parse.quote(q)}&quotesCount=8&newsCount=0&enableFuzzyQuery=true"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = _json.loads(r.read())
+        results = []
+        for item in data.get("quotes", []):
+            if item.get("quoteType") in ("EQUITY", "CRYPTOCURRENCY", "ETF", "MUTUALFUND"):
+                results.append({
+                    "symbol": item["symbol"],
+                    "name": item.get("longname") or item.get("shortname") or "",
+                })
+            if len(results) >= 6:
+                break
+        if results:
+            return results
+    except Exception:
+        pass
+    # Fallback to local static DB
+    q_lower = q.lower()
     results = []
     for item in _SYMBOL_DB:
-        if q in item["symbol"].lower() or q in item["name"].lower():
+        if q_lower in item["symbol"].lower() or q_lower in item["name"].lower():
             results.append(item)
         if len(results) >= 6:
             break
@@ -385,6 +410,24 @@ def push_loop():
             "flashcard_summary": {
                 "total": 3, "closed": 2, "win_rate": 0.5,
                 "avg_pnl_pct": 1.67, "best_pnl_pct": 5.62, "worst_pnl_pct": -2.29,
+            },
+            "performance": {
+                "closed_trades": 2,
+                "win_rate": 0.5,
+                "avg_pnl_pct": 1.67,
+                "avg_hold_hours": 3.7,
+                "current_streak": 1,
+                "streak_type": "win",
+                "best_trade":  {"symbol": "TSLA", "pnl_pct": 5.62,  "date": "2026-06-13"},
+                "worst_trade": {"symbol": "ETH",  "pnl_pct": -2.29, "date": "2026-06-13"},
+                "by_symbol": {
+                    "TSLA": {"closed": 1, "win_rate": 1.0, "avg_pnl_pct": 5.62},
+                    "ETH":  {"closed": 1, "win_rate": 0.0, "avg_pnl_pct": -2.29},
+                },
+                "by_confidence": {
+                    "60-70%": {"closed": 1, "win_rate": 1.0, "avg_pnl_pct": 5.62},
+                    "70-80%": {"closed": 1, "win_rate": 1.0, "avg_pnl_pct": -2.29},
+                },
             },
             "token_usage": _token_usage(_t),
         }

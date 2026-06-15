@@ -766,6 +766,9 @@ _HTML = """<!DOCTYPE html>
     will-change: transform;
   }
   .ticker-track:hover { animation-play-state: paused; cursor: default; }
+  .ticker-speed-wrap { display: flex; gap: 2px; padding: 0 6px; flex-shrink: 0; background: #0d1117; border-left: 1px solid var(--border); height: 100%; align-items: center; }
+  .ticker-speed-btn { background: none; border: 1px solid transparent; border-radius: 3px; color: var(--muted); font-size: 11px; line-height: 1; padding: 2px 4px; cursor: pointer; transition: all .15s; }
+  .ticker-speed-btn:hover, .ticker-speed-btn.active { border-color: var(--border); color: var(--text); background: var(--surface2); }
   @keyframes ticker-scroll {
     from { transform: translateX(0); }
     to   { transform: translateX(-16.6667%); }  /* 1/6 of 6 copies = seamless */
@@ -1408,7 +1411,14 @@ _HTML = """<!DOCTYPE html>
       <button class="btn-eye" id="btn-eye" onclick="toggleValues()" title="Show/hide dollar amounts">👁</button>
     </div>
   </header>
-  <div class="ticker-bar"><div class="ticker-track" id="ticker-track"></div></div>
+  <div class="ticker-bar">
+    <div class="ticker-track" id="ticker-track"></div>
+    <div class="ticker-speed-wrap">
+      <button class="ticker-speed-btn" onclick="tickerSpeed(0.4)" title="Slow">🐢</button>
+      <button class="ticker-speed-btn active" onclick="tickerSpeed(1)" title="Normal">▶</button>
+      <button class="ticker-speed-btn" onclick="tickerSpeed(2.5)" title="Fast">⚡</button>
+    </div>
+  </div>
   <nav class="tab-bar">
     <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
     <button class="tab-btn" onclick="switchTab('performance')">Performance</button>
@@ -1702,7 +1712,19 @@ function apiFetch(url, opts = {}) {
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.textContent.toLowerCase() === name));
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
-  if (name === 'charts') ctInitSortable();
+  if (name === 'charts') {
+    ctInitSortable();
+    // Charts were created while tab was hidden (width=0) — resize now that they're visible
+    requestAnimationFrame(() => {
+      Object.keys(_ctCharts).forEach(sym => {
+        const el = document.getElementById('ct-chart-' + sym);
+        if (el && _ctCharts[sym]) {
+          _ctCharts[sym].chart.applyOptions({ width: el.clientWidth });
+          _ctCharts[sym].chart.timeScale().fitContent();
+        }
+      });
+    });
+  }
 }
 
 async function promotePosition(symbol, fromAccount) {
@@ -2652,6 +2674,20 @@ async function fetchNewsHeadlines() {
   } catch(_) {}
 }
 
+let _tickerSpeedMult = 1;
+function tickerSpeed(mult) {
+  _tickerSpeedMult = mult;
+  document.querySelectorAll('.ticker-speed-btn').forEach(b => b.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+  // Re-apply duration with new multiplier
+  const track = document.getElementById('ticker-track');
+  if (track && track.scrollWidth) {
+    const singleW = track.scrollWidth / 6;
+    const dur = Math.max(5, Math.round(singleW / (120 * _tickerSpeedMult)));
+    track.style.animationDuration = dur + 's';
+  }
+}
+
 function updateTicker(signals) {
   const track = document.getElementById('ticker-track');
   if (!track || !signals || !signals.length) return;
@@ -2684,10 +2720,10 @@ function updateTicker(signals) {
   // exactly 1/6 of the total (translateX(-16.667%)) for a seamless infinite loop
   track.innerHTML = single.repeat(6);
 
-  // Duration: target ~120px/s — measure actual track width after layout
+  // Duration: target ~120px/s × speed multiplier — measure after layout
   requestAnimationFrame(() => {
     const singleW = track.scrollWidth / 6;
-    const dur = Math.max(15, Math.round(singleW / 120));
+    const dur = Math.max(5, Math.round(singleW / (120 * _tickerSpeedMult)));
     track.style.animationDuration = dur + 's';
   });
 }
