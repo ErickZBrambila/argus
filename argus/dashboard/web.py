@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Shared state injected by main loop
 _state: dict = {}
+_state_lock = threading.Lock()
 _paused: bool = False
 
 # Thread-safe queue: main loop (sync thread) → SSE broadcaster (async thread)
@@ -81,8 +82,10 @@ def clear_approval(trade_id: str) -> None:
 def _push_approvals_state() -> None:
     with _approval_lock:
         approvals = dict(_pending_approvals)
-    _state["pending_approvals"] = approvals
-    _sse_push(json.dumps(_state, default=str))
+    with _state_lock:
+        _state["pending_approvals"] = approvals
+        snapshot = dict(_state)
+    _sse_push(json.dumps(snapshot, default=str))
 
 
 # ── Financial news RSS (background poller) ────────────────────────────────────
@@ -210,9 +213,10 @@ def _run_investigation(symbol: str) -> None:
 def _push_investigation_state() -> None:
     with _investigation_lock:
         inv = dict(_investigations)
-    _state["investigations"] = inv
-    # Push a snapshot to avoid racing with push_state on the main thread
-    _sse_push(json.dumps({**_state, "investigations": inv}, default=str))
+    with _state_lock:
+        _state["investigations"] = inv
+        snapshot = {**_state, "investigations": inv}
+    _sse_push(json.dumps(snapshot, default=str))
 
 
 def _sse_push(data: str) -> None:
@@ -313,15 +317,16 @@ def push_state(state: dict) -> None:
         state = {**state, "logs": get_recent(100)}
     except Exception:
         pass
-    _state = state
-    # Record equity snapshot for the curve
     equity = state.get("equity")
     if equity:
         _equity_history.append({
             "time": int(datetime.datetime.now(datetime.timezone.utc).timestamp()),
             "value": float(equity),
         })
-    _sse_push(json.dumps({**state, "equity_history": list(_equity_history)}, default=str))
+    with _state_lock:
+        _state = state
+        snapshot = {**state, "equity_history": list(_equity_history)}
+    _sse_push(json.dumps(snapshot, default=str))
     _auto_trigger_investigations(state)
 
 
@@ -332,6 +337,17 @@ def set_paused(v: bool) -> None:
 
 def is_paused() -> bool:
     return _paused
+
+
+def seed_news(items: list[dict]) -> None:
+    """Seed the news cache (for dev/testing). Items: [{headline, url?}]."""
+    with _news_lock:
+        _news_cache[:] = items
+
+
+def seed_equity(points: list[dict]) -> None:
+    """Seed historical equity points (for dev/testing). Points: [{time, value}]."""
+    _equity_history.extend(points)
 
 
 # ── REST endpoints ────────────────────────────────────────────────────────────
@@ -573,6 +589,7 @@ async def get_watchlist_api() -> dict:
 
 @app.post("/api/watchlist", dependencies=[Depends(_require_auth)])
 async def add_to_watchlist_api(body: dict) -> dict:
+    # Changes are in-memory only; they revert to WATCHLIST in .env on restart.
     symbol = (body.get("symbol") or "").strip().upper()
     if not symbol or not _SYMBOL_RE.match(symbol):
         raise HTTPException(status_code=400, detail="Invalid symbol")
@@ -580,22 +597,27 @@ async def add_to_watchlist_api(body: dict) -> dict:
         if symbol not in _runtime_watchlist:
             _runtime_watchlist.append(symbol)
         wl = list(_runtime_watchlist)
-    _state["watchlist"] = wl
-    _sse_push(json.dumps(_state, default=str))
+    with _state_lock:
+        _state["watchlist"] = wl
+        snapshot = dict(_state)
+    _sse_push(json.dumps(snapshot, default=str))
     logger.info("Watchlist add: %s → %s", symbol, wl)
     return {"watchlist": wl}
 
 
 @app.delete("/api/watchlist/{symbol}", dependencies=[Depends(_require_auth)])
 async def remove_from_watchlist_api(symbol: str) -> dict:
+    # Changes are in-memory only; they revert to WATCHLIST in .env on restart.
     symbol = symbol.upper().strip()
     if not _SYMBOL_RE.match(symbol):
         raise HTTPException(status_code=400, detail="Invalid symbol")
     with _watchlist_lock:
         _runtime_watchlist[:] = [s for s in _runtime_watchlist if s != symbol]
         wl = list(_runtime_watchlist)
-    _state["watchlist"] = wl
-    _sse_push(json.dumps(_state, default=str))
+    with _state_lock:
+        _state["watchlist"] = wl
+        snapshot = dict(_state)
+    _sse_push(json.dumps(snapshot, default=str))
     logger.info("Watchlist remove: %s → %s", symbol, wl)
     return {"watchlist": wl}
 
@@ -1412,8 +1434,12 @@ _HTML = """<!DOCTYPE html>
   .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .legend-dash { width: 18px; height: 2px; border-top: 2px dashed; flex-shrink: 0; }
 </style>
-<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
-<script src="https://unpkg.com/sortablejs@1.15.2/Sortable.min.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"
+        integrity="sha384-JZigAjwiaZtkUbA44CWkPaT3iBb/mU5pO6QOANp+OqHd4q+1+7MG1kzp2OOP9ZfP"
+        crossorigin="anonymous"></script>
+<script src="https://unpkg.com/sortablejs@1.15.2/Sortable.min.js"
+        integrity="sha384-BSxuMLxX+FCbTdYec3TbXlnMGEEM2QXTFdtDaveen71o+jswm2J36+xFqp8k4VHM"
+        crossorigin="anonymous"></script>
 </head>
 <body>
 <div class="app">

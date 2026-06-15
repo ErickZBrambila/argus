@@ -167,19 +167,18 @@ def _mock_investigate(symbol: str, signal: dict, headlines: list) -> dict:
 dash.register_investigate(_mock_investigate)
 
 # Seed fake news headlines for mock mode
-with dash._news_lock:
-    dash._news_cache[:] = [
-        {"headline": "NVIDIA reports record Q4 earnings, beats estimates by 15% on AI chip demand", "url": "https://finance.yahoo.com/news/nvidia"},
-        {"headline": "Federal Reserve holds rates steady, signals two cuts later this year", "url": "https://finance.yahoo.com/news/fed"},
-        {"headline": "Apple unveils AI-powered features across iPhone and Mac product lines", "url": "https://finance.yahoo.com/news/apple"},
-        {"headline": "Tesla slashes prices globally amid intensifying EV market competition", "url": "https://finance.yahoo.com/news/tesla"},
-        {"headline": "Bitcoin ETF sees record $2.4B inflows as institutional demand surges", "url": "https://finance.yahoo.com/news/bitcoin"},
-        {"headline": "S&P 500 hits new all-time high driven by tech and semiconductor rally", "url": "https://finance.yahoo.com/news/sp500"},
-        {"headline": "Goldman Sachs raises year-end S&P 500 target to 6,500 on earnings beat", "url": "https://finance.yahoo.com/news/goldman"},
-        {"headline": "SEC approves spot Ethereum ETFs, crypto markets rally 8% on news", "url": "https://finance.yahoo.com/news/ethereum"},
-        {"headline": "Microsoft Azure cloud revenue jumps 31% on AI services growth", "url": "https://finance.yahoo.com/news/microsoft"},
-        {"headline": "Amazon Web Services margins expand as AI workloads drive higher pricing", "url": "https://finance.yahoo.com/news/amazon"},
-    ]
+dash.seed_news([
+    {"headline": "NVIDIA reports record Q4 earnings, beats estimates by 15% on AI chip demand", "url": "https://finance.yahoo.com/news/nvidia"},
+    {"headline": "Federal Reserve holds rates steady, signals two cuts later this year", "url": "https://finance.yahoo.com/news/fed"},
+    {"headline": "Apple unveils AI-powered features across iPhone and Mac product lines", "url": "https://finance.yahoo.com/news/apple"},
+    {"headline": "Tesla slashes prices globally amid intensifying EV market competition", "url": "https://finance.yahoo.com/news/tesla"},
+    {"headline": "Bitcoin ETF sees record $2.4B inflows as institutional demand surges", "url": "https://finance.yahoo.com/news/bitcoin"},
+    {"headline": "S&P 500 hits new all-time high driven by tech and semiconductor rally", "url": "https://finance.yahoo.com/news/sp500"},
+    {"headline": "Goldman Sachs raises year-end S&P 500 target to 6,500 on earnings beat", "url": "https://finance.yahoo.com/news/goldman"},
+    {"headline": "SEC approves spot Ethereum ETFs, crypto markets rally 8% on news", "url": "https://finance.yahoo.com/news/ethereum"},
+    {"headline": "Microsoft Azure cloud revenue jumps 31% on AI services growth", "url": "https://finance.yahoo.com/news/microsoft"},
+    {"headline": "Amazon Web Services margins expand as AI workloads drive higher pricing", "url": "https://finance.yahoo.com/news/amazon"},
+])
 
 # ── Fake data generators ──────────────────────────────────────────────────────
 
@@ -190,10 +189,10 @@ dash.set_watchlist_base(SYMBOLS)
 import time as _time
 _now = int(_time.time())
 _BASE_EQ = 16200.0
-for _i in range(120):  # ~2h of history at 60s intervals
-    _t_offset = _now - (120 - _i) * 60
-    _drift = math.sin(_i * 0.15) * 80 + _i * 0.4 + random.uniform(-15, 15)
-    dash._equity_history.append({"time": _t_offset, "value": round(_BASE_EQ + _drift, 2)})
+dash.seed_equity([
+    {"time": _now - (120 - _i) * 60, "value": round(_BASE_EQ + math.sin(_i * 0.15) * 80 + _i * 0.4 + random.uniform(-15, 15), 2)}
+    for _i in range(120)
+])
 
 _t = 0  # tick counter
 
