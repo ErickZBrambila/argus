@@ -34,6 +34,10 @@ _chart_source_fn = None   # callable(symbol: str) -> list[dict]
 _search_fn = None          # callable(query: str) -> list[{symbol, name}]
 _autopilot = None         # Autopilot instance for runtime control
 
+# Equity curve — ring buffer of {time, value} points for the session
+import collections as _collections
+_equity_history: collections.deque = _collections.deque(maxlen=480)  # ~8h at 60s interval
+
 
 def register_chart_source(fn) -> None:
     global _chart_source_fn
@@ -255,6 +259,42 @@ async def _sse_broadcaster() -> None:
             pass
 
 
+_AUTO_TRIGGER_THRESHOLD = 0.55  # confidence threshold for auto-investigation
+_auto_triggered: set = set()    # symbols already auto-triggered this session
+
+def _auto_trigger_investigations(state: dict) -> None:
+    """Auto-queue an investigation when a signal is strong + confident enough."""
+    if _investigate_fn is None:
+        return
+    signals = state.get("signals") or []
+    for sig in signals:
+        sym = sig.get("symbol", "")
+        if not sym:
+            continue
+        composite = sig.get("composite", "neutral")
+        confidence = float(sig.get("confidence") or 0)
+        if composite not in ("bullish", "bearish"):
+            continue
+        if confidence < _AUTO_TRIGGER_THRESHOLD:
+            continue
+        with _investigation_lock:
+            already_active = sym in _investigations and _investigations[sym].get("status") in ("queued", "running", "complete")
+        if already_active or sym in _auto_triggered:
+            continue
+        if len(_investigations) >= _MAX_INVESTIGATIONS:
+            continue
+        _auto_triggered.add(sym)
+        with _investigation_lock:
+            _investigations[sym] = {
+                "symbol": sym,
+                "status": "queued",
+                "queued_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "auto_triggered": True,
+            }
+        _push_investigation_state()
+        threading.Thread(target=_run_investigation, args=(sym,), daemon=True, name=f"inv-{sym}").start()
+
+
 def push_state(state: dict) -> None:
     """Called by the main loop (sync thread) to push new state to all SSE clients."""
     global _state
@@ -264,7 +304,15 @@ def push_state(state: dict) -> None:
     except Exception:
         pass
     _state = state
-    _sse_push(json.dumps(state, default=str))
+    # Record equity snapshot for the curve
+    equity = state.get("equity")
+    if equity:
+        _equity_history.append({
+            "time": int(datetime.datetime.now(datetime.timezone.utc).timestamp()),
+            "value": float(equity),
+        })
+    _sse_push(json.dumps({**state, "equity_history": list(_equity_history)}, default=str))
+    _auto_trigger_investigations(state)
 
 
 def set_paused(v: bool) -> None:
@@ -936,6 +984,8 @@ _HTML = """<!DOCTYPE html>
   .ct-type-btns { display: flex; gap: 3px; margin-left: auto; }
   .ct-type-btn { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); font-size: 10px; font-weight: 700; padding: 2px 7px; cursor: pointer; }
   .ct-type-btn.active { background: var(--surface2); color: var(--text); border-color: var(--accent); }
+  .eq-range-btn { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); font-size: 10px; font-weight: 700; padding: 2px 8px; cursor: pointer; transition: all .15s; }
+  .eq-range-btn.active, .eq-range-btn:hover { background: var(--surface2); color: var(--text); border-color: var(--accent); }
 
   /* ── Symbol search autocomplete ─────────────────────────────────────────── */
   .wl-search-wrap { position: relative; }
@@ -1388,6 +1438,20 @@ _HTML = """<!DOCTYPE html>
         <span id="stat-trades" style="display:none"></span>
         <span id="stat-daytrades" style="display:none"></span>
       </div>
+    </div>
+
+    <!-- Equity curve -->
+    <div class="card card-full">
+      <div class="card-title" style="display:flex;align-items:center;gap:10px;">
+        Equity Curve
+        <span id="eq-range-btns" style="display:flex;gap:4px;margin-left:auto">
+          <button class="eq-range-btn active" onclick="eqSetRange('session')">Session</button>
+          <button class="eq-range-btn" onclick="eqSetRange('1h')">1H</button>
+          <button class="eq-range-btn" onclick="eqSetRange('30m')">30M</button>
+        </span>
+      </div>
+      <div id="eq-chart" style="height:160px;position:relative"></div>
+      <div id="eq-stats" style="display:flex;gap:20px;padding:8px 2px 0;font-size:12px;color:var(--muted)"></div>
     </div>
 
     <!-- Controls -->
@@ -2053,6 +2117,7 @@ function applyState(state) {
   updateTicker(state.signals);
   if (state.watchlist) { ctApplyWatchlist(state.watchlist); buildChartTabs(state.watchlist); }
   if (state.investigations) renderInvestigations(state.investigations);
+  if (state.equity_history) eqRender(state.equity_history);
   // Scan timing
   if (state.next_scan_at) _nextScanAt = new Date(state.next_scan_at);
   _updateSessionBadge(state.market_session || 'closed');
@@ -2625,6 +2690,71 @@ function updateTicker(signals) {
     const dur = Math.max(15, Math.round(singleW / 120));
     track.style.animationDuration = dur + 's';
   });
+}
+
+// ── Equity curve ─────────────────────────────────────────────────────────────
+
+let _eqChart = null, _eqSeries = null, _eqHistory = [], _eqRange = 'session';
+
+function eqInit() {
+  if (_eqChart || !window.LightweightCharts) return;
+  const el = document.getElementById('eq-chart');
+  if (!el) return;
+  _eqChart = LightweightCharts.createChart(el, {
+    width: el.clientWidth,
+    height: 160,
+    layout: { background: { color: 'transparent' }, textColor: '#8b949e' },
+    grid: { vertLines: { color: 'rgba(255,255,255,.05)' }, horzLines: { color: 'rgba(255,255,255,.05)' } },
+    rightPriceScale: { borderColor: 'rgba(255,255,255,.08)' },
+    timeScale: { borderColor: 'rgba(255,255,255,.08)', timeVisible: true, secondsVisible: false },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Magnet },
+    handleScroll: false,
+    handleScale: false,
+  });
+  _eqSeries = _eqChart.addAreaSeries({
+    lineColor: '#00D4AA',
+    topColor: 'rgba(0,212,170,.18)',
+    bottomColor: 'rgba(0,212,170,.01)',
+    lineWidth: 2,
+    priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+  });
+  new ResizeObserver(() => { if (_eqChart) _eqChart.resize(el.clientWidth, 160); }).observe(el);
+}
+
+function eqSetRange(r) {
+  _eqRange = r;
+  document.querySelectorAll('.eq-range-btn').forEach(b => b.classList.toggle('active', b.textContent.toLowerCase().replace(' ','') === r));
+  eqRender(_eqHistory);
+}
+
+function eqRender(history) {
+  _eqHistory = history || [];
+  eqInit();
+  if (!_eqSeries || !_eqHistory.length) return;
+
+  const now = Math.floor(Date.now() / 1000);
+  const cutoff = _eqRange === '30m' ? now - 1800
+               : _eqRange === '1h'  ? now - 3600
+               : 0;  // 'session' = all
+
+  let pts = _eqHistory.filter(p => p.time >= cutoff);
+  if (!pts.length) pts = _eqHistory.slice(-1);  // always show at least one point
+
+  _eqSeries.setData(pts);
+  _eqChart.timeScale().fitContent();
+
+  // Stats bar
+  const first = pts[0].value, last = pts[pts.length - 1].value;
+  const chg = last - first, chgPct = first ? (chg / first) * 100 : 0;
+  const high = Math.max(...pts.map(p => p.value));
+  const low  = Math.min(...pts.map(p => p.value));
+  const color = chg >= 0 ? 'var(--green)' : 'var(--danger)';
+  const sign  = chg >= 0 ? '+' : '';
+  document.getElementById('eq-stats').innerHTML =
+    `<span>P&L: <strong style="color:${color}">${sign}$${Math.abs(chg).toFixed(2)} (${sign}${chgPct.toFixed(2)}%)</strong></span>` +
+    `<span>High: <strong>$${high.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</strong></span>` +
+    `<span>Low: <strong>$${low.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</strong></span>` +
+    `<span>${pts.length} data points</span>`;
 }
 
 // ── Charts tab (draggable dashlets) ──────────────────────────────────────────

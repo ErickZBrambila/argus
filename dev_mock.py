@@ -160,6 +160,16 @@ with dash._news_lock:
 
 SYMBOLS = ["AAPL", "TSLA", "NVDA", "BTC", "ETH"]
 dash.set_watchlist_base(SYMBOLS)
+
+# Seed equity history so the curve has data immediately on startup
+import time as _time
+_now = int(_time.time())
+_BASE_EQ = 16200.0
+for _i in range(120):  # ~2h of history at 60s intervals
+    _t_offset = _now - (120 - _i) * 60
+    _drift = math.sin(_i * 0.15) * 80 + _i * 0.4 + random.uniform(-15, 15)
+    dash._equity_history.append({"time": _t_offset, "value": round(_BASE_EQ + _drift, 2)})
+
 _t = 0  # tick counter
 
 def _price(sym, tick):
