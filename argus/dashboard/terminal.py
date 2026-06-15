@@ -114,8 +114,11 @@ class TerminalDashboard:
         header.append_text(kill)
         header.append_text(paused)
         header.append(f" [{session_label}]", style=_SESSION_STYLES.get(session, "dim"))
+        mc_label, mc_val = _market_countdown()
+        header.append(f"  {mc_label} ", style="dim")
+        header.append(mc_val, style="bold white")
         if countdown_str:
-            header.append(f"  next {countdown_str}", style="dim")
+            header.append(f"  next scan {countdown_str}", style="dim")
         header.append(f"  {ts}", style="dim")
         if token_str:
             header.append(f"\n  {token_str}", style="dim")
@@ -149,6 +152,39 @@ class TerminalDashboard:
         layout.add_row(_build_log_panel())
 
         return Panel(layout, border_style="cyan", padding=(0, 1))
+
+
+def _market_countdown() -> tuple[str, str]:
+    """Return (label, value) for time until next market open or close."""
+    now_et = datetime.datetime.now(datetime.timezone.utc).astimezone(
+        datetime.timezone(datetime.timedelta(hours=-4))  # EDT; close enough for display
+    )
+    try:
+        import zoneinfo
+        now_et = datetime.datetime.now(zoneinfo.ZoneInfo("America/New_York"))
+    except Exception:
+        pass
+
+    h, m, s = now_et.hour, now_et.minute, now_et.second
+    dow = now_et.weekday()  # 0=Mon … 6=Sun
+    sec = h * 3600 + m * 60 + s
+    OPEN, CLOSE = 9 * 3600 + 30 * 60, 16 * 3600
+
+    def fmt(secs: int) -> str:
+        secs = max(0, secs)
+        hh, rem = divmod(secs, 3600)
+        mm, ss  = divmod(rem, 60)
+        return f"{hh}h {mm:02d}m" if hh else f"{mm:02d}m {ss:02d}s"
+
+    if dow >= 5:                        # weekend
+        days = 7 - dow                  # days until Monday
+        return "Opens in", fmt(days * 86400 + OPEN - sec)
+    if sec < OPEN:
+        return "Opens in", fmt(OPEN - sec)
+    if sec < CLOSE:
+        return "Closes in", fmt(CLOSE - sec)
+    days = 3 if dow == 4 else 1         # Friday → skip to Monday
+    return "Opens in", fmt(days * 86400 + OPEN - sec)
 
 
 def _build_goal_bar(equity: float, goal: float, color: str) -> Text:
