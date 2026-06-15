@@ -255,7 +255,11 @@ class RobinhoodBroker:
                 if data:
                     return data
             except Exception as exc:
-                logger.warning("Could not fetch historicals for %s: %s", symbol, exc)
+                # Crypto falls back to yfinance below — not actionable, keep quiet
+                if symbol in CRYPTO_SYMBOLS:
+                    logger.debug("Robinhood crypto historicals unavailable for %s, using yfinance: %s", symbol, exc)
+                else:
+                    logger.warning("Could not fetch historicals for %s: %s", symbol, exc)
 
         # Fallback for crypto: Yahoo Finance requires no auth
         if symbol in CRYPTO_SYMBOLS:
