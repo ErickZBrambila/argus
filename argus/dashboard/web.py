@@ -217,11 +217,17 @@ _MAX_INVESTIGATIONS = 3
 _investigations: dict[str, dict] = {}
 _investigation_lock = threading.Lock()
 _investigate_fn = None   # callable(symbol, signal, headlines) → dict
+_notifier = None         # Notifier instance injected by autopilot
 
 
 def register_investigate(fn) -> None:
     global _investigate_fn
     _investigate_fn = fn
+
+
+def register_notifier(notifier) -> None:
+    global _notifier
+    _notifier = notifier
 
 
 def _run_investigation(symbol: str) -> None:
@@ -245,19 +251,34 @@ def _run_investigation(symbol: str) -> None:
 
         result = _investigate_fn(symbol, signal, headlines)
 
+        verdict    = result.get("verdict", "Unknown")
+        confidence = float(result.get("confidence") or 0)
+        summary    = result.get("summary", "")
+
         with _investigation_lock:
             if symbol not in _investigations:
                 return  # user deleted the card while investigation was running
             _investigations[symbol].update({
                 "status": "complete",
-                "verdict":    result.get("verdict", "Unknown"),
-                "confidence": float(result.get("confidence") or 0),
-                "summary":    result.get("summary", ""),
+                "verdict":    verdict,
+                "confidence": confidence,
+                "summary":    summary,
                 "findings":   result.get("findings") or [],
                 "risks":      result.get("risks") or [],
                 "timeframe":  result.get("timeframe", ""),
                 "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             })
+
+        if _notifier and verdict.upper() != "HOLD":
+            try:
+                emoji = "🟢" if "bull" in verdict.lower() or verdict.upper() == "BUY" else "🔴"
+                _notifier.send(
+                    f"{emoji} Investigation: {symbol} — {verdict.upper()} ({confidence:.0%})",
+                    summary[:280] if summary else f"{symbol} deep-dive complete.",
+                )
+            except Exception as exc:
+                logger.warning("Investigation alert failed for %s: %s", symbol, exc)
+
     except Exception as exc:
         logger.error("Investigation failed for %s: %s", symbol, exc)
         with _investigation_lock:

@@ -197,6 +197,7 @@ class Autopilot:
                     add_to_db_watchlist(session, s)
 
         web_dashboard.register_autopilot(self)
+        web_dashboard.register_notifier(self._notifier)
         web_dashboard.set_watchlist_base(final_wl)
         web_dashboard.prefill_state({
             "paper_trade": self._cfg.paper_trade,
@@ -464,10 +465,14 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 try:
                     sym, sig = fut.result()
                     if sig is not None:
-                        signals.append(sig.to_dict())
                         signal_map[sym] = sig
                 except Exception as exc:
                     logger.error("Signal error for %s: %s", futures[fut], exc)
+
+        # Build signals list in the order of the watchlist for UI consistency
+        for sym in watchlist:
+            if sym in signal_map:
+                signals.append(signal_map[sym].to_dict())
 
         if not is_market_hours():
             self._latest_signals = signals
