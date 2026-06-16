@@ -76,9 +76,11 @@ class Notifier:
 
     def _try_macos(self, subject: str, body: str) -> None:
         try:
+            def _esc(s: str) -> str:
+                return s.replace("\\", "\\\\").replace('"', '\\"')
             script = (
-                f'display notification "{body}" '
-                f'with title "Argus" subtitle "{subject}"'
+                f'display notification "{_esc(body[:250])}" '
+                f'with title "Argus" subtitle "{_esc(subject[:80])}"'
             )
             subprocess.run(
                 ["osascript", "-e", script],
@@ -116,10 +118,11 @@ class Notifier:
         if not self._ntfy_url:
             return
         try:
+            safe_title = subject.replace("\r", "").replace("\n", " ")[:128]
             req = urllib.request.Request(
                 self._ntfy_url, data=body.encode(),
                 headers={
-                    "Title": subject,
+                    "Title": safe_title,
                     "Priority": "default",
                     "Tags": "chart_with_upwards_trend",
                 },

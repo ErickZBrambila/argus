@@ -234,7 +234,13 @@ class SignalEngine:
                 return None
             return float(v)
 
-        price = float(last["close"])
+        # Price from broker's latest quote for real-time ticker accuracy, 
+        # falling back to candle close if quote fails.
+        try:
+            price = self._broker.get_price(symbol)
+        except Exception:
+            price = float(last["close"])
+
         volume = float(last.get("volume", 0) or 0)
         rsi = _safe(rsi_col)
         macd = _safe(macd_col)

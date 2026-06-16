@@ -384,6 +384,16 @@ def _require_auth(x_argus_token: str = Header(default="")) -> None:
 @app.on_event("startup")
 async def _start_sse_broadcaster() -> None:
     asyncio.create_task(_sse_broadcaster())
+    if not _dashboard_token:
+        from argus.config import get_settings
+        host = get_settings().web_host
+        if host != "127.0.0.1":
+            logger.warning(
+                "SECURITY: DASHBOARD_TOKEN is not set but WEB_HOST=%s — "
+                "the dashboard is accessible on the network without authentication. "
+                "Set DASHBOARD_TOKEN in your .env file.",
+                host,
+            )
 
 
 async def _sse_broadcaster() -> None:
@@ -877,7 +887,7 @@ async def remove_from_watchlist_api(symbol: str) -> dict:
     return {"watchlist": wl}
 
 
-@app.get("/api/approvals")
+@app.get("/api/approvals", dependencies=[Depends(_require_auth)])
 async def get_approvals() -> dict:
     with _approval_lock:
         return {"approvals": dict(_pending_approvals)}
@@ -3174,9 +3184,9 @@ function renderLogs(entries) {
   box.innerHTML = filtered.map(e => {
     const lvl = _LEVEL_SHORT[e.level] || e.level;
     return `<div class="log-line log-line-${lvl}">
-      <span class="log-ts">${e.ts}</span>
+      <span class="log-ts">${escHtml(e.ts)}</span>
       <span class="log-lvl log-lvl-${lvl}">${lvl}</span>
-      <span class="log-name">${e.name || ''}</span>
+      <span class="log-name">${escHtml(e.name || '')}</span>
       <span class="log-msg">${escHtml(e.msg)}</span>
     </div>`;
   }).join('');
@@ -3185,7 +3195,7 @@ function renderLogs(entries) {
 }
 
 function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 function confirmClose(symbol) {
@@ -4427,7 +4437,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
 /* ── Cards ── */
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
 .card-label{font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px}
-.card-big{font-size:36px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1.1;letter-spacing:-1px}
+.card-big{font-size:clamp(24px,8vw,36px);font-weight:800;font-variant-numeric:tabular-nums;line-height:1.1;letter-spacing:-1px}
 .card-sub{font-size:13px;color:var(--muted);margin-top:4px;font-variant-numeric:tabular-nums}
 
 /* ── Account row ── */
@@ -4476,7 +4486,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
 #m-chart-pills::-webkit-scrollbar{display:none}
 .m-pill{padding:6px 14px;border-radius:99px;font-size:13px;font-weight:700;font-family:var(--mono);background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;cursor:pointer;flex-shrink:0;min-height:36px}
 .m-pill.active{background:var(--accent);color:#000d0a;border-color:var(--accent)}
-#m-chart-area{width:100%;height:300px;border-radius:var(--radius);overflow:hidden;margin-top:10px;background:var(--surface2)}
+#m-chart-area{width:100%;height:min(380px,45dvh);border-radius:var(--radius);overflow:hidden;margin-top:10px;background:var(--surface2)}
 .m-ohlc{display:flex;justify-content:space-between;margin-top:10px;font-size:12px;color:var(--muted);font-family:var(--mono)}
 .m-ohlc span b{color:var(--text)}
 
@@ -4503,11 +4513,64 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
 .section-title{font-size:12px;font-weight:700;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px}
 .kill-banner{background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.3);border-radius:10px;padding:10px 14px;font-size:13px;color:var(--warn);font-weight:600;display:flex;align-items:center;gap:8px}
 .btn-clear{background:var(--surface2);border:1px solid var(--border);color:var(--muted);padding:8px 16px;border-radius:8px;font-size:13px;cursor:pointer;align-self:flex-end;min-height:44px}
+
+/* ── Connection status dot ── */
+#conn-dot{width:8px;height:8px;border-radius:99px;background:var(--bull);flex-shrink:0;transition:background .4s;box-shadow:0 0 6px var(--bull)}
+#conn-dot.offline{background:var(--bear);box-shadow:0 0 6px var(--bear)}
+#conn-dot.reconnecting{background:var(--warn);box-shadow:0 0 6px var(--warn)}
+#conn-status-bar{display:flex;align-items:center;gap:6px;padding:8px 16px 0;font-size:11px;color:var(--muted)}
+
+/* ── Actionable signal summary ── */
+.top-signals{display:flex;flex-direction:column;gap:6px;margin-bottom:4px}
+.top-sig-chip{display:flex;align-items:center;gap:10px;background:var(--surface2);border-radius:8px;padding:10px 12px;border-left:3px solid var(--border)}
+.top-sig-chip.buy{border-left-color:var(--bull)} .top-sig-chip.sell{border-left-color:var(--bear)}
+.top-sig-chip-sym{font-family:var(--mono);font-weight:800;font-size:15px;min-width:52px}
+.top-sig-chip-action{font-size:12px;font-weight:700;flex:1}
+.top-sig-chip-conf{font-size:11px;color:var(--muted)}
+
+/* ── Open positions ── */
+.pos-row{display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--border)}
+.pos-row:last-child{border-bottom:none}
+.pos-sym{font-family:var(--mono);font-weight:800;font-size:15px;min-width:52px}
+.pos-qty{font-size:12px;color:var(--muted);flex:1}
+.pos-val{font-size:14px;font-weight:700;font-variant-numeric:tabular-nums}
+.pos-pnl{font-size:12px;font-variant-numeric:tabular-nums}
+
+/* ── Pending approvals ── */
+.appr-card{background:rgba(0,208,132,.06);border:1px solid rgba(0,208,132,.2);border-radius:10px;padding:12px}
+.appr-sym{font-family:var(--mono);font-size:16px;font-weight:800;color:var(--accent)}
+.appr-detail{font-size:12px;color:var(--muted);margin-top:3px;line-height:1.4}
+.appr-reasoning{font-size:12px;color:var(--text);margin-top:6px;line-height:1.5;opacity:.85}
+.appr-actions{display:flex;gap:8px;margin-top:10px}
+.appr-btn{flex:1;padding:10px;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;min-height:44px}
+.appr-btn.approve{background:var(--bull);color:#000}
+.appr-btn.deny{background:rgba(248,81,73,.15);color:var(--bear);border:1px solid rgba(248,81,73,.3)}
+
+/* ── Alert filter chips ── */
+.filter-chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
+.filter-chips::-webkit-scrollbar{display:none}
+.filter-chip{padding:6px 14px;border-radius:99px;font-size:12px;font-weight:700;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;cursor:pointer;flex-shrink:0;min-height:36px}
+.filter-chip.active{background:var(--accent);color:#000d0a;border-color:var(--accent)}
+
+/* ── Timeframe pills for charts ── */
+.tf-pills{display:flex;gap:6px;margin-top:8px}
+.tf-pill{padding:5px 14px;border-radius:99px;font-size:12px;font-weight:700;background:var(--surface2);border:1px solid var(--border);color:var(--muted);cursor:pointer;min-height:36px}
+.tf-pill.active{background:rgba(88,166,255,.15);color:var(--blue);border-color:var(--blue)}
+
+/* ── Investigate from signals ── */
+.sig-inv-btn{font-size:11px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;min-height:32px}
+.sig-inv-btn:active{background:var(--surface3)}
+
+/* ── Pull-to-refresh ── */
+#ptr{height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);transition:height .2s}
+#ptr.ready{color:var(--accent)}
 </style>
 </head>
 <body>
 <div id="app">
+  <div id="conn-status-bar"><div id="conn-dot"></div><span id="conn-label">Connected</span></div>
   <div id="screen">
+    <div id="ptr">↓ Release to refresh</div>
 
     <!-- HOME -->
     <div class="pane active" id="pane-home">
@@ -4518,6 +4581,12 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
       </div>
       <div class="acct-row" id="m-accts"></div>
       <div id="m-kill-wrap"></div>
+      <div id="m-top-signals-wrap"></div>
+      <div class="card" id="m-positions-card" style="display:none">
+        <div class="section-title">Open Positions</div>
+        <div id="m-positions"></div>
+      </div>
+      <div id="m-approvals-wrap"></div>
       <div class="card">
         <div class="section-title">Recent Trades</div>
         <div id="m-trades"><div class="empty-state">No trades yet</div></div>
@@ -4535,6 +4604,12 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
     <!-- CHARTS -->
     <div class="pane" id="pane-charts">
       <div id="m-chart-pills"></div>
+      <div class="tf-pills">
+        <button class="tf-pill" onclick="mTf('1D')">1D</button>
+        <button class="tf-pill active" onclick="mTf('1W')">1W</button>
+        <button class="tf-pill" onclick="mTf('1M')">1M</button>
+        <button class="tf-pill" onclick="mTf('3M')">3M</button>
+      </div>
       <div id="m-chart-area"></div>
       <div class="m-ohlc" id="m-ohlc" style="display:none">
         <span>O <b id="mo-o">—</b></span>
@@ -4546,8 +4621,15 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
 
     <!-- ALERTS -->
     <div class="pane" id="pane-alerts">
-      <button class="btn-clear" onclick="mClearAlerts()">Clear</button>
+      <div class="filter-chips" id="m-alert-filters">
+        <button class="filter-chip active" onclick="mAlertFilter('all',this)">All</button>
+        <button class="filter-chip" onclick="mAlertFilter('buy',this)">Buy</button>
+        <button class="filter-chip" onclick="mAlertFilter('sell',this)">Sell</button>
+        <button class="filter-chip" onclick="mAlertFilter('investigation',this)">Research</button>
+        <button class="filter-chip" onclick="mAlertFilter('kill',this)">Kill</button>
+      </div>
       <div id="m-alert-feed"><div class="empty-state">No alerts yet</div></div>
+      <button class="btn-clear" onclick="mClearAlertsConfirm()" style="margin-top:8px">Clear all alerts</button>
     </div>
 
     <!-- INVESTIGATE -->
@@ -4595,6 +4677,9 @@ const fmt$ = v => '$' + Number(v).toLocaleString(undefined,{minimumFractionDigit
 const fmtPct = v => (v>=0?'+':'')+Number(v).toFixed(2)+'%';
 let _state = {};
 let _mChart = null, _mSeries = null, _mSym = null;
+let _mTf = '1W';   // chart timeframe
+let _alertFilter = 'all';
+let _allAlerts = [];
 
 // ── Tab switching ──────────────────────────────────────────────────────────
 function mTab(name) {
@@ -4641,8 +4726,30 @@ function mApply(state) {
     `<div class="kill-banner">⚠ ${esc(label.toUpperCase())} kill switch active — drawdown limit hit</div>`
   ).join('');
 
-  // Signals
+  // Top actionable signals (non-HOLD)
   const sigs = state.signals || [];
+  const actionable = sigs.filter(s => {
+    const c = (s.composite||'').toLowerCase();
+    return c === 'bullish' || c === 'bearish';
+  }).slice(0, 2);
+  const topWrap = document.getElementById('m-top-signals-wrap');
+  if (actionable.length) {
+    topWrap.innerHTML = `<div class="top-signals">` + actionable.map(s => {
+      const c = (s.composite||'').toLowerCase();
+      const cls = c === 'bullish' ? 'buy' : 'sell';
+      const label = c === 'bullish' ? '↑ BUY signal' : '↓ SELL signal';
+      const conf = s.confidence != null ? Math.round(s.confidence*100)+'% confident' : '';
+      return `<div class="top-sig-chip ${cls}" onclick="mTab('charts');mSetSym('${esc(s.symbol)}')">
+        <span class="top-sig-chip-sym">${esc(s.symbol)}</span>
+        <span class="top-sig-chip-action">${label}</span>
+        <span class="top-sig-chip-conf">${conf}</span>
+      </div>`;
+    }).join('') + `</div>`;
+  } else {
+    topWrap.innerHTML = '';
+  }
+
+  // Signals tab
   const sigEl = document.getElementById('m-signals');
   if (sigs.length) {
     sigEl.innerHTML = sigs.map(s => {
@@ -4651,15 +4758,56 @@ function mApply(state) {
       const label = comp === 'bullish' ? 'BUY' : comp === 'bearish' ? 'SELL' : 'HOLD';
       const conf = s.confidence != null ? Math.round(s.confidence * 100) + '%' : '—';
       const price = s.price != null ? fmt$(s.price) : '—';
-      return `<div class="sig-row" onclick="mTab('charts');mSetSym('${esc(s.symbol)}')">
-        <span class="sig-sym">${esc(s.symbol)}</span>
+      return `<div class="sig-row">
+        <span class="sig-sym" onclick="mTab('charts');mSetSym('${esc(s.symbol)}')">${esc(s.symbol)}</span>
         <span class="sig-price">${price}</span>
         <span class="sig-badge ${cls}">${label}</span>
         <span class="sig-conf">${conf}</span>
+        <button class="sig-inv-btn" onclick="mQuickInv('${esc(s.symbol)}')" title="Investigate">🔍</button>
       </div>`;
     }).join('');
   } else {
     sigEl.innerHTML = '<div class="empty-state">Waiting for scan…</div>';
+  }
+
+  // Open positions
+  const positions = state.positions || [];
+  const posCard = document.getElementById('m-positions-card');
+  const posEl = document.getElementById('m-positions');
+  if (positions.length) {
+    posCard.style.display = '';
+    posEl.innerHTML = positions.map(p => {
+      const pnl = (p.pnl_pct || 0);
+      return `<div class="pos-row">
+        <span class="pos-sym">${esc(p.symbol||'')}</span>
+        <span class="pos-qty">${p.quantity||''} shares · ${esc(p.account||'')}</span>
+        <span class="pos-val">${fmt$(p.market_value||0)}</span>
+        <span class="pos-pnl ${pnl>=0?'pill-up':'pill-dn'}">${fmtPct(pnl)}</span>
+      </div>`;
+    }).join('');
+  } else {
+    posCard.style.display = 'none';
+  }
+
+  // Pending approvals
+  const approvals = Object.entries(state.pending_approvals || {});
+  const apprWrap = document.getElementById('m-approvals-wrap');
+  if (approvals.length) {
+    apprWrap.innerHTML = approvals.map(([id, a]) => {
+      const side = (a.side||'buy').toUpperCase();
+      return `<div class="appr-card">
+        <div class="appr-sym">${side} ${esc(a.symbol||'')}</div>
+        <div class="appr-detail">${fmt$(a.dollar_amount||0)} · ${esc((a.risk_level||'medium').toUpperCase())} risk · ${esc(a.account_label||'Default')}</div>
+        ${a.reasoning ? `<div class="appr-reasoning">${esc(a.reasoning.slice(0,120))}${a.reasoning.length>120?'…':''}</div>` : ''}
+        <div class="appr-actions">
+          <button class="appr-btn approve" onclick="mApprove('${esc(id)}')">✓ Approve</button>
+          <button class="appr-btn deny" onclick="mDeny('${esc(id)}')">✗ Deny</button>
+        </div>
+      </div>`;
+    }).join('');
+    document.getElementById('nav-alerts').dataset.count = approvals.length;
+  } else {
+    apprWrap.innerHTML = '';
   }
 
   // Chart pills (watchlist)
@@ -4689,19 +4837,32 @@ function mApply(state) {
   }
 
   // Alerts
-  const alerts = state.alert_log || [];
-  const alertFeed = document.getElementById('m-alert-feed');
+  _allAlerts = state.alert_log || [];
   const navAlerts = document.getElementById('nav-alerts');
-  navAlerts.dataset.count = alerts.length > 0 ? alerts.length : '';
-  if (alerts.length) {
-    alertFeed.innerHTML = alerts.map(a => {
-      const s = (a.subject||'').toUpperCase();
-      const cls = s.includes('KILL')||s.includes('DRAW') ? 'kill'
-                : s.includes('ERROR') ? 'error'
-                : s.includes('APPROV') ? 'approval'
-                : s.includes('INVEST')||s.includes('🟢')||s.includes('🔴') ? 'investigation'
-                : s.includes('BUY') ? 'buy'
-                : s.includes('SELL') ? 'sell' : '';
+  navAlerts.dataset.count = _allAlerts.length > 0 ? _allAlerts.length : '';
+  mRenderAlerts();
+
+  // Investigations
+  mRenderInv(state.investigations || {});
+}
+
+// ── Alert filter ──────────────────────────────────────────────────────────
+function mAlertClassify(a) {
+  const s = (a.subject||'').toUpperCase();
+  if (s.includes('KILL')||s.includes('DRAW')) return 'kill';
+  if (s.includes('ERROR')) return 'error';
+  if (s.includes('APPROV')) return 'approval';
+  if (s.includes('INVEST')||s.includes('🟢')||s.includes('🔴')) return 'investigation';
+  if (s.includes('BUY')) return 'buy';
+  if (s.includes('SELL')) return 'sell';
+  return '';
+}
+function mRenderAlerts() {
+  const alertFeed = document.getElementById('m-alert-feed');
+  const visible = _alertFilter === 'all' ? _allAlerts : _allAlerts.filter(a => mAlertClassify(a) === _alertFilter);
+  if (visible.length) {
+    alertFeed.innerHTML = visible.map(a => {
+      const cls = mAlertClassify(a);
       const t = new Date(a.time).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
       return `<div class="alert-row ${cls}">
         <span class="alert-t">${t}</span>
@@ -4711,9 +4872,37 @@ function mApply(state) {
   } else {
     alertFeed.innerHTML = '<div class="empty-state">No alerts yet</div>';
   }
+}
+function mAlertFilter(f, btn) {
+  _alertFilter = f;
+  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  mRenderAlerts();
+}
 
-  // Investigations
-  mRenderInv(state.investigations || {});
+// ── Timeframe ──────────────────────────────────────────────────────────────
+function mTf(tf) {
+  _mTf = tf;
+  document.querySelectorAll('.tf-pill').forEach(p => p.classList.toggle('active', p.textContent === tf));
+  if (_mSym) mLoadChart(_mSym);
+}
+
+// ── Approvals ──────────────────────────────────────────────────────────────
+async function mApprove(id) {
+  await fetch('/api/approve/'+id, {method:'POST',
+    headers:window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{}});
+}
+async function mDeny(id) {
+  await fetch('/api/deny/'+id, {method:'POST',
+    headers:window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{}});
+}
+
+// ── Investigate from signals ────────────────────────────────────────────────
+async function mQuickInv(sym) {
+  await fetch('/api/investigate', {method:'POST',headers:{'Content-Type':'application/json',
+    ...(window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{})},
+    body:JSON.stringify({symbol:sym})});
+  mTab('investigate');
 }
 
 // ── Chart ──────────────────────────────────────────────────────────────────
@@ -4724,7 +4913,8 @@ function mSetSym(sym) {
 }
 
 function mLoadChart(sym) {
-  fetch('/api/chart/' + sym)
+  const tfParam = {'1D':'day','1W':'week','1M':'month','3M':'3month'}[_mTf] || 'week';
+  fetch('/api/chart/' + sym + '?span=' + tfParam)
     .then(r => r.json())
     .then(d => {
       const area = document.getElementById('m-chart-area');
@@ -4814,20 +5004,58 @@ async function mInvDelete(sym) {
   await fetch('/api/investigate/'+sym,{method:'DELETE',
     headers:window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{}});
 }
-async function mClearAlerts() {
+async function mClearAlertsConfirm() {
+  if (!confirm('Clear all alerts? This cannot be undone.')) return;
   await fetch('/api/alerts/clear',{method:'POST',
     headers:window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{}});
 }
 
-// ── SSE ───────────────────────────────────────────────────────────────────
+// ── SSE + connection status ────────────────────────────────────────────────
+function _setConn(state) {
+  const dot = document.getElementById('conn-dot');
+  const lbl = document.getElementById('conn-label');
+  dot.className = state === 'online' ? '' : state === 'reconnecting' ? 'reconnecting' : 'offline';
+  lbl.textContent = state === 'online' ? 'Live' : state === 'reconnecting' ? 'Reconnecting…' : 'Offline';
+}
 function connectSSE() {
+  _setConn('reconnecting');
   const es = new EventSource('/events');
-  es.onmessage = e => { try { mApply(JSON.parse(e.data)); } catch {} };
-  es.onerror = () => { setTimeout(connectSSE, 5000); es.close(); };
+  es.onopen = () => _setConn('online');
+  es.onmessage = e => { try { mApply(JSON.parse(e.data)); _setConn('online'); } catch {} };
+  es.onerror = () => { _setConn('reconnecting'); setTimeout(connectSSE, 5000); es.close(); };
 }
 
+// ── Pull-to-refresh ────────────────────────────────────────────────────────
+(function() {
+  const screen = document.getElementById('screen');
+  const ptr = document.getElementById('ptr');
+  let startY = 0, pulling = false;
+  screen.addEventListener('touchstart', e => {
+    if (screen.scrollTop === 0) { startY = e.touches[0].clientY; pulling = true; }
+  }, {passive: true});
+  screen.addEventListener('touchmove', e => {
+    if (!pulling) return;
+    const dy = e.touches[0].clientY - startY;
+    if (dy > 0 && dy < 80) {
+      ptr.style.height = dy + 'px';
+      ptr.classList.toggle('ready', dy > 55);
+    }
+  }, {passive: true});
+  screen.addEventListener('touchend', () => {
+    if (!pulling) return;
+    pulling = false;
+    if (ptr.classList.contains('ready')) {
+      ptr.textContent = '↻ Refreshing…';
+      // Force SSE reconnect for fresh snapshot
+      connectSSE();
+      setTimeout(() => { ptr.style.height = '0'; ptr.textContent = '↓ Release to refresh'; ptr.classList.remove('ready'); }, 1500);
+    } else {
+      ptr.style.height = '0';
+    }
+  }, {passive: true});
+})();
+
 // ── Init ──────────────────────────────────────────────────────────────────
-fetch('/events').catch(()=>{});
 connectSSE();
 
 // Resize chart when tab becomes active
