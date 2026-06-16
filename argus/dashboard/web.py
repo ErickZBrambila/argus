@@ -951,7 +951,10 @@ _HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#161b22">
 <title>Argus — Trading Dashboard</title>
 <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16x16.png">
@@ -1794,6 +1797,67 @@ _HTML = """<!DOCTYPE html>
   .legend-item { display: flex; align-items: center; gap: 5px; }
   .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .legend-dash { width: 18px; height: 2px; border-top: 2px dashed; flex-shrink: 0; }
+
+  /* ── Mobile / iPhone ────────────────────────────────────────────────────── */
+  @media (max-width: 639px) {
+    /* iOS safe-area: notch + home indicator */
+    body {
+      padding-left:   env(safe-area-inset-left,   0px);
+      padding-right:  env(safe-area-inset-right,  0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    .header {
+      padding-left:  max(16px, env(safe-area-inset-left,  16px));
+      padding-right: max(16px, env(safe-area-inset-right, 16px));
+      height: auto; min-height: 56px;
+    }
+
+    /* Header right: drop low-priority items to save space */
+    .countdown-wrap { display: none; }
+    .tz-select      { display: none; }
+    .header-right   { gap: 6px; }
+    .mc-label       { display: none; }
+
+    /* Tab bar: horizontal scroll so all 5 tabs fit */
+    .tab-bar {
+      overflow-x: auto; -webkit-overflow-scrolling: touch;
+      scrollbar-width: none; padding: 0 8px; gap: 0;
+    }
+    .tab-bar::-webkit-scrollbar { display: none; }
+    .tab-btn { padding: 10px 13px; font-size: 12px; white-space: nowrap; flex-shrink: 0; }
+
+    /* Content padding */
+    main  { padding: 10px; gap: 10px; }
+    .card { padding: 12px 11px; }
+
+    /* Prevent iOS auto-zoom on input focus (requires ≥16px) */
+    input, select, textarea { font-size: 16px !important; }
+
+    /* Touch targets: Apple HIG minimum 44pt */
+    .btn, .tab-btn, .wl-add-btn, .btn-eye,
+    .ticker-speed-btn, .wl-dd-item { min-height: 44px; }
+
+    /* Performance: stack trade/position tables */
+    .perf-tables { grid-template-columns: 1fr; }
+
+    /* Investigations: single column (minmax(360px) is too wide for 390px phones) */
+    .inv-grid { grid-template-columns: 1fr; }
+
+    /* Charts: taller on mobile for easier reading */
+    #price-chart      { height: 280px; }
+    .ct-chart-area    { height: 210px; }
+    #eq-chart         { height: 140px; }
+
+    /* Dropdowns: don't overflow viewport */
+    .wl-dropdown, .chart-search-dd { min-width: unset; width: calc(100vw - 32px); }
+
+    /* Log viewer: shorter so it doesn't eat the whole screen */
+    .log-tail { height: 140px; }
+
+    /* Alert body: allow wrapping */
+    .alert-entry { gap: 8px; }
+    .alert-time  { min-width: 42px; }
+  }
 </style>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"
         integrity="sha384-JZigAjwiaZtkUbA44CWkPaT3iBb/mU5pO6QOANp+OqHd4q+1+7MG1kzp2OOP9ZfP"
