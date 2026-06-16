@@ -47,6 +47,10 @@ logger = logging.getLogger(__name__)
 _UTC = datetime.timezone.utc
 _RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 
+# Symbols to watch for their FIRST bullish signal — fire a high-priority ntfy alert
+# when the composite flips to bullish for the first time (new listings, IPO watchlist, etc.)
+_PRIORITY_WATCH_SYMBOLS: frozenset[str] = frozenset({"SPCX"})
+
 
 @dataclass
 class AccountContext:
@@ -73,6 +77,7 @@ class Autopilot:
         self._last_evaluated_signals: dict[str, SignalResult] = {}
         # Decisions cache: symbol -> last TradeDecision (to reuse if signal hasn't changed)
         self._last_decisions: dict[str, TradeDecision] = {}
+        self._last_signal_map: dict[str, "SignalResult"] = {}
         # Screener candidates: [{symbol, reason, category}] — refreshed daily at open
         self._screener_candidates: list[dict] = []
         self._screener_last_date: datetime.date = datetime.date.min
@@ -84,6 +89,14 @@ class Autopilot:
         )
 
         init_db(self._cfg.database_url)
+
+        try:
+            from argus.storage.models import get_exit_only_symbols
+            with get_session() as _s:
+                _eos = list(get_exit_only_symbols(_s))
+            web_dashboard._state["exit_only_symbols"] = _eos
+        except Exception:
+            pass
 
         _shared_broker = RobinhoodBroker(
             username=self._cfg.robinhood_username,
@@ -167,6 +180,7 @@ class Autopilot:
         self._flashcards = FlashcardStore()
         self._recent_trades: collections.deque = collections.deque(maxlen=200)
         self._latest_signals: list[dict] = []
+        self._first_signal_sent: set[str] = set()  # priority symbols that already fired first-signal alert
         # Cache: label → {"equity": float, "positions": dict} — refreshed each tick
         self._account_cache: dict[str, dict] = {}
         self._last_ai_vote: dict = {}
@@ -378,6 +392,15 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         web_thread.start()
         logger.info("Web dashboard at http://%s:%d", self._cfg.web_host, self._cfg.web_port)
 
+        # Restore persisted approvals into account queues (survive restarts)
+        persisted = web_dashboard.get_persisted_approvals()
+        if persisted:
+            for acct in self._accounts:
+                for trade_id, info in persisted.items():
+                    if info.get("account_label") == acct.label and trade_id not in acct.pending_approvals:
+                        acct.pending_approvals[trade_id] = info
+            logger.info("Restored %d persisted approval(s) into account queues", len(persisted))
+
         self._terminal.start()
         try:
             first_equity = 0.0
@@ -516,6 +539,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         screener_syms = [c["symbol"] for c in self._screener_candidates
                          if c["symbol"] not in set(watchlist)]
         all_syms = list(watchlist) + screener_syms
+        if not all_syms:
+            return
 
         with _cf.ThreadPoolExecutor(max_workers=min(len(all_syms), 8), thread_name_prefix="sig") as ex:
             futures = {ex.submit(_compute_signal, sym): sym for sym in all_syms}
@@ -543,6 +568,24 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 d["screener_reason"] = candidate["reason"]
                 d["screener_category"] = candidate["category"]
                 signals.append(d)
+
+        # First-signal ntfy for high-conviction watch symbols (new listings, IPO pipeline)
+        for _sig_d in signals:
+            _sym = _sig_d.get("symbol", "")
+            if (_sym in _PRIORITY_WATCH_SYMBOLS
+                    and _sym not in self._first_signal_sent
+                    and _sig_d.get("composite") == "bullish"):
+                self._first_signal_sent.add(_sym)
+                _price = _sig_d.get("price", 0)
+                _conf  = _sig_d.get("confidence", 0)
+                logger.info("First BULLISH signal for priority watch symbol %s @ $%.2f", _sym, _price)
+                self._notifier.send(
+                    f"[PRIORITY] First BULLISH signal: {_sym}",
+                    f"{_sym} — first bullish composite signal detected!\n"
+                    f"Price: ${_price:.2f} | Confidence: {_conf:.0%}\n"
+                    f"RSI={_sig_d.get('rsi', 'N/A')}, MACD_hist={_sig_d.get('macd_hist', 'N/A')}\n"
+                    f"New listing — limited history, confirm before sizing up.",
+                )
 
         if not is_market_hours():
             self._latest_signals = signals
@@ -574,6 +617,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 }
             enriched.append(sig_dict)
         self._latest_signals = enriched
+        self._last_signal_map = signal_map
 
         self._update_dashboard(trading=True)
 
@@ -677,6 +721,11 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 if decision.action == "BUY":
                     with get_session() as session:
                         db_day_trades = count_day_trades_last_5_days(session)
+                        from argus.storage.models import get_exit_only_symbols
+                        exit_only = get_exit_only_symbols(session)
+                    if symbol in exit_only:
+                        logger.info("[%s][%s] BUY skipped — exit-only symbol", acct.label, symbol)
+                        continue
                     risk_check = acct.risk.approve_buy(symbol, equity, open_positions, db_day_trades)
                     if not risk_check.allowed:
                         logger.info("[%s][%s] BUY blocked: %s", acct.label, symbol, risk_check.reason)
@@ -727,10 +776,10 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             "account_number": acct.account_number,
             "signal": sig.composite,
             "signal_confidence": sig.confidence,
+            "price_at_queue": sig.price,
         }
         acct.pending_approvals[trade_id] = {
             **trade_info,
-            "dollar_amount": dollar_amount,
             "_sig": sig,
             "_decision": decision,
             "queued_at": datetime.datetime.now(_UTC).isoformat(),
@@ -744,6 +793,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
     _APPROVAL_TTL_SECONDS = 1800  # 30 minutes
 
+    _APPROVAL_PRICE_DRIFT_PCT = 0.03   # cancel BUY if price rose >3% since queued
+
     def _poll_approvals(self) -> None:
         now = datetime.datetime.now(_UTC)
         for acct in self._accounts:
@@ -751,8 +802,9 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 continue
             for trade_id in list(acct.pending_approvals):
                 info = acct.pending_approvals[trade_id]
+                sym = info.get("symbol", "")
 
-                # Auto-deny stale approvals
+                # Auto-expire stale approvals (30 min TTL)
                 queued_at_str = info.get("queued_at")
                 if queued_at_str:
                     try:
@@ -760,13 +812,32 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                         if (now - queued_at).total_seconds() > self._APPROVAL_TTL_SECONDS:
                             acct.pending_approvals.pop(trade_id)
                             web_dashboard.clear_approval(trade_id)
-                            logger.warning(
-                                "[%s] Approval %s auto-denied (stale >30 min): %s",
-                                acct.label, trade_id, info.get("symbol"),
-                            )
+                            logger.warning("[%s] Approval %s expired (>30 min): %s", acct.label, trade_id, sym)
                             continue
                     except Exception:
                         pass
+
+                # Auto-expire if price has drifted too far from when trade was queued
+                price_at_queue = info.get("price_at_queue")
+                if price_at_queue and sym in self._last_signal_map:
+                    current_price = self._last_signal_map[sym].price
+                    drift = (current_price - price_at_queue) / price_at_queue
+                    action = info.get("action", "BUY")
+                    # BUY: cancel if price rose too much (worse entry)
+                    # SELL: cancel if price fell too much (worse exit)
+                    if (action == "BUY" and drift > self._APPROVAL_PRICE_DRIFT_PCT) or \
+                       (action == "SELL" and drift < -self._APPROVAL_PRICE_DRIFT_PCT):
+                        acct.pending_approvals.pop(trade_id)
+                        web_dashboard.clear_approval(trade_id)
+                        logger.warning(
+                            "[%s] Approval %s cancelled — price drifted %.1f%% (queued=%.2f now=%.2f): %s",
+                            acct.label, trade_id, drift * 100, price_at_queue, current_price, sym,
+                        )
+                        self._notifier.send(
+                            f"[{acct.label.upper()}] Approval cancelled: {action} {sym}",
+                            f"Price moved {drift:+.1%} since queued (${price_at_queue:.2f} → ${current_price:.2f}). Re-run scan to get fresh signal.",
+                        )
+                        continue
 
                 decision = web_dashboard.get_approval_decision(trade_id)
                 if decision is None:
@@ -840,7 +911,15 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 f"Bought {result.quantity:.4f} {symbol} @ ${result.price:.4f} (${result.quantity * result.price:.2f})",
             )
         except Exception as exc:
-            logger.error("[%s] Execute buy failed for %s: %s", acct.label, symbol, exc)
+            logger.critical(
+                "[%s] BROKER BUY MAY HAVE FILLED BUT DB WRITE FAILED for %s: %s — check brokerage positions!",
+                acct.label, symbol, exc,
+            )
+            self._notifier.send(
+                f"[{acct.label.upper()}] CRITICAL: Buy DB write failed — {symbol}",
+                f"Broker order may have filled but local records were not saved. "
+                f"Check your brokerage account for {symbol} position. Error: {str(exc)[:200]}",
+            )
 
     def _execute_sell(self, acct: AccountContext, symbol: str, quantity: float, reason: str = "") -> bool:
         """Returns True if the sell was successfully filled."""

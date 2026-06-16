@@ -77,7 +77,7 @@ class Notifier:
     def _try_macos(self, subject: str, body: str) -> None:
         try:
             def _esc(s: str) -> str:
-                return s.replace("\\", "\\\\").replace('"', '\\"')
+                return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", " ")
             script = (
                 f'display notification "{_esc(body[:250])}" '
                 f'with title "Argus" subtitle "{_esc(subject[:80])}"'

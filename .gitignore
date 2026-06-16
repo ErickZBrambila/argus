@@ -21,3 +21,4 @@ paper_state*.json
 argus_flashcards.jsonl
 argus.db
 alert_history.json
+approval_queue.json

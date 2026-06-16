@@ -446,6 +446,7 @@ class RobinhoodBroker:
         import robin_stocks.robinhood as rh
         import time
 
+        order: dict = {}   # guard against UnboundLocalError if every poll attempt throws
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:

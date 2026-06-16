@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hmac as _hmac
 import json
 import logging
 import queue as stdlib_queue
@@ -84,8 +85,6 @@ def _alert_load() -> None:
         if not _ALERT_PERSIST_PATH.exists():
             return
         data = json.loads(_ALERT_PERSIST_PATH.read_text())
-        if data.get("date") != datetime.date.today().isoformat():
-            return  # stale — start fresh
         _alert_log = _collections.deque(data.get("entries", []), maxlen=500)
     except Exception as exc:
         logger.debug("Alert log load failed: %s", exc)
@@ -136,11 +135,42 @@ def register_autopilot(ap) -> None:
 _approval_lock = threading.Lock()
 _pending_approvals: dict[str, dict] = {}   # trade_id → trade info
 _approval_decisions: dict[str, str] = {}   # trade_id → "approved" | "denied"
+_APPROVAL_PERSIST_PATH = _pathlib.Path(__file__).parent.parent.parent / "approval_queue.json"
+
+
+def _approval_save() -> None:
+    try:
+        _APPROVAL_PERSIST_PATH.write_text(json.dumps(list(_pending_approvals.values()), default=str))
+    except Exception as exc:
+        logger.debug("Approval queue save failed: %s", exc)
+
+
+def _approval_load() -> None:
+    try:
+        if not _APPROVAL_PERSIST_PATH.exists():
+            return
+        entries = json.loads(_APPROVAL_PERSIST_PATH.read_text())
+        if not isinstance(entries, list):
+            return
+        for entry in entries:
+            tid = entry.get("trade_id")
+            if tid:
+                _pending_approvals[tid] = entry
+        logger.info("Loaded %d persisted approval(s) from disk", len(_pending_approvals))
+    except Exception as exc:
+        logger.debug("Approval queue load failed: %s", exc)
+
+
+def get_persisted_approvals() -> dict[str, dict]:
+    """Return current pending approvals — used by autopilot to restore acct state on startup."""
+    with _approval_lock:
+        return dict(_pending_approvals)
 
 
 def queue_approval(trade_id: str, trade_info: dict) -> None:
     with _approval_lock:
-        _pending_approvals[trade_id] = {**trade_info, "queued_at": datetime.datetime.utcnow().isoformat()}
+        _pending_approvals[trade_id] = {**trade_info, "queued_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    _approval_save()
     _push_approvals_state()
 
 
@@ -154,6 +184,7 @@ def clear_approval(trade_id: str) -> None:
     with _approval_lock:
         _pending_approvals.pop(trade_id, None)
         _approval_decisions.pop(trade_id, None)
+    _approval_save()
     _push_approvals_state()
 
 
@@ -162,8 +193,11 @@ def _push_approvals_state() -> None:
         approvals = dict(_pending_approvals)
     with _state_lock:
         _state["pending_approvals"] = approvals
-        snapshot = dict(_state)
+        snapshot = {**_state, "alert_log": list(_alert_log)}
     _sse_push(json.dumps(snapshot, default=str))
+
+
+_approval_load()
 
 
 # ── Financial news RSS (background poller) ────────────────────────────────────
@@ -220,35 +254,40 @@ def set_watchlist_base(symbols: list[str]) -> None:
     global _runtime_watchlist
     with _watchlist_lock:
         _runtime_watchlist = list(symbols)
-    _state["watchlist"] = list(symbols)
+    with _state_lock:
+        _state["watchlist"] = list(symbols)
 
 
 def prefill_state(cfg: dict | None = None) -> None:
     """Populate _state with boot-time data so /api/status has real values
     before the first scan cycle completes."""
+    updates: dict = {}
     try:
         from argus.dashboard.token_tracker import get_summary as _tok
-        _state["token_usage"] = _tok()
+        updates["token_usage"] = _tok()
     except Exception:
         pass
     try:
         from argus.agent.decision import get_ai_status, get_model_info
-        _state["ai_status"] = get_ai_status()
-        _state["ai_models"] = get_model_info()
+        updates["ai_status"] = get_ai_status()
+        updates["ai_models"] = get_model_info()
     except Exception:
         pass
-    if cfg:
-        _state.setdefault("paper_trade", cfg.get("paper_trade", True))
-        _state.setdefault("equity_goal", cfg.get("equity_goal", 0))
     try:
         from argus.engine.session import get_market_session
-        _state["market_session"] = get_market_session()
+        updates["market_session"] = get_market_session()
     except Exception:
-        _state.setdefault("market_session", "closed")
-    _state.setdefault("kill_switch", False)
-    _state.setdefault("paused", False)
-    _state.setdefault("signals", [])
-    _state.setdefault("positions", {})
+        updates.setdefault("market_session", "closed")
+    with _state_lock:
+        _state.update(updates)
+        if cfg:
+            _state.setdefault("paper_trade", cfg.get("paper_trade", True))
+            _state.setdefault("equity_goal", cfg.get("equity_goal", 0))
+        _state.setdefault("kill_switch", False)
+        _state.setdefault("paused", False)
+        _state.setdefault("signals", [])
+        _state.setdefault("positions", {})
+        _state.setdefault("exit_only_symbols", [])
 
 
 def get_watchlist() -> list[str]:
@@ -373,6 +412,19 @@ app = FastAPI(title="Argus Dashboard", docs_url=None, redoc_url=None)
 _STATIC_DIR = pathlib.Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
+# ── Security headers middleware ───────────────────────────────────────────────
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+app.add_middleware(_SecurityHeadersMiddleware)
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 _dashboard_token: str = ""
 
@@ -382,9 +434,16 @@ def _configure_auth(token: str) -> None:
     _dashboard_token = token
 
 
-def _require_auth(x_argus_token: str = Header(default="")) -> None:
-    if _dashboard_token and x_argus_token != _dashboard_token:
-        raise HTTPException(status_code=401, detail="Invalid or missing X-Argus-Token header")
+def _require_auth(
+    x_argus_token: str = Header(default=""),
+    token: str = Query(default=""),
+) -> None:
+    """Constant-time token check. Accepts X-Argus-Token header or ?token= query param.
+    Query param is required for EventSource (browser cannot set custom headers on SSE)."""
+    if _dashboard_token:
+        provided = x_argus_token or token
+        if not provided or not _hmac.compare_digest(provided.encode(), _dashboard_token.encode()):
+            raise HTTPException(status_code=401, detail="Invalid or missing authentication")
 
 
 @app.on_event("startup")
@@ -413,8 +472,12 @@ async def _sse_broadcaster() -> None:
                     q.put_nowait(data)
                 except asyncio.QueueFull:
                     pass
-        except Exception:
-            pass
+        except asyncio.CancelledError:
+            raise
+        except stdlib_queue.Empty:
+            pass  # expected: _sse_queue.get timeout with no data
+        except Exception as exc:
+            logger.warning("SSE broadcaster error: %s", exc)
 
 
 _AUTO_TRIGGER_THRESHOLD = 0.55   # technical confidence threshold
@@ -479,7 +542,7 @@ def push_state(state: dict) -> None:
     except Exception:
         pass
     # Preserve keys that are managed outside the scan loop
-    for _k in ("watchlist", "investigations"):
+    for _k in ("watchlist", "investigations", "pending_approvals"):
         if _k not in state and _k in _state:
             state = {**state, _k: _state[_k]}
     now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
@@ -533,7 +596,7 @@ async def get_version() -> dict:
     return {"version": __version__}
 
 
-@app.get("/api/status")
+@app.get("/api/status", dependencies=[Depends(_require_auth)])
 async def get_status() -> dict:
     with _state_lock:
         snap = dict(_state)
@@ -542,8 +605,8 @@ async def get_status() -> dict:
     return snap
 
 
-@app.get("/api/logs")
-async def get_logs(n: int = 100) -> dict:
+@app.get("/api/logs", dependencies=[Depends(_require_auth)])
+async def get_logs(n: int = Query(default=100, ge=1, le=500)) -> dict:
     try:
         from argus.dashboard.log_buffer import get_recent
         return {"logs": get_recent(n)}
@@ -576,17 +639,17 @@ async def set_scan_interval(body: dict) -> dict:
     return {"seconds": seconds, "status": "adaptive" if seconds is None else "override"}
 
 
-@app.get("/api/positions")
+@app.get("/api/positions", dependencies=[Depends(_require_auth)])
 async def get_positions() -> dict:
     return {"positions": _state.get("positions", {})}
 
 
-@app.get("/api/trades")
+@app.get("/api/trades", dependencies=[Depends(_require_auth)])
 async def get_trades() -> dict:
     return {"trades": _state.get("recent_trades", [])}
 
 
-@app.get("/api/signals")
+@app.get("/api/signals", dependencies=[Depends(_require_auth)])
 async def get_signals() -> dict:
     return {"signals": _state.get("signals", [])}
 
@@ -608,6 +671,8 @@ async def resume_trading() -> dict:
 @app.post("/api/close/{symbol}", dependencies=[Depends(_require_auth)])
 async def force_close(symbol: str) -> dict:
     symbol = symbol.upper().strip()
+    if not _SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=400, detail="Invalid symbol")
     positions = _state.get("positions", {})
     if symbol not in positions:
         raise HTTPException(status_code=404, detail=f"{symbol} not in open positions")
@@ -652,21 +717,32 @@ async def promote_position(symbol: str, body: dict = {}) -> dict:
     return {"status": "queued", "symbol": symbol, "from": from_account, "to": to_account}
 
 
-def _yf_chart_fallback(symbol: str, existing: list) -> list:
-    """Fetch 3-month daily candles from yfinance.
+_YF_PERIOD_MAP = {
+    "day": "5d", "week": "1mo", "month": "1mo",
+    "3month": "3mo", "year": "1y", "3year": "3y", "5year": "5y",
+}
 
-    Used when the primary broker source returns sparse/placeholder data for
-    newly-listed symbols (e.g. SPCX shortly after its IPO).  Returns the
-    richer dataset — yfinance result if it has more candles, else existing.
+# Server-side chart cache: (symbol, span, interval) → (fetched_at_epoch, candles)
+_chart_cache: dict[str, tuple[float, list]] = {}
+_CHART_CACHE_TTL = 300  # 5 minutes
+
+
+def _yf_chart_fallback(symbol: str, existing: list, span: str = "3month") -> list:
+    """Fetch OHLCV + computed SMA-20/EMA-50 from yfinance.
+
+    Used whenever broker data is stale or sparse. Returns the richer
+    dataset (yfinance if more candles, else existing).
     """
     try:
         import yfinance as yf
+        import pandas as pd
         try:
             from argus.broker.robinhood import CRYPTO_SYMBOLS as _CS
         except Exception:
             _CS: set = set()
         yf_sym = f"{symbol}-USD" if symbol in _CS else symbol
-        df = yf.download(yf_sym, period="3mo", interval="1d", auto_adjust=True, progress=False)
+        period = _YF_PERIOD_MAP.get(span, "3mo")
+        df = yf.download(yf_sym, period=period, interval="1d", auto_adjust=True, progress=False)
         if df.empty:
             return existing
         # Flatten MultiIndex columns produced by some yfinance versions
@@ -674,8 +750,19 @@ def _yf_chart_fallback(symbol: str, existing: list) -> list:
             df.columns = [c[0].lower() for c in df.columns]
         else:
             df.columns = [c.lower() for c in df.columns]
+
+        # Compute indicators on the full series before iterating
+        closes = df["close"].astype(float)
+        sma20 = closes.rolling(20).mean()
+        ema50 = closes.ewm(span=50, adjust=False).mean()
+        delta = closes.diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
+        rs = gain / loss
+        rsi14 = 100 - (100 / (1 + rs))
+
         candles = []
-        for ts, row in df.iterrows():
+        for i, (ts, row) in enumerate(df.iterrows()):
             try:
                 t = int(ts.timestamp())
                 o  = float(row.get("open",  0))
@@ -684,11 +771,20 @@ def _yf_chart_fallback(symbol: str, existing: list) -> list:
                 c  = float(row.get("close", 0))
                 if not c or (o == h == lo == c):
                     continue
-                candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c})
+                v = float(row.get("volume") or 0)
+                s20 = sma20.iloc[i]
+                e50 = ema50.iloc[i]
+                r14 = rsi14.iloc[i]
+                candles.append({
+                    "time": t, "open": o, "high": h, "low": lo, "close": c, "volume": v,
+                    "sma_20": None if pd.isna(s20) else round(float(s20), 4),
+                    "ema_50": None if pd.isna(e50) else round(float(e50), 4),
+                    "rsi": None if pd.isna(r14) else round(float(r14), 2),
+                })
             except Exception:
                 pass
-        # Patch today's candle with real-time price while market is open —
-        # the daily download snapshots whatever price was last baked in.
+
+        # Patch today's candle with real-time price while market is open
         if candles:
             import datetime as _dt
             today_ts = int(_dt.datetime.combine(_dt.date.today(), _dt.time.min).timestamp())
@@ -704,7 +800,7 @@ def _yf_chart_fallback(symbol: str, existing: list) -> list:
                 except Exception:
                     pass
 
-        logger.info("yfinance fallback for %s: %d candles (vs %d from broker)", symbol, len(candles), len(existing))
+        logger.info("yfinance for %s/%s: %d candles", symbol, span, len(candles))
         return candles if len(candles) > len(existing) else existing
     except Exception as exc:
         logger.warning("yfinance chart fallback failed for %s: %s", symbol, exc)
@@ -717,9 +813,19 @@ async def get_chart(
     span: str = Query("3month"),
     interval: str = Query("day")
 ) -> dict:
+    import time as _time
     symbol = symbol.upper().strip()
     if not _SYMBOL_RE.match(symbol):
         raise HTTPException(status_code=400, detail="Invalid symbol")
+
+    # Serve from cache if fresh enough
+    cache_key = f"{symbol}|{span}|{interval}"
+    cached = _chart_cache.get(cache_key)
+    if cached:
+        fetched_at, cached_candles = cached
+        if _time.monotonic() - fetched_at < _CHART_CACHE_TTL:
+            return {"candles": cached_candles, "symbol": symbol, "cached": True}
+
     if _chart_source_fn is None:
         return {"candles": [], "symbol": symbol}
     try:
@@ -729,7 +835,6 @@ async def get_chart(
         candles = []
         for bar in (raw or []):
             try:
-                # Accept pre-parsed integer timestamps or ISO string fields
                 if isinstance(bar.get("time"), (int, float)):
                     t = int(bar["time"])
                 else:
@@ -743,7 +848,6 @@ async def get_chart(
                 lo= float(bar.get("low_price")   or bar.get("low")   or 0)
                 c = float(bar.get("close_price") or bar.get("close") or 0)
                 v = float(bar.get("volume") or 0)
-                # Skip zero-price or zero-spread bars — Robinhood placeholder data
                 if not c or (o == h == lo == c):
                     continue
                 candles.append({
@@ -753,31 +857,28 @@ async def get_chart(
             except Exception:
                 pass
 
-        # Always attempt to patch today's candle/data if it's missing or if the 
-        # last candle's timestamp is not today (for daily charts).
-        # Robinhood daily history is often delayed by 1 day.
+        # Patch with yfinance when broker data is stale (common for daily charts)
         import datetime as _dt
         today_ts = int(_dt.datetime.combine(_dt.date.today(), _dt.time.min).timestamp())
-        needs_patch = False
-        if not candles:
-            needs_patch = True
-        elif interval == "day":
-            last_ts = candles[-1]["time"]
-            if last_ts < today_ts:
-                needs_patch = True
-
-        if needs_patch or len(candles) < 5:
+        needs_patch = (
+            not candles
+            or len(candles) < 5
+            or (interval == "day" and candles[-1]["time"] < today_ts)
+        )
+        if needs_patch:
+            _span = span  # capture for lambda
             candles = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: _yf_chart_fallback(symbol, candles)
+                None, lambda: _yf_chart_fallback(symbol, candles, span=_span)
             )
 
+        _chart_cache[cache_key] = (_time.monotonic(), candles)
         return {"candles": candles, "symbol": symbol}
     except Exception as exc:
         logger.warning("Chart data error for %s: %s", symbol, exc)
         return {"candles": [], "symbol": symbol}
 
 
-@app.get("/api/investigate")
+@app.get("/api/investigate", dependencies=[Depends(_require_auth)])
 async def get_investigations() -> dict:
     with _investigation_lock:
         return {"investigations": dict(_investigations)}
@@ -833,7 +934,7 @@ async def search_symbols(q: str = Query(default="", max_length=60)) -> dict:
         return {"results": []}
 
 
-@app.get("/api/flashcards")
+@app.get("/api/flashcards", dependencies=[Depends(_require_auth)])
 async def get_flashcards() -> dict:
     cards = _state.get("flashcards", [])
     summary = _state.get("flashcard_summary", {})
@@ -893,6 +994,29 @@ async def remove_from_watchlist_api(symbol: str) -> dict:
     return {"watchlist": wl}
 
 
+@app.post("/api/watchlist/{symbol}/exit-only", dependencies=[Depends(_require_auth)])
+async def set_exit_only_api(symbol: str, payload: dict) -> dict:
+    symbol = symbol.upper().strip()
+    if not _SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=400, detail="Invalid symbol")
+    value = bool(payload.get("value", True))
+    try:
+        from argus.storage.models import set_exit_only, get_exit_only_symbols
+        with get_session() as session:
+            set_exit_only(session, symbol, value)
+            session.flush()
+            exit_only = get_exit_only_symbols(session)
+    except Exception as exc:
+        logger.error("set_exit_only failed for %s: %s", symbol, exc)
+        raise HTTPException(status_code=500, detail="Failed to update exit-only status")
+    with _state_lock:
+        _state["exit_only_symbols"] = list(exit_only)
+        snapshot = dict(_state)
+    _sse_push(json.dumps(snapshot, default=str))
+    logger.info("Exit-only %s → %s", symbol, value)
+    return {"symbol": symbol, "exit_only": value, "exit_only_symbols": list(exit_only)}
+
+
 @app.get("/api/approvals", dependencies=[Depends(_require_auth)])
 async def get_approvals() -> dict:
     with _approval_lock:
@@ -938,9 +1062,9 @@ async def clear_alerts() -> dict:
 async def run_backtest(payload: dict) -> dict:
     symbol = (payload.get("symbol") or "").strip().upper()
     span   = payload.get("span", "year")
-    if not symbol:
-        raise HTTPException(status_code=400, detail="symbol required")
-    if span not in ("month", "3month", "year", "5year"):
+    if not symbol or not _SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=400, detail="Invalid symbol")
+    if span not in ("month", "3month", "year", "3year", "5year"):
         span = "year"
     if _autopilot is None:
         raise HTTPException(status_code=503, detail="Autopilot not running")
@@ -952,15 +1076,16 @@ async def run_backtest(payload: dict) -> dict:
         result = await loop.run_in_executor(None, engine.run, symbol, span)
         return result.to_dict()
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        logger.warning("Backtest validation error for %s: %s", symbol, exc)
+        raise HTTPException(status_code=422, detail="Insufficient historical data for backtest")
     except Exception as exc:
         logger.error("Backtest failed for %s: %s", symbol, exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Backtest failed")
 
 
 # ── SSE stream ────────────────────────────────────────────────────────────────
 
-@app.get("/events")
+@app.get("/events", dependencies=[Depends(_require_auth)])
 async def sse_stream() -> StreamingResponse:
     q: asyncio.Queue = asyncio.Queue(maxsize=10)
     _subscribers.add(q)
@@ -973,6 +1098,7 @@ async def sse_stream() -> StreamingResponse:
                         **_state,
                         "equity_history": list(_equity_history),
                         "equity_history_by_account": {k: list(v) for k, v in _equity_history_by_account.items()},
+                        "alert_log": list(_alert_log),
                     }
                 yield f"data: {json.dumps(initial, default=str)}\n\n"
             while True:
@@ -1113,12 +1239,22 @@ _HTML = """<!DOCTYPE html>
     z-index: 99;
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 0 10px;
-    overflow-x: auto;
-    overflow-y: hidden;
+    overflow: hidden;
   }
-  .price-chip-rail::-webkit-scrollbar { display: none; }
+  .price-chip-track {
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+    animation: chip-scroll 60s linear infinite;
+    will-change: transform;
+    flex-shrink: 0;
+  }
+  .price-chip-track:hover { animation-play-state: paused; }
+  @keyframes chip-scroll {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-50%); }
+  }
+  .price-chip-sep { color: var(--border); font-size: 9px; padding: 0 10px; flex-shrink: 0; }
   .price-chip {
     display: inline-flex;
     align-items: center;
@@ -1405,9 +1541,18 @@ _HTML = """<!DOCTYPE html>
   .ct-dashlet-sig { font-size: 11px; }
   .ct-dashlet-remove { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; padding: 2px 5px; border-radius: 4px; line-height: 1; }
   .ct-dashlet-remove:hover { color: var(--danger); background: rgba(248,81,73,.12); }
+  .ct-exit-only-badge { font-size: 9px; font-weight: 800; padding: 2px 6px; border-radius: 4px; letter-spacing: .5px; background: rgba(210,153,34,.2); color: var(--warn); border: 1px solid rgba(210,153,34,.4); white-space: nowrap; }
+  .ct-exit-only-btn { background: none; border: 1px solid var(--border); color: var(--muted); padding: 2px 8px; border-radius: 5px; font-size: 10px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+  .ct-exit-only-btn:hover { border-color: var(--warn); color: var(--warn); }
+  .ct-exit-only-btn.active { background: rgba(210,153,34,.15); color: var(--warn); border-color: var(--warn); }
+  .ct-dashlet.exit-only { border-color: rgba(210,153,34,.35); }
   .ct-chart-area { width: 100%; height: 240px; border-radius: var(--radius-sm); overflow: hidden; }
   .ct-dashlet-footer { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 11px; flex-wrap: wrap; }
-  .ct-backtest-btn { background: var(--surface3); border: 1px solid var(--border); color: var(--muted); padding: 3px 9px; border-radius: 5px; font-size: 11px; cursor: pointer; margin-left: auto; }
+  .ct-backtest-wrap { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+  .ct-bt-span-btn { background: var(--surface3); border: 1px solid var(--border); color: var(--muted); padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; cursor: pointer; }
+  .ct-bt-span-btn.active { background: rgba(88,166,255,.15); color: var(--blue); border-color: var(--blue); }
+  .ct-bt-span-btn:hover:not(.active) { border-color: var(--muted); color: var(--text); }
+  .ct-backtest-btn { background: var(--surface3); border: 1px solid var(--border); color: var(--muted); padding: 3px 9px; border-radius: 5px; font-size: 11px; cursor: pointer; }
   .ct-backtest-btn:hover { border-color: var(--accent); color: var(--accent); }
   .ct-backtest-btn.loading { opacity: .5; pointer-events: none; }
   .ct-backtest-result { margin-top: 10px; background: var(--surface3); border-radius: 8px; padding: 10px 12px; font-size: 12px; }
@@ -1415,6 +1560,24 @@ _HTML = """<!DOCTYPE html>
   .ct-bt-stat { background: var(--surface2); border-radius: 6px; padding: 7px 8px; text-align: center; }
   .ct-bt-stat-label { font-size: 10px; color: var(--muted); letter-spacing: .3px; text-transform: uppercase; }
   .ct-bt-stat-val { font-size: 15px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  /* Batch backtest */
+  .ct-batch-btn { background: var(--surface3); border: 1px solid var(--border); color: var(--muted); padding: 4px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+  .ct-batch-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .ct-batch-btn.loading { opacity: .5; pointer-events: none; }
+  #ct-bt-batch { margin-top: 0; }
+  .ct-bt-batch-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .ct-bt-batch-span { font-size: 11px; color: var(--muted); font-weight: 700; letter-spacing: .5px; }
+  .ct-bt-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .ct-bt-table th { color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: right; cursor: pointer; user-select: none; white-space: nowrap; }
+  .ct-bt-table th:first-child { text-align: left; }
+  .ct-bt-table th:hover { color: var(--text); }
+  .ct-bt-table th.sort-asc::after { content: ' ↑'; }
+  .ct-bt-table th.sort-desc::after { content: ' ↓'; }
+  .ct-bt-table td { padding: 7px 8px; border-bottom: 1px solid rgba(48,54,61,.5); text-align: right; font-variant-numeric: tabular-nums; }
+  .ct-bt-table td:first-child { text-align: left; font-weight: 700; color: var(--accent); cursor: pointer; }
+  .ct-bt-table td:first-child:hover { text-decoration: underline; }
+  .ct-bt-table tr:last-child td { border-bottom: none; }
+  .ct-bt-table tr:hover td { background: var(--surface3); }
   .ct-stat { color: var(--muted); }
   .ct-stat span { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
   .ct-tf-btns { display: flex; gap: 2px; margin-left: auto; margin-right: 4px; }
@@ -1449,6 +1612,12 @@ _HTML = """<!DOCTYPE html>
   .alert-entry.approval { border-left-color: var(--accent); }
   .alert-entry.investigation { border-left-color: #a78bfa; }
   .alert-entry.error { border-left-color: var(--bear); }
+  .alert-inline-actions { display: flex; gap: 8px; margin-top: 6px; }
+  .alert-inline-btn { padding: 3px 10px; border-radius: 6px; border: none; font-size: 11px; font-weight: 600; cursor: pointer; }
+  .alert-inline-btn.approve { background: rgba(63,185,80,.2); color: #3fb950; }
+  .alert-inline-btn.approve:hover { background: rgba(63,185,80,.35); }
+  .alert-inline-btn.deny { background: rgba(248,81,73,.2); color: #f85149; }
+  .alert-inline-btn.deny:hover { background: rgba(248,81,73,.35); }
   .alert-time { font-size: 11px; color: var(--muted); font-family: var(--mono); min-width: 52px; padding-top: 2px; white-space: nowrap; }
   .alert-subject { font-size: 13px; font-weight: 600; color: var(--text); }
   .alert-body { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
@@ -2013,8 +2182,8 @@ _HTML = """<!DOCTYPE html>
       <div class="ticker-track" id="ticker-track"></div>
     </div>
     <div class="ticker-speed-wrap">
-      <button class="ticker-speed-btn" onclick="tickerSpeed(this,0.4)" title="Slow">🐢</button>
-      <button class="ticker-speed-btn active" onclick="tickerSpeed(this,1)" title="Normal">▶</button>
+      <button class="ticker-speed-btn active" onclick="tickerSpeed(this,0.4)" title="Slow">🐢</button>
+      <button class="ticker-speed-btn" onclick="tickerSpeed(this,1)" title="Normal">▶</button>
       <button class="ticker-speed-btn" onclick="tickerSpeed(this,2.5)" title="Fast">⚡</button>
     </div>
   </div>
@@ -2263,7 +2432,26 @@ _HTML = """<!DOCTYPE html>
         <div class="ct-divider"></div>
         <div style="font-size:11px;font-weight:700;color:var(--muted);white-space:nowrap">Suggested:</div>
         <div class="suggest-chips" id="suggest-chips"></div>
+        <div class="ct-divider"></div>
+        <button class="ct-batch-btn" id="ct-batch-btn" onclick="ctBatchBacktest()">⏱ Backtest All</button>
       </div>
+    </div>
+
+    <!-- Batch backtest results -->
+    <div class="card card-full" id="ct-bt-batch" style="display:none">
+      <div class="ct-bt-batch-header">
+        <span style="font-size:13px;font-weight:700">Batch Backtest Results</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="ct-bt-batch-span" id="ct-batch-span-label"></span>
+          <div style="display:flex;gap:4px">
+            <button class="ct-bt-span-btn active" id="ct-batch-span-1y" onclick="ctBatchSetSpan('year',this)">1Y</button>
+            <button class="ct-bt-span-btn" id="ct-batch-span-3y" onclick="ctBatchSetSpan('3year',this)">3Y</button>
+            <button class="ct-bt-span-btn" id="ct-batch-span-5y" onclick="ctBatchSetSpan('5year',this)">5Y</button>
+          </div>
+          <button onclick="document.getElementById('ct-bt-batch').style.display='none'" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px">✕</button>
+        </div>
+      </div>
+      <div id="ct-bt-batch-body"></div>
     </div>
 
     <!-- Draggable dashlet grid -->
@@ -3040,6 +3228,7 @@ function applyState(state) {
   updatePriceChips(state.signals, state.watchlist);
   updateTicker(state.signals);
   if (state.watchlist) { ctApplyWatchlist(state.watchlist); buildChartTabs(state.watchlist); }
+  if (state.exit_only_symbols !== undefined) ctApplyExitOnlyState(state.exit_only_symbols);
   if (state.investigations) renderInvestigations(state.investigations);
   if (state.equity_history) eqRender(state.equity_history, state.equity_history_by_account || {});
   // Scan timing
@@ -3052,7 +3241,7 @@ function applyState(state) {
   renderPerformance(state.performance);
   renderReadiness(state.readiness_scorecard, state.ai_vote);
   renderFlashcards(state);
-  if (state.alert_log) renderAlerts(state.alert_log);
+  if (state.alert_log) renderAlerts(state.alert_log, state.pending_approvals);
   renderLogs(state.logs || []);
   // Refresh markers if chart is showing (new closed trades may have arrived)
   if (_chartSymbol && _lastCandles[_chartSymbol]) {
@@ -3239,7 +3428,7 @@ function renderFlashcards(state) {
 async function togglePause() {
   const endpoint = paused ? '/api/resume' : '/api/pause';
   await apiFetch(endpoint, {method:'POST'});
-  const status = await fetch('/api/status').then(r=>r.json());
+  const status = await apiFetch('/api/status').then(r=>r.json());
   paused = status.paused;
   updateBadges(status);
   document.getElementById('btn-pause').textContent = paused ? '▶ Resume' : '⏸ Pause';
@@ -3247,11 +3436,11 @@ async function togglePause() {
 
 async function fetchAll() {
   const [status, positions, signals, trades, logs] = await Promise.all([
-    fetch('/api/status').then(r=>r.json()),
-    fetch('/api/positions').then(r=>r.json()),
-    fetch('/api/signals').then(r=>r.json()),
-    fetch('/api/trades').then(r=>r.json()),
-    fetch('/api/logs?n=100').then(r=>r.json()),
+    apiFetch('/api/status').then(r=>r.json()),
+    apiFetch('/api/positions').then(r=>r.json()),
+    apiFetch('/api/signals').then(r=>r.json()),
+    apiFetch('/api/trades').then(r=>r.json()),
+    apiFetch('/api/logs?n=100').then(r=>r.json()),
   ]);
   applyState({...status, ...positions, ...signals, ...trades, logs: logs.logs || []});
 }
@@ -3354,7 +3543,7 @@ const _CHART_OPTS = {
   crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   rightPriceScale: { borderColor: '#2a2f3e' },
   timeScale: { borderColor: '#2a2f3e', timeVisible: true, tickMarkFormatter: _fmtChartTime },
-  handleScroll: true, handleScale: true,
+  handleScroll: true, handleScale: false,
   localization: { timeFormatter: _fmtChartTime },
 };
 
@@ -3500,9 +3689,9 @@ async function loadChart(symbol) {
     _lineSeries.setData(candles.map(c => ({ time: c.time, value: c.close })));
 
     // Volume
-    _volumeSeries.setData(candles.map(c => ({
+    _volumeSeries.setData(candles.filter(c => c.volume != null).map(c => ({
       time: c.time,
-      value: c.volume,
+      value: c.volume || 0,
       color: c.close >= c.open ? 'rgba(0, 212, 170, 0.5)' : 'rgba(248, 81, 73, 0.5)'
     })));
 
@@ -3664,76 +3853,59 @@ async function fetchNewsHeadlines() {
   } catch(e) { console.warn('fetchNewsHeadlines failed', e); }
 }
 
-let _tickerSpeedMult = 1;
+let _tickerSpeedMult = 0.4;
 function tickerSpeed(btn, mult) {
   _tickerSpeedMult = mult;
   document.querySelectorAll('.ticker-speed-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   const track = document.getElementById('ticker-track');
   if (track && track.scrollWidth) {
-    const singleW = track.scrollWidth / 6;
-    const dur = Math.max(5, Math.round(singleW / (120 * _tickerSpeedMult)));
+    const dur = Math.max(5, Math.round((track.scrollWidth / 6) / (120 * _tickerSpeedMult)));
     track.style.animationDuration = dur + 's';
+  }
+  const chipTrack = document.querySelector('.price-chip-track');
+  if (chipTrack && chipTrack.scrollWidth) {
+    const dur = Math.max(10, Math.round((chipTrack.scrollWidth / 2) / (80 * _tickerSpeedMult)));
+    chipTrack.style.animationDuration = dur + 's';
   }
 }
 
-// updatePriceChips — one chip per watchlist symbol, price from signals, persists across scans
+// updatePriceChips — revolving marquee, one chip per watchlist symbol
 function updatePriceChips(signals, watchlist) {
   const rail = document.getElementById('price-chip-rail');
   if (!rail) return;
 
-  // Build price lookup from signals
   const priceMap = {};
   (signals || []).forEach(s => { if (s.symbol) priceMap[s.symbol] = s; });
 
-  // Strictly follow watchlist order; ignore extra signal symbols not in watchlist
   const wl = watchlist || (window._argusState && window._argusState.watchlist) || [];
-  if (!wl.length) {
-    rail.innerHTML = '';
-    return;
-  }
+  if (!wl.length) { rail.innerHTML = ''; return; }
 
-  const existing = new Map([...rail.querySelectorAll('.price-chip')].map(el => [el.dataset.sym, el]));
-  const seen = new Set();
-
-  wl.forEach((sym) => {
-    seen.add(sym);
+  const chipsHtml = wl.map(sym => {
     const s = priceMap[sym];
     const price = s && s.price != null ? '$' + s.price.toFixed(s.price < 10 ? 4 : 2) : '—';
     const change = s ? (s.change_pct || 0) : 0;
     const arrow = change > 0 ? '▲' : change < 0 ? '▼' : '—';
     const arrowCls = change > 0 ? 'up' : change < 0 ? 'down' : 'flat';
     const priceColor = change > 0 ? 'var(--green)' : change < 0 ? 'var(--red)' : 'var(--muted)';
+    const title = s ? `${change >= 0 ? '+' : ''}${(change).toFixed(2)}% today` : '';
+    return `<span class="price-chip" title="${escHtml(title)}" onclick="ctQuickView('${escHtml(sym)}')">`
+      + `<span class="price-chip-sym">${escHtml(sym)}</span>`
+      + `<span class="price-chip-price" style="color:${priceColor}">${price}</span>`
+      + `<span class="price-chip-arrow ${arrowCls}">${arrow}</span>`
+      + `</span><span class="price-chip-sep">·</span>`;
+  }).join('');
 
-    if (existing.has(sym)) {
-      // Update in-place
-      const chip = existing.get(sym);
-      chip.title = s ? `${change >= 0 ? '+' : ''}${change.toFixed(2)}% today` : '';
-      chip.onclick = () => ctQuickView(sym);
-      const priceEl = chip.querySelector('.price-chip-price');
-      priceEl.textContent = price;
-      priceEl.style.color = priceColor;
-      const arr = chip.querySelector('.price-chip-arrow');
-      arr.textContent = arrow;
-      arr.className = 'price-chip-arrow ' + arrowCls;
-      // Ensure order matches watchlist order
-      rail.appendChild(chip);
-    } else {
-      const chip = document.createElement('span');
-      chip.className = 'price-chip';
-      chip.dataset.sym = sym;
-      chip.title = s ? `${change >= 0 ? '+' : ''}${change.toFixed(2)}% today` : '';
-      chip.onclick = () => ctQuickView(sym);
-      chip.innerHTML =
-        `<span class="price-chip-sym">${escHtml(sym)}</span>` +
-        `<span class="price-chip-price" style="color:${priceColor}">${price}</span>` +
-        `<span class="price-chip-arrow ${arrowCls}">${arrow}</span>`;
-      rail.appendChild(chip);
+  // Double content for seamless loop
+  rail.innerHTML = `<div class="price-chip-track">${chipsHtml}${chipsHtml}</div>`;
+
+  requestAnimationFrame(() => {
+    const track = rail.querySelector('.price-chip-track');
+    if (track) {
+      const dur = Math.max(10, Math.round((track.scrollWidth / 2) / (80 * _tickerSpeedMult)));
+      track.style.animationDuration = dur + 's';
     }
   });
-
-  // Remove chips for symbols no longer in watchlist
-  existing.forEach((el, sym) => { if (!seen.has(sym)) el.remove(); });
 }
 
 function ctQuickView(symbol) {
@@ -3928,9 +4100,11 @@ function ctAddDashlet(sym) {
     `<button class="ct-tf-btn${tf===_ctTimeframe?' active':''}" onclick="ctSetTimeframe('${tf}')">${tf}</button>`
   ).join('');
 
+  const isExitOnly = (window._argusState && (window._argusState.exit_only_symbols||[])).includes(sym);
   card.innerHTML = `
     <div class="ct-dashlet-header">
       <span class="ct-dashlet-sym">${escHtml(sym)}</span>
+      ${isExitOnly ? '<span class="ct-exit-only-badge">EXIT ONLY</span>' : ''}
       <span class="ct-dashlet-price" id="ct-price-${escHtml(sym)}">—</span>
       <span class="ct-dashlet-sig" id="ct-sig-${escHtml(sym)}"></span>
       <div class="ct-tf-btns">${tfBtns}</div>
@@ -3947,7 +4121,13 @@ function ctAddDashlet(sym) {
         <button class="ct-type-btn active" id="ct-candles-${escHtml(sym)}" onclick="ctSetType('${escHtml(sym)}','candles')">Candles</button>
         <button class="ct-type-btn" id="ct-line-${escHtml(sym)}" onclick="ctSetType('${escHtml(sym)}','line')">Line</button>
       </div>
-      <button class="ct-backtest-btn" id="ct-bt-btn-${escHtml(sym)}" onclick="ctRunBacktest('${escHtml(sym)}')">⏱ Backtest</button>
+      <div class="ct-backtest-wrap">
+        <button class="ct-bt-span-btn active" id="ct-bt-s1y-${escHtml(sym)}" onclick="ctBtSetSpan('${escHtml(sym)}','year',this)">1Y</button>
+        <button class="ct-bt-span-btn" id="ct-bt-s3y-${escHtml(sym)}" onclick="ctBtSetSpan('${escHtml(sym)}','3year',this)">3Y</button>
+        <button class="ct-bt-span-btn" id="ct-bt-s5y-${escHtml(sym)}" onclick="ctBtSetSpan('${escHtml(sym)}','5year',this)">5Y</button>
+        <button class="ct-backtest-btn" id="ct-bt-btn-${escHtml(sym)}" onclick="ctRunBacktest('${escHtml(sym)}')">⏱ Backtest</button>
+        <button class="ct-exit-only-btn${isExitOnly?' active':''}" id="ct-eo-btn-${escHtml(sym)}" onclick="ctToggleExitOnly('${escHtml(sym)}')" title="No new buys — hold until natural exit">⚠ Exit Only</button>
+      </div>
     </div>
     <div class="ct-backtest-result" id="ct-bt-${escHtml(sym)}" style="display:none"></div>`;
   grid.appendChild(card);
@@ -4103,10 +4283,24 @@ function ctApplyTimeframeToSym(sym) {
   inst.chart.timeScale().fitContent();
 }
 
+const _ctBtSpan = {};  // sym -> 'year' | '3year' | '5year'
+const _ctBtSpanLabel = { year: '1Y', '3year': '3Y', '5year': '5Y' };
+
+function ctBtSetSpan(sym, span, btn) {
+  _ctBtSpan[sym] = span;
+  ['year','3year','5year'].forEach(s => {
+    const sfx = s === 'year' ? '1y' : s === '3year' ? '3y' : '5y';
+    const el = document.getElementById(`ct-bt-s${sfx}-${sym}`);
+    if (el) el.classList.toggle('active', s === span);
+  });
+}
+
 async function ctRunBacktest(sym) {
   const btn = document.getElementById('ct-bt-btn-' + sym);
   const panel = document.getElementById('ct-bt-' + sym);
   if (!btn || !panel) return;
+  const span = _ctBtSpan[sym] || 'year';
+  const spanLabel = _ctBtSpanLabel[span] || '1Y';
   btn.classList.add('loading');
   btn.textContent = '⏱ Running…';
   panel.style.display = 'none';
@@ -4114,26 +4308,11 @@ async function ctRunBacktest(sym) {
     const r = await fetch('/api/backtest', {
       method: 'POST',
       headers: {'Content-Type':'application/json', ...(window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{})},
-      body: JSON.stringify({symbol: sym, span: 'year'}),
+      body: JSON.stringify({symbol: sym, span}),
     });
     const d = await r.json();
-    if (!r.ok) { panel.textContent = d.detail || 'Backtest failed'; panel.style.display = ''; return; }
-    const ret = d.total_return_pct;
-    const retColor = ret >= 0 ? 'var(--bull)' : 'var(--bear)';
-    const ddColor = d.max_drawdown_pct > 20 ? 'var(--bear)' : d.max_drawdown_pct > 10 ? 'var(--warn)' : 'var(--text)';
-    const pfColor = d.profit_factor >= 1.5 ? 'var(--bull)' : d.profit_factor >= 1.0 ? 'var(--text)' : 'var(--bear)';
-    panel.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-        <span style="font-size:11px;font-weight:700;color:var(--muted)">BACKTEST · 1Y · INDICATORS ONLY</span>
-        <span style="font-size:11px;color:var(--muted)">${escHtml(d.start_date)} → ${escHtml(d.end_date)}</span>
-      </div>
-      <div class="ct-bt-grid">
-        <div class="ct-bt-stat"><div class="ct-bt-stat-label">Return</div><div class="ct-bt-stat-val" style="color:${retColor}">${ret>=0?'+':''}${ret.toFixed(1)}%</div></div>
-        <div class="ct-bt-stat"><div class="ct-bt-stat-label">Win Rate</div><div class="ct-bt-stat-val">${(d.win_rate*100).toFixed(0)}%</div></div>
-        <div class="ct-bt-stat"><div class="ct-bt-stat-label">Profit Factor</div><div class="ct-bt-stat-val" style="color:${pfColor}">${d.profit_factor.toFixed(2)}x</div></div>
-        <div class="ct-bt-stat"><div class="ct-bt-stat-label">Max Drawdown</div><div class="ct-bt-stat-val" style="color:${ddColor}">${d.max_drawdown_pct.toFixed(1)}%</div></div>
-      </div>
-      <div style="margin-top:6px;font-size:11px;color:var(--muted)">${d.trade_count} trades · $10k starting capital · $1k per position · 5% stop-loss</div>`;
+    if (!r.ok) { panel.innerHTML = `<span style="color:var(--bear)">${escHtml(d.detail||'Backtest failed')}</span>`; panel.style.display = ''; return; }
+    panel.innerHTML = _ctBtResultHtml(d, spanLabel);
     panel.style.display = '';
   } catch (e) {
     panel.textContent = 'Network error';
@@ -4141,6 +4320,164 @@ async function ctRunBacktest(sym) {
   } finally {
     btn.classList.remove('loading');
     btn.textContent = '⏱ Backtest';
+  }
+}
+
+function _ctBtResultHtml(d, spanLabel) {
+  const ret = d.total_return_pct;
+  const retColor = ret >= 0 ? 'var(--bull)' : 'var(--bear)';
+  const ddColor = d.max_drawdown_pct > 20 ? 'var(--bear)' : d.max_drawdown_pct > 10 ? 'var(--warn)' : 'var(--text)';
+  const pfColor = d.profit_factor >= 1.5 ? 'var(--bull)' : d.profit_factor >= 1.0 ? 'var(--text)' : 'var(--bear)';
+  return `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <span style="font-size:11px;font-weight:700;color:var(--muted)">BACKTEST · ${escHtml(spanLabel)} · INDICATORS ONLY</span>
+      <span style="font-size:11px;color:var(--muted)">${escHtml(d.start_date||'').slice(0,10)} → ${escHtml(d.end_date||'').slice(0,10)}</span>
+    </div>
+    <div class="ct-bt-grid">
+      <div class="ct-bt-stat"><div class="ct-bt-stat-label">Return</div><div class="ct-bt-stat-val" style="color:${retColor}">${ret>=0?'+':''}${ret.toFixed(1)}%</div></div>
+      <div class="ct-bt-stat"><div class="ct-bt-stat-label">Win Rate</div><div class="ct-bt-stat-val">${(d.win_rate*100).toFixed(0)}%</div></div>
+      <div class="ct-bt-stat"><div class="ct-bt-stat-label">Profit Factor</div><div class="ct-bt-stat-val" style="color:${pfColor}">${d.profit_factor.toFixed(2)}x</div></div>
+      <div class="ct-bt-stat"><div class="ct-bt-stat-label">Max Drawdown</div><div class="ct-bt-stat-val" style="color:${ddColor}">${d.max_drawdown_pct.toFixed(1)}%</div></div>
+    </div>
+    <div style="margin-top:6px;font-size:11px;color:var(--muted)">${d.trade_count} trades · $10k starting capital · $1k per position · 5% stop-loss</div>`;
+}
+
+// ── Batch backtest ────────────────────────────────────────────────────────────
+let _ctBatchSpan = 'year';
+
+function ctBatchSetSpan(span, btn) {
+  _ctBatchSpan = span;
+  document.querySelectorAll('#ct-bt-batch .ct-bt-span-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  ctBatchBacktest();
+}
+
+async function ctBatchBacktest() {
+  const wl = _ctWatchlist || [];
+  if (!wl.length) return;
+  const btn = document.getElementById('ct-batch-btn');
+  const panel = document.getElementById('ct-bt-batch');
+  const body = document.getElementById('ct-bt-batch-body');
+  const spanLabel = _ctBtSpanLabel[_ctBatchSpan] || '1Y';
+  document.getElementById('ct-batch-span-label').textContent = spanLabel + ' · INDICATORS ONLY';
+  if (btn) { btn.classList.add('loading'); btn.textContent = '⏱ Running…'; }
+  panel.style.display = '';
+  body.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:12px 0">Running ${wl.length} backtests…</div>`;
+
+  const results = await Promise.all(wl.map(async sym => {
+    try {
+      const r = await fetch('/api/backtest', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json', ...(window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{})},
+        body: JSON.stringify({symbol: sym, span: _ctBatchSpan}),
+      });
+      const d = await r.json();
+      return r.ok ? {...d, symbol: sym} : {symbol: sym, error: d.detail};
+    } catch { return {symbol: sym, error: 'Network error'}; }
+  }));
+
+  _ctRenderBatchTable(results, spanLabel);
+  if (btn) { btn.classList.remove('loading'); btn.textContent = '⏱ Backtest All'; }
+}
+
+let _ctBatchSortCol = 'total_return_pct', _ctBatchSortAsc = false;
+let _ctBatchResults = [];
+
+function _ctRenderBatchTable(results, spanLabel) {
+  _ctBatchResults = results;
+  const body = document.getElementById('ct-bt-batch-body');
+  const cols = [
+    {key:'symbol',       label:'Symbol',        fmt: v => `<span onclick="ctQuickView('${escHtml(v)}')">${escHtml(v)}</span>`},
+    {key:'total_return_pct', label:'Return',    fmt: v => `<span style="color:${v>=0?'var(--bull)':'var(--bear)'}">${v>=0?'+':''}${v.toFixed(1)}%</span>`},
+    {key:'win_rate',     label:'Win Rate',      fmt: v => `${(v*100).toFixed(0)}%`},
+    {key:'profit_factor',label:'Profit Factor', fmt: (v,row) => `<span style="color:${v>=1.5?'var(--bull)':v>=1?'var(--text)':'var(--bear)'}">${v.toFixed(2)}x</span>`},
+    {key:'max_drawdown_pct', label:'Max DD',    fmt: v => `<span style="color:${v>20?'var(--bear)':v>10?'var(--warn)':'var(--text)'}">${v.toFixed(1)}%</span>`},
+    {key:'trade_count',  label:'Trades',        fmt: v => v},
+  ];
+
+  const sorted = [...results].sort((a, b) => {
+    if (a.error && !b.error) return 1;
+    if (!a.error && b.error) return -1;
+    const av = a[_ctBatchSortCol] ?? -Infinity;
+    const bv = b[_ctBatchSortCol] ?? -Infinity;
+    return _ctBatchSortAsc ? av - bv : bv - av;
+  });
+
+  const thHtml = cols.map(c => {
+    const active = c.key === _ctBatchSortCol;
+    const dir = active ? (_ctBatchSortAsc ? 'sort-asc' : 'sort-desc') : '';
+    return `<th class="${dir}" onclick="ctBatchSort('${c.key}')">${c.label}</th>`;
+  }).join('');
+
+  const rowsHtml = sorted.map(row => {
+    if (row.error) return `<tr><td>${escHtml(row.symbol)}</td><td colspan="5" style="color:var(--muted);text-align:left">${escHtml(row.error)}</td></tr>`;
+    return `<tr>${cols.map(c => `<td>${c.fmt(row[c.key], row)}</td>`).join('')}</tr>`;
+  }).join('');
+
+  // Summary row
+  const ok = results.filter(r => !r.error);
+  const avgRet = ok.reduce((s,r) => s + r.total_return_pct, 0) / (ok.length || 1);
+  const avgPf  = ok.reduce((s,r) => s + r.profit_factor, 0) / (ok.length || 1);
+  const avgWr  = ok.reduce((s,r) => s + r.win_rate, 0) / (ok.length || 1);
+  const totalTrades = ok.reduce((s,r) => s + r.trade_count, 0);
+
+  body.innerHTML = `
+    <table class="ct-bt-table">
+      <thead><tr>${thHtml}</tr></thead>
+      <tbody>${rowsHtml}</tbody>
+      <tfoot><tr style="font-weight:700;color:var(--muted)">
+        <td>Avg (${ok.length} symbols)</td>
+        <td style="color:${avgRet>=0?'var(--bull)':'var(--bear)'}">${avgRet>=0?'+':''}${avgRet.toFixed(1)}%</td>
+        <td>${(avgWr*100).toFixed(0)}%</td>
+        <td style="color:${avgPf>=1.5?'var(--bull)':avgPf>=1?'var(--text)':'var(--bear)'}">${avgPf.toFixed(2)}x</td>
+        <td>—</td>
+        <td>${totalTrades}</td>
+      </tr></tfoot>
+    </table>
+    <div style="margin-top:8px;font-size:11px;color:var(--muted)">$10k starting capital · $1k per position · 5% stop-loss · no AI layer</div>`;
+}
+
+function ctBatchSort(col) {
+  if (_ctBatchSortCol === col) _ctBatchSortAsc = !_ctBatchSortAsc;
+  else { _ctBatchSortCol = col; _ctBatchSortAsc = false; }
+  const spanLabel = _ctBtSpanLabel[_ctBatchSpan] || '1Y';
+  _ctRenderBatchTable(_ctBatchResults, spanLabel);
+}
+
+// ── Exit-only toggle ─────────────────────────────────────────────────────────
+async function ctToggleExitOnly(sym) {
+  const btn = document.getElementById('ct-eo-btn-' + sym);
+  const isActive = btn && btn.classList.contains('active');
+  const newVal = !isActive;
+  await apiFetch(`/api/watchlist/${encodeURIComponent(sym)}/exit-only`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({value: newVal}),
+  });
+  // SSE will push updated state — no manual DOM update needed
+}
+
+function ctApplyExitOnlyState(exitOnlySymbols) {
+  const set = new Set(exitOnlySymbols || []);
+  for (const sym of _ctWatchlist) {
+    const btn = document.getElementById('ct-eo-btn-' + sym);
+    const card = document.getElementById('ct-card-' + sym);
+    const badgeId = 'ct-eo-badge-' + sym;
+    if (btn) btn.classList.toggle('active', set.has(sym));
+    if (card) card.classList.toggle('exit-only', set.has(sym));
+    // Update or inject badge in header
+    const header = card && card.querySelector('.ct-dashlet-header');
+    if (header) {
+      let badge = document.getElementById(badgeId);
+      if (set.has(sym) && !badge) {
+        badge = document.createElement('span');
+        badge.id = badgeId;
+        badge.className = 'ct-exit-only-badge';
+        badge.textContent = 'EXIT ONLY';
+        header.insertBefore(badge, header.children[1]);
+      } else if (!set.has(sym) && badge) {
+        badge.remove();
+      }
+    }
   }
 }
 
@@ -4484,9 +4821,11 @@ async function invRerun(symbol) {
   } catch(e) { console.error(e); }
 }
 
-// SSE
+// SSE — EventSource cannot send custom headers, so token is passed as query param
 function connectSSE() {
-  const evtSource = new EventSource('/events');
+  const tok = window._ARGUS_TOKEN || '';
+  const url = '/events' + (tok ? '?token=' + encodeURIComponent(tok) : '');
+  const evtSource = new EventSource(url);
   evtSource.onmessage = (e) => {
     try {
       const state = JSON.parse(e.data);
@@ -4511,7 +4850,7 @@ function classifyAlert(subject) {
   return '';
 }
 
-function renderAlerts(alertLog) {
+function renderAlerts(alertLog, pendingApprovals) {
   const feed = document.getElementById('alert-feed');
   if (!feed) return;
   // Badge on tab button
@@ -4521,15 +4860,32 @@ function renderAlerts(alertLog) {
     feed.innerHTML = '<div class="empty" style="padding:48px 0">No alerts yet — BUY/SELL executions, investigations, and kill switch events will appear here</div>';
     return;
   }
+  // Build lookup: "BUY|AAPL" -> trade_id for inline approve/deny buttons
+  const approvalMap = {};
+  for (const [id, info] of Object.entries(pendingApprovals || {})) {
+    approvalMap[`${(info.action||'BUY').toUpperCase()}|${(info.symbol||'').toUpperCase()}`] = id;
+  }
   feed.innerHTML = alertLog.map(a => {
     const cls = classifyAlert(a.subject);
     const d = new Date(a.time);
     const t = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    let actionBtns = '';
+    const m = (a.subject||'').match(/Approval needed:\s*(\w+)\s+(\w+)/i);
+    if (m) {
+      const tid = approvalMap[`${m[1].toUpperCase()}|${m[2].toUpperCase()}`];
+      if (tid) {
+        actionBtns = `<div class="alert-inline-actions">
+          <button class="alert-inline-btn approve" onclick="decideApproval('${tid}','approve')">✓ Approve</button>
+          <button class="alert-inline-btn deny" onclick="decideApproval('${tid}','deny')">✗ Deny</button>
+        </div>`;
+      }
+    }
     return `<div class="alert-entry ${cls}">
       <span class="alert-time">${t}</span>
       <div>
         <div class="alert-subject">${escHtml(a.subject)}</div>
         <div class="alert-body">${escHtml(a.body)}</div>
+        ${actionBtns}
       </div>
     </div>`;
   }).join('');
@@ -4580,28 +4936,39 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
 
 /* ── Top Price Rail ── */
 .m-price-rail {
-  display: flex;
-  overflow-x: auto;
-  gap: 8px;
-  padding: 8px 16px;
+  overflow: hidden;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
-  scrollbar-width: none;
   flex-shrink: 0;
-}
-.m-price-rail::-webkit-scrollbar { display: none; }
-.m-chip {
+  height: 38px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  padding: 6px 12px;
-  border-radius: 8px;
-  font-family: var(--mono);
-  font-size: 13px;
-  white-space: nowrap;
 }
+.m-rail-track {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  white-space: nowrap;
+  will-change: transform;
+  animation: m-rail-scroll 80s linear infinite;
+}
+.m-rail-track:hover { animation-play-state: paused; }
+@keyframes m-rail-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+.m-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.m-chip-sep { color: var(--border); padding: 0 2px; font-size: 10px; flex-shrink: 0; }
 .m-chip-sym { font-weight: 800; color: var(--accent); }
 .m-chip-price { font-weight: 600; }
 
@@ -4689,6 +5056,10 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
 .alert-t{font-size:10px;color:var(--muted);font-family:var(--mono);white-space:nowrap;padding-top:2px;min-width:40px}
 .alert-subj{font-size:13px;font-weight:600}
 .alert-body{font-size:12px;color:var(--muted);margin-top:2px;line-height:1.4}
+.alert-inline-actions{display:flex;gap:8px;margin-top:8px}
+.alert-inline-btn{padding:5px 14px;border-radius:8px;border:none;font-size:12px;font-weight:700;cursor:pointer}
+.alert-inline-btn.approve{background:rgba(63,185,80,.2);color:var(--bull)}
+.alert-inline-btn.deny{background:rgba(248,81,73,.2);color:var(--bear)}
 
 /* ── Chart ── */
 #m-chart-pills{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
@@ -4773,6 +5144,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
 /* ── Pull-to-refresh ── */
 #ptr{height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);transition:height .2s}
 #ptr.ready{color:var(--accent)}
+</style>
 </head>
 <body>
 <div id="app">
@@ -4871,7 +5243,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
       <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"></path><path d="M18 17V9"></path><path d="M13 17V5"></path><path d="M8 17v-3"></path></svg>
       Charts
     </button>
-    <button class="nav-btn" onclick="mTab('alerts')" id="nav-alerts">
+    <button class="nav-btn nav-badge" onclick="mTab('alerts')" id="nav-alerts">
       <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
       Alerts
     </button>
@@ -4899,7 +5271,7 @@ let _allAlerts = [];
 function mTab(name) {
   document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + name));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.id === 'nav-' + name));
-  if (name === 'charts' && _mSym) mLoadChart(_mSym);
+  if (name === 'charts' && _mSym) requestAnimationFrame(() => mLoadChart(_mSym));
 }
 // ── State rendering ────────────────────────────────────────────────────────
 function mApply(state) {
@@ -5067,15 +5439,18 @@ function mApply(state) {
 function mRenderPriceRail(signals) {
   const rail = document.getElementById('m-price-rail');
   if (!rail || !signals || !signals.length) return;
-  
-  rail.innerHTML = signals.map(s => {
+  const chips = signals.map(s => {
     const change = s.change_pct || 0;
     const color = change > 0 ? 'var(--bull)' : change < 0 ? 'var(--bear)' : 'var(--muted)';
-    return `<div class="m-chip" onclick="mTab('charts');mSetSym('${esc(s.symbol)}')">
-      <span class="m-chip-sym">${esc(s.symbol)}</span>
-      <span class="m-chip-price" style="color:${color}">${fmt$(s.price)}</span>
-    </div>`;
+    const arrow = change > 0 ? '▲' : change < 0 ? '▼' : '·';
+    return `<span class="m-chip" onclick="mTab('charts');mSetSym('${esc(s.symbol)}')">`
+      + `<span class="m-chip-sym">${esc(s.symbol)}</span>`
+      + `<span class="m-chip-price" style="color:${color}">${fmt$(s.price)}</span>`
+      + `<span style="color:${color};font-size:9px">${arrow}</span>`
+      + `</span><span class="m-chip-sep">·</span>`;
   }).join('');
+  // Double the chips so the loop is seamless
+  rail.innerHTML = `<div class="m-rail-track">${chips}${chips}</div>`;
 }
 
 function mRenderReadiness(scorecard) {
@@ -5117,13 +5492,29 @@ function mAlertClassify(a) {
 function mRenderAlerts() {
   const alertFeed = document.getElementById('m-alert-feed');
   const visible = _alertFilter === 'all' ? _allAlerts : _allAlerts.filter(a => mAlertClassify(a) === _alertFilter);
+  // Build lookup: "BUY|AAPL" -> trade_id
+  const approvalMap = {};
+  for (const [id, info] of Object.entries((_state && _state.pending_approvals) || {})) {
+    approvalMap[`${(info.action||'BUY').toUpperCase()}|${(info.symbol||'').toUpperCase()}`] = id;
+  }
   if (visible.length) {
     alertFeed.innerHTML = visible.map(a => {
       const cls = mAlertClassify(a);
       const t = new Date(a.time).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+      let actionBtns = '';
+      const m = (a.subject||'').match(/Approval needed:\s*(\w+)\s+(\w+)/i);
+      if (m) {
+        const tid = approvalMap[`${m[1].toUpperCase()}|${m[2].toUpperCase()}`];
+        if (tid) {
+          actionBtns = `<div class="alert-inline-actions">
+            <button class="alert-inline-btn approve" onclick="mApprove('${esc(tid)}')">✓ Approve</button>
+            <button class="alert-inline-btn deny" onclick="mDeny('${esc(tid)}')">✗ Deny</button>
+          </div>`;
+        }
+      }
       return `<div class="alert-row ${cls}">
         <span class="alert-t">${t}</span>
-        <div><div class="alert-subj">${esc(a.subject)}</div><div class="alert-body">${esc(a.body)}</div></div>
+        <div><div class="alert-subj">${esc(a.subject)}</div><div class="alert-body">${esc(a.body)}</div>${actionBtns}</div>
       </div>`;
     }).join('');
   } else {
@@ -5178,13 +5569,16 @@ function mLoadChart(sym) {
     .then(d => {
       const area = document.getElementById('m-chart-area');
       if (!_mChart) {
+        const w = area.clientWidth || (window.innerWidth - 32);
+        const h = area.clientHeight || Math.min(380, Math.floor(window.innerHeight * 0.45));
         _mChart = LightweightCharts.createChart(area, {
+          width: w, height: h,
           layout: { background:{color:'#1c2128'}, textColor:'#8b949e' },
           grid: { vertLines:{color:'#30363d'}, horzLines:{color:'#30363d'} },
           crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
           rightPriceScale: { borderColor:'#30363d' },
           timeScale: { borderColor:'#30363d', timeVisible:true },
-          handleScroll: true, handleScale: true,
+          handleScroll: true, handleScale: false,
         });
         _mSeries = _mChart.addCandlestickSeries({
           upColor:'#3fb950', downColor:'#f85149',
@@ -5202,7 +5596,6 @@ function mLoadChart(sym) {
       _mSma.setData(smaData);
       _mEma.setData(emaData);
 
-      _mChart.timeScale().fitContent();
       if (candles.length) {
         const last = candles[candles.length-1];
         document.getElementById('m-ohlc').style.display = 'flex';
@@ -5211,10 +5604,14 @@ function mLoadChart(sym) {
         document.getElementById('mo-l').textContent = '$'+last.low.toFixed(2);
         document.getElementById('mo-c').textContent = '$'+last.close.toFixed(2);
       }
-      // Resize chart to fill area
-      requestAnimationFrame(() => {
-        if (_mChart) _mChart.applyOptions({width: area.clientWidth, height: area.clientHeight});
-      });
+      // Double-RAF: first frame applies stable dimensions, second calls fitContent
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (!_mChart) return;
+        const w = area.clientWidth || (window.innerWidth - 32);
+        const h = area.clientHeight || Math.min(380, Math.floor(window.innerHeight * 0.45));
+        _mChart.applyOptions({width: w, height: h});
+        _mChart.timeScale().fitContent();
+      }));
     }).catch(()=>{});
 }
 
@@ -5241,7 +5638,8 @@ function mInvSearch(val) {
   _invDdTerm = val;
   const dd = document.getElementById('inv-m-dd');
   if (!val || val.length < 1) { dd.style.display='none'; return; }
-  fetch('/api/search?q=' + encodeURIComponent(val))
+  const _msh = window._ARGUS_TOKEN ? {'X-Argus-Token': window._ARGUS_TOKEN} : {};
+  fetch('/api/search?q=' + encodeURIComponent(val), {headers: _msh})
     .then(r => r.json()).then(d => {
       if (!d.results || !d.results.length) { dd.style.display='none'; return; }
       dd.innerHTML = d.results.slice(0,5).map(r =>
@@ -5285,7 +5683,9 @@ function _setConn(state) {
 }
 function connectSSE() {
   _setConn('reconnecting');
-  const es = new EventSource('/events');
+  const tok = window._ARGUS_TOKEN || '';
+  const url = '/events' + (tok ? '?token=' + encodeURIComponent(tok) : '');
+  const es = new EventSource(url);
   es.onopen = () => _setConn('online');
   es.onmessage = e => { try { mApply(JSON.parse(e.data)); _setConn('online'); } catch {} };
   es.onerror = () => { _setConn('reconnecting'); setTimeout(connectSSE, 5000); es.close(); };
@@ -5328,7 +5728,10 @@ connectSSE();
 window.addEventListener('resize', () => {
   if (_mChart) {
     const area = document.getElementById('m-chart-area');
-    _mChart.applyOptions({width: area.clientWidth, height: area.clientHeight});
+    const w = area.clientWidth || (window.innerWidth - 32);
+    const h = area.clientHeight || Math.min(380, Math.floor(window.innerHeight * 0.45));
+    _mChart.applyOptions({width: w, height: h});
+    _mChart.timeScale().fitContent();
   }
 });
 </script>
@@ -5336,16 +5739,13 @@ window.addEventListener('resize', () => {
 </html>"""
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse, dependencies=[Depends(_require_auth)])
 async def index() -> str:
-    # Inject the token so the JS can attach it to all mutating requests.
-    # The token is already known to anyone who can load the page (same-origin),
-    # so embedding it here does not widen the attack surface.
     token_script = f"<script>window._ARGUS_TOKEN={json.dumps(_dashboard_token)};</script>"
     return _HTML.replace("</head>", token_script + "\n</head>", 1)
 
 
-@app.get("/m", response_class=HTMLResponse)
+@app.get("/m", response_class=HTMLResponse, dependencies=[Depends(_require_auth)])
 async def mobile() -> str:
     token_script = f"<script>window._ARGUS_TOKEN={json.dumps(_dashboard_token)};</script>"
     return _MOBILE_HTML.replace("</head>", token_script + "\n</head>", 1)

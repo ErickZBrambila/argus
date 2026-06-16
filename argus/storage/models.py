@@ -136,6 +136,7 @@ class Watchlist(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String(20), nullable=False, unique=True, index=True)
     order = Column(Integer, default=0)
+    exit_only = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -180,6 +181,10 @@ def _apply_migrations(engine) -> None:
             conn.execute(text("DROP TABLE positions"))
             conn.execute(text("ALTER TABLE positions_new RENAME TO positions"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_positions_symbol ON positions (symbol)"))
+        # --- watchlist: add exit_only column ---
+        wl_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(watchlist)")).fetchall()}
+        if "exit_only" not in wl_cols:
+            conn.execute(text("ALTER TABLE watchlist ADD COLUMN exit_only BOOLEAN NOT NULL DEFAULT 0"))
         conn.commit()
 
 
@@ -314,7 +319,10 @@ def mark_account_kill_switch(
         .filter_by(date=date_val, account_label=account_label)
         .first()
     )
-    if row and not row.kill_switch_triggered:
+    if row is None:
+        row = AccountDailyStats(date=date_val, account_label=account_label, kill_switch_triggered=True)
+        session.add(row)
+    elif not row.kill_switch_triggered:
         row.kill_switch_triggered = True
 
 
@@ -380,3 +388,14 @@ def add_to_db_watchlist(session: Session, symbol: str) -> None:
 
 def remove_from_db_watchlist(session: Session, symbol: str) -> None:
     session.query(Watchlist).filter_by(symbol=symbol).delete()
+
+
+def set_exit_only(session: Session, symbol: str, value: bool) -> None:
+    row = session.query(Watchlist).filter_by(symbol=symbol).first()
+    if row:
+        row.exit_only = value
+
+
+def get_exit_only_symbols(session: Session) -> set[str]:
+    rows = session.query(Watchlist).filter_by(exit_only=True).all()
+    return {r.symbol for r in rows}

@@ -13,6 +13,14 @@ logger = logging.getLogger(__name__)
 
 _VALID_SYMBOL_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.")
 
+# Symbols with limited price history due to recent IPO — use reduced bar minimum
+# during the grace period so signals still fire while history accumulates.
+_NEW_LISTINGS: dict[str, str] = {
+    "SPCX": "2026-06-12",   # SpaceX IPO
+}
+_NEW_LISTING_GRACE_DAYS = 90
+_NEW_LISTING_MIN_BARS = 3   # indicators populate gradually; price/ticker shows immediately
+
 
 def _validate_symbol(symbol: str) -> str:
     clean = symbol.strip().upper()
@@ -186,8 +194,20 @@ class SignalEngine:
             with get_session() as session:
                 cached = get_cached_historicals(session, symbol)
 
-        # If cache is still empty or too small, fall back to full fetch
-        if len(cached) < 50:
+        # Determine minimum bars — lower threshold for new listings within grace period
+        import datetime as _dt
+        _min_bars = 50
+        _listing_date_str = _NEW_LISTINGS.get(symbol)
+        if _listing_date_str:
+            try:
+                _listing_date = _dt.date.fromisoformat(_listing_date_str)
+                if _dt.date.today() <= _listing_date + _dt.timedelta(days=_NEW_LISTING_GRACE_DAYS):
+                    _min_bars = _NEW_LISTING_MIN_BARS
+            except Exception:
+                pass
+
+        # If cache is still too small, fall back to full fetch (skip for new listings — no data exists)
+        if len(cached) < _min_bars and _min_bars >= 50:
             raw_full = self._broker.get_historical_prices(symbol, span="3month", interval="day")
             if raw_full:
                 with get_session() as session:
@@ -195,12 +215,12 @@ class SignalEngine:
                 with get_session() as session:
                     cached = get_cached_historicals(session, symbol)
 
-        if len(cached) < 50:
-            logger.warning("%s: not enough history (%d bars)", symbol, len(cached))
+        if len(cached) < _min_bars:
+            logger.warning("%s: not enough history (%d bars, need %d)", symbol, len(cached), _min_bars)
             return None
 
         df = _build_dataframe(cached)
-        if df is None or len(df) < 50:
+        if df is None or len(df) < _min_bars:
             return None
 
         try:

@@ -185,7 +185,7 @@ class BacktestEngine:
             import yfinance as yf
             period_map = {
                 "day": "5d", "week": "1mo", "month": "1mo",
-                "3month": "3mo", "year": "1y", "5year": "5y",
+                "3month": "3mo", "year": "1y", "3year": "3y", "5year": "5y",
             }
             period = period_map.get(span, "1y")
             df = yf.download(symbol, period=period, interval="1d", progress=False, auto_adjust=True)
