@@ -1099,9 +1099,11 @@ _HTML = """<!DOCTYPE html>
     font-size: 12px;
     white-space: nowrap;
     flex-shrink: 0;
-    transition: border-color .15s;
+    transition: all .15s;
+    cursor: pointer;
   }
-  .price-chip:hover { border-color: rgba(0,212,170,.35); }
+  .price-chip:hover { border-color: var(--accent); background: var(--surface2); }
+  .price-chip:active { transform: scale(0.96); }
   .price-chip-sym   { font-weight: 700; color: var(--accent); letter-spacing: .3px; }
   .price-chip-price { color: var(--text); font-variant-numeric: tabular-nums; }
   .price-chip-price.up, .price-chip-arrow.up   { color: var(--green); }
@@ -1307,8 +1309,26 @@ _HTML = """<!DOCTYPE html>
   .modal-bg.open { display: flex; }
 
   /* ── Tab navigation ─────────────────────────────────────────────────────── */
-  .tab-bar { display: flex; gap: 2px; padding: 0 20px; background: var(--surface); border-bottom: 1px solid var(--border); }
-  .tab-btn { padding: 10px 18px; font-size: 13px; font-weight: 600; color: var(--muted); background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; transition: color .15s, border-color .15s; letter-spacing: 0.2px; }
+  .tab-bar { 
+    display: flex; 
+    gap: 2px; 
+    padding: 0 20px; 
+    background: var(--surface); 
+    border-bottom: 1px solid var(--border);
+    z-index: 100;
+  }
+  .tab-btn { 
+    padding: 10px 18px; 
+    font-size: 13px; 
+    font-weight: 600; 
+    color: var(--muted); 
+    background: none; 
+    border: none; 
+    border-bottom: 2px solid transparent; 
+    cursor: pointer; 
+    transition: color .15s, border-color .15s; 
+    letter-spacing: 0.2px; 
+  }
   .tab-btn:hover { color: var(--text); }
   .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
   .tab-pane { display: none; }
@@ -1814,7 +1834,7 @@ _HTML = """<!DOCTYPE html>
     body {
       padding-left:   env(safe-area-inset-left,   0px);
       padding-right:  env(safe-area-inset-right,  0px);
-      padding-bottom: env(safe-area-inset-bottom, 0px);
+      padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
     }
     .header {
       padding-left:  max(16px, env(safe-area-inset-left,  16px));
@@ -1822,19 +1842,65 @@ _HTML = """<!DOCTYPE html>
       height: auto; min-height: 56px;
     }
 
+    /* Fixed Bottom Navigation */
+    .tab-bar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: calc(60px + env(safe-area-inset-bottom, 0px));
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      background: rgba(13, 17, 23, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: none;
+      border-top: 1px solid var(--border);
+      justify-content: space-around;
+      padding-left: env(safe-area-inset-left, 10px);
+      padding-right: env(safe-area-inset-right, 10px);
+      overflow: visible;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 0;
+      height: 60px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      border-bottom: none;
+      border-top: 2px solid transparent;
+      gap: 4px;
+    }
+    .tab-btn.active {
+      color: var(--accent);
+      border-top-color: var(--accent);
+      border-bottom-color: transparent;
+    }
+    /* Add tiny icons for mobile buttons (CSS mask) */
+    .tab-btn::before {
+      content: '';
+      width: 20px;
+      height: 20px;
+      background: currentColor;
+      display: block;
+    }
+    /* Using simple SVG icons via data-uri */
+    .tab-btn:nth-child(1)::before { mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>') no-repeat center; -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>') no-repeat center; }
+    .tab-btn:nth-child(2)::before { mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>') no-repeat center; -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>') no-repeat center; }
+    .tab-btn:nth-child(3)::before { mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"></path><path d="M18 17V9"></path><path d="M13 17V5"></path><path d="M8 17v-3"></path></svg>') no-repeat center; -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"></path><path d="M18 17V9"></path><path d="M13 17V5"></path><path d="M8 17v-3"></path></svg>') no-repeat center; }
+    .tab-btn:nth-child(4)::before { mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>') no-repeat center; -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>') no-repeat center; }
+    .tab-btn:nth-child(5)::before { mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>') no-repeat center; -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>') no-repeat center; }
+
     /* Header right: drop low-priority items to save space */
     .countdown-wrap { display: none; }
     .tz-select      { display: none; }
     .header-right   { gap: 6px; }
     .mc-label       { display: none; }
 
-    /* Tab bar: horizontal scroll so all 5 tabs fit */
-    .tab-bar {
-      overflow-x: auto; -webkit-overflow-scrolling: touch;
-      scrollbar-width: none; padding: 0 8px; gap: 0;
-    }
+    /* Tab bar: reset desktop horizontal scroll */
     .tab-bar::-webkit-scrollbar { display: none; }
-    .tab-btn { padding: 10px 13px; font-size: 12px; white-space: nowrap; flex-shrink: 0; }
 
     /* Content padding */
     main  { padding: 10px; gap: 10px; }
@@ -3603,6 +3669,7 @@ function updatePriceChips(signals, watchlist) {
       // Update in-place
       const chip = existing.get(sym);
       chip.title = s ? `${change >= 0 ? '+' : ''}${change.toFixed(2)}% today` : '';
+      chip.onclick = () => ctQuickView(sym);
       const priceEl = chip.querySelector('.price-chip-price');
       priceEl.textContent = price;
       priceEl.style.color = priceColor;
@@ -3616,6 +3683,7 @@ function updatePriceChips(signals, watchlist) {
       chip.className = 'price-chip';
       chip.dataset.sym = sym;
       chip.title = s ? `${change >= 0 ? '+' : ''}${change.toFixed(2)}% today` : '';
+      chip.onclick = () => ctQuickView(sym);
       chip.innerHTML =
         `<span class="price-chip-sym">${escHtml(sym)}</span>` +
         `<span class="price-chip-price" style="color:${priceColor}">${price}</span>` +
@@ -3626,6 +3694,11 @@ function updatePriceChips(signals, watchlist) {
 
   // Remove chips for symbols no longer in watchlist
   existing.forEach((el, sym) => { if (!seen.has(sym)) el.remove(); });
+}
+
+function ctQuickView(symbol) {
+  switchTab('charts');
+  loadChart(symbol);
 }
 
 // updateTicker — scrolling news marquee only (prices moved to price chip rail)
@@ -4413,22 +4486,75 @@ _MOBILE_HTML = """<!DOCTYPE html>
   --bull:#3fb950; --bear:#f85149; --warn:#d29922; --purple:#a78bfa;
   --blue:#58a6ff; --mono:'SF Mono',Monaco,monospace; --radius:12px;
   --nav-h:64px; --safe-b:env(safe-area-inset-bottom,0px);
+  --safe-t:env(safe-area-inset-top, 20px);
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden}
 
 /* ── Layout ── */
-#app{display:flex;flex-direction:column;height:100dvh;height:100vh}
-#screen{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:calc(var(--nav-h) + var(--safe-b) + 8px)}
+#app{display:flex;flex-direction:column;height:100dvh;height:100vh;padding-top:var(--safe-t)}
+#screen{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:calc(var(--nav-h) + var(--safe-b) + 16px)}
+
+/* ── Top Price Rail ── */
+.m-price-rail {
+  display: flex;
+  overflow-x: auto;
+  gap: 8px;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+.m-price-rail::-webkit-scrollbar { display: none; }
+.m-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.m-chip-sym { font-weight: 800; color: var(--accent); }
+.m-chip-price { font-weight: 600; }
 
 /* ── Bottom nav ── */
-#nav{position:fixed;bottom:0;left:0;right:0;height:calc(var(--nav-h) + var(--safe-b));padding-bottom:var(--safe-b);background:var(--surface);border-top:1px solid var(--border);display:flex;z-index:100}
-.nav-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;background:none;border:none;color:var(--muted);font-size:10px;font-weight:600;letter-spacing:.3px;cursor:pointer;padding-top:6px;min-height:44px}
-.nav-btn .icon{font-size:22px;line-height:1}
+#nav{position:fixed;bottom:0;left:0;right:0;height:calc(var(--nav-h) + var(--safe-b));padding-bottom:var(--safe-b);background:rgba(22,27,34,0.8);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-top:1px solid var(--border);display:flex;z-index:100}
+.nav-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;background:none;border:none;color:var(--muted);font-size:10px;font-weight:600;letter-spacing:.3px;cursor:pointer;padding-top:8px}
+.nav-btn svg { width: 22px; height: 22px; stroke: currentColor; fill: none; transition: transform 0.1s; }
+.nav-btn:active svg { transform: scale(0.9); }
 .nav-btn.active{color:var(--accent)}
 .nav-badge{position:relative}
 .nav-badge::after{content:attr(data-count);position:absolute;top:-4px;right:-8px;background:var(--bear);color:#fff;font-size:9px;font-weight:700;min-width:16px;height:16px;border-radius:99px;display:flex;align-items:center;justify-content:center;padding:0 3px;display:none}
 .nav-badge[data-count]:not([data-count=""])::after{display:flex}
+
+/* ── Readiness Scorecard (Mobile) ── */
+.m-readiness {
+  background: rgba(0, 208, 132, 0.03);
+  border: 1px solid rgba(0, 208, 132, 0.2);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 12px;
+}
+.m-readiness-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+.m-goal-box {
+  background: var(--surface2);
+  padding: 10px;
+  border-radius: 8px;
+  border-left: 3px solid var(--border);
+}
+.m-goal-box.ok { border-left-color: var(--accent); }
+.m-goal-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; margin-bottom: 2px; }
+.m-goal-val { font-size: 15px; font-weight: 800; }
 
 /* ── Panes ── */
 .pane{display:none;padding:16px;gap:12px;flex-direction:column}
@@ -4564,16 +4690,16 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
 /* ── Pull-to-refresh ── */
 #ptr{height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);transition:height .2s}
 #ptr.ready{color:var(--accent)}
-</style>
 </head>
 <body>
 <div id="app">
-  <div id="conn-status-bar"><div id="conn-dot"></div><span id="conn-label">Connected</span></div>
+  <div class="m-price-rail" id="m-price-rail"></div>
   <div id="screen">
     <div id="ptr">↓ Release to refresh</div>
 
     <!-- HOME -->
     <div class="pane active" id="pane-home">
+      <div id="m-readiness-wrap"></div>
       <div class="card">
         <div class="card-label">Total Equity</div>
         <div class="card-big" id="m-equity">—</div>
@@ -4621,7 +4747,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
 
     <!-- ALERTS -->
     <div class="pane" id="pane-alerts">
-      <div class="filter-chips" id="m-alert-filters">
+      <div class="filter-chips">
         <button class="filter-chip active" onclick="mAlertFilter('all',this)">All</button>
         <button class="filter-chip" onclick="mAlertFilter('buy',this)">Buy</button>
         <button class="filter-chip" onclick="mAlertFilter('sell',this)">Sell</button>
@@ -4651,19 +4777,24 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
   <!-- Bottom nav -->
   <nav id="nav">
     <button class="nav-btn active" onclick="mTab('home')" id="nav-home">
-      <span class="icon">📊</span>Home
+      <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+      Home
     </button>
     <button class="nav-btn" onclick="mTab('signals')" id="nav-signals">
-      <span class="icon">⚡</span>Signals
+      <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+      Signals
     </button>
     <button class="nav-btn" onclick="mTab('charts')" id="nav-charts">
-      <span class="icon">📈</span>Charts
+      <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"></path><path d="M18 17V9"></path><path d="M13 17V5"></path><path d="M8 17v-3"></path></svg>
+      Charts
     </button>
-    <button class="nav-btn nav-badge" onclick="mTab('alerts')" id="nav-alerts" data-count="">
-      <span class="icon">🔔</span>Alerts
+    <button class="nav-btn" onclick="mTab('alerts')" id="nav-alerts">
+      <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+      Alerts
     </button>
     <button class="nav-btn" onclick="mTab('investigate')" id="nav-investigate">
-      <span class="icon">🔍</span>Investigate
+      <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      Research
     </button>
   </nav>
 </div>
@@ -4687,10 +4818,14 @@ function mTab(name) {
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.id === 'nav-' + name));
   if (name === 'charts' && _mSym) mLoadChart(_mSym);
 }
-
 // ── State rendering ────────────────────────────────────────────────────────
 function mApply(state) {
   _state = state;
+
+  // Price Rail + Readiness + Connection
+  mRenderPriceRail(state.signals);
+  mRenderReadiness(state.readiness_scorecard);
+  _setConn('online');
 
   // Equity
   if (state.equity != null) {
@@ -4846,6 +4981,45 @@ function mApply(state) {
   mRenderInv(state.investigations || {});
 }
 
+function mRenderPriceRail(signals) {
+  const rail = document.getElementById('m-price-rail');
+  if (!rail || !signals || !signals.length) return;
+  
+  rail.innerHTML = signals.map(s => {
+    const change = s.change_pct || 0;
+    const color = change > 0 ? 'var(--bull)' : change < 0 ? 'var(--bear)' : 'var(--muted)';
+    return `<div class="m-chip" onclick="mTab('charts');mSetSym('${esc(s.symbol)}')">
+      <span class="m-chip-sym">${esc(s.symbol)}</span>
+      <span class="m-chip-price" style="color:${color}">${fmt$(s.price)}</span>
+    </div>`;
+  }).join('');
+}
+
+function mRenderReadiness(scorecard) {
+  const wrap = document.getElementById('m-readiness-wrap');
+  if (!wrap || !scorecard || !scorecard.sample_size) return;
+
+  const s = scorecard;
+  wrap.innerHTML = `
+    <div class="m-readiness">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span class="card-label" style="margin:0">Go-Live Readiness</span>
+        <span class="sig-badge ${s.is_ready ? 'buy' : 'hold'}">${s.is_ready ? 'READY' : 'SCANNING'}</span>
+      </div>
+      <div class="m-readiness-grid">
+        <div class="m-goal-box ${s.sample_size.ok ? 'ok' : ''}">
+          <div class="m-goal-lbl">Trades</div>
+          <div class="m-goal-val">${s.sample_size.val} / ${s.sample_size.goal}</div>
+        </div>
+        <div class="m-goal-box ${s.profit_factor.ok ? 'ok' : ''}">
+          <div class="m-goal-lbl">Profit Factor</div>
+          <div class="m-goal-val">${s.profit_factor.val}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 // ── Alert filter ──────────────────────────────────────────────────────────
 function mAlertClassify(a) {
   const s = (a.subject||'').toUpperCase();
@@ -4908,9 +5082,11 @@ async function mQuickInv(sym) {
 // ── Chart ──────────────────────────────────────────────────────────────────
 function mSetSym(sym) {
   _mSym = sym;
-  document.querySelectorAll('.m-pill').forEach(p => p.classList.toggle('active', p.textContent === sym));
+  document.querySelectorAll('#m-chart-pills .m-pill').forEach(p => p.classList.toggle('active', p.textContent === sym));
   mLoadChart(sym);
 }
+
+let _mSma = null, _mEma = null;
 
 function mLoadChart(sym) {
   const tfParam = {'1D':'day','1W':'week','1M':'month','3M':'3month'}[_mTf] || 'week';
@@ -4927,15 +5103,22 @@ function mLoadChart(sym) {
           timeScale: { borderColor:'#30363d', timeVisible:true },
           handleScroll: true, handleScale: true,
         });
-        _mChart.timeScale().fitContent();
         _mSeries = _mChart.addCandlestickSeries({
           upColor:'#3fb950', downColor:'#f85149',
           borderUpColor:'#3fb950', borderDownColor:'#f85149',
           wickUpColor:'#3fb950', wickDownColor:'#f85149',
         });
+        _mSma = _mChart.addLineSeries({ color: 'gold', lineWidth: 1, title: 'SMA 20' });
+        _mEma = _mChart.addLineSeries({ color: '#58a6ff', lineWidth: 1, title: 'EMA 50' });
       }
       const candles = (d.candles||[]).sort((a,b)=>a.time-b.time);
       _mSeries.setData(candles);
+      
+      const smaData = candles.filter(c => c.sma_20).map(c => ({ time: c.time, value: c.sma_20 }));
+      const emaData = candles.filter(c => c.ema_50).map(c => ({ time: c.time, value: c.ema_50 }));
+      _mSma.setData(smaData);
+      _mEma.setData(emaData);
+
       _mChart.timeScale().fitContent();
       if (candles.length) {
         const last = candles[candles.length-1];
@@ -5014,8 +5197,8 @@ async function mClearAlertsConfirm() {
 function _setConn(state) {
   const dot = document.getElementById('conn-dot');
   const lbl = document.getElementById('conn-label');
-  dot.className = state === 'online' ? '' : state === 'reconnecting' ? 'reconnecting' : 'offline';
-  lbl.textContent = state === 'online' ? 'Live' : state === 'reconnecting' ? 'Reconnecting…' : 'Offline';
+  if (dot) dot.className = state === 'online' ? '' : state === 'reconnecting' ? 'reconnecting' : 'offline';
+  if (lbl) lbl.textContent = state === 'online' ? 'Live' : state === 'reconnecting' ? 'Reconnecting…' : 'Offline';
 }
 function connectSSE() {
   _setConn('reconnecting');
