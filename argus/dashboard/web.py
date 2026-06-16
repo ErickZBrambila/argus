@@ -4387,6 +4387,461 @@ setInterval(fetchNewsHeadlines, 5 * 60 * 1000);
 </html>"""
 
 
+_MOBILE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0d1117">
+<title>Argus</title>
+<style>
+:root {
+  --bg:#0d1117; --surface:#161b22; --surface2:#1c2128; --surface3:#21262d;
+  --border:#30363d; --text:#e6edf3; --muted:#8b949e; --accent:#00d084;
+  --bull:#3fb950; --bear:#f85149; --warn:#d29922; --purple:#a78bfa;
+  --blue:#58a6ff; --mono:'SF Mono',Monaco,monospace; --radius:12px;
+  --nav-h:64px; --safe-b:env(safe-area-inset-bottom,0px);
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden}
+
+/* ── Layout ── */
+#app{display:flex;flex-direction:column;height:100dvh;height:100vh}
+#screen{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:calc(var(--nav-h) + var(--safe-b) + 8px)}
+
+/* ── Bottom nav ── */
+#nav{position:fixed;bottom:0;left:0;right:0;height:calc(var(--nav-h) + var(--safe-b));padding-bottom:var(--safe-b);background:var(--surface);border-top:1px solid var(--border);display:flex;z-index:100}
+.nav-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;background:none;border:none;color:var(--muted);font-size:10px;font-weight:600;letter-spacing:.3px;cursor:pointer;padding-top:6px;min-height:44px}
+.nav-btn .icon{font-size:22px;line-height:1}
+.nav-btn.active{color:var(--accent)}
+.nav-badge{position:relative}
+.nav-badge::after{content:attr(data-count);position:absolute;top:-4px;right:-8px;background:var(--bear);color:#fff;font-size:9px;font-weight:700;min-width:16px;height:16px;border-radius:99px;display:flex;align-items:center;justify-content:center;padding:0 3px;display:none}
+.nav-badge[data-count]:not([data-count=""])::after{display:flex}
+
+/* ── Panes ── */
+.pane{display:none;padding:16px;gap:12px;flex-direction:column}
+.pane.active{display:flex}
+
+/* ── Cards ── */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+.card-label{font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px}
+.card-big{font-size:36px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1.1;letter-spacing:-1px}
+.card-sub{font-size:13px;color:var(--muted);margin-top:4px;font-variant-numeric:tabular-nums}
+
+/* ── Account row ── */
+.acct-row{display:flex;gap:10px}
+.acct-card{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px}
+.acct-name{font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;margin-bottom:4px}
+.acct-eq{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1}
+.acct-pnl{font-size:12px;margin-top:3px;font-variant-numeric:tabular-nums}
+.acct-kill{font-size:10px;color:var(--warn);font-weight:700;margin-top:4px}
+
+/* ── Signal list ── */
+.sig-row{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--border)}
+.sig-row:last-child{border-bottom:none}
+.sig-sym{font-size:16px;font-weight:800;font-family:var(--mono);min-width:52px;color:var(--text)}
+.sig-price{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text);flex:1}
+.sig-badge{font-size:11px;font-weight:700;padding:4px 10px;border-radius:99px;letter-spacing:.3px}
+.sig-badge.buy {background:rgba(63,185,80,.15);color:var(--bull);border:1px solid rgba(63,185,80,.3)}
+.sig-badge.sell{background:rgba(248,81,73,.15);color:var(--bear);border:1px solid rgba(248,81,73,.3)}
+.sig-badge.hold{background:rgba(139,148,158,.1);color:var(--muted);border:1px solid var(--border)}
+.sig-conf{font-size:11px;color:var(--muted);min-width:36px;text-align:right}
+
+/* ── Trade feed ── */
+.trade-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)}
+.trade-row:last-child{border-bottom:none}
+.trade-side{font-size:11px;font-weight:700;padding:3px 8px;border-radius:99px;min-width:42px;text-align:center}
+.trade-side.buy {background:rgba(63,185,80,.15);color:var(--bull)}
+.trade-side.sell{background:rgba(248,81,73,.15);color:var(--bear)}
+.trade-sym{font-size:15px;font-weight:700;font-family:var(--mono);flex:1}
+.trade-val{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+.trade-time{font-size:11px;color:var(--muted)}
+
+/* ── Alert feed ── */
+.alert-row{display:flex;gap:10px;align-items:flex-start;padding:12px;background:var(--surface2);border-radius:10px;border-left:3px solid var(--border)}
+.alert-row.buy {border-left-color:var(--bull)}
+.alert-row.sell{border-left-color:var(--bear)}
+.alert-row.kill{border-left-color:var(--warn)}
+.alert-row.approval{border-left-color:var(--accent)}
+.alert-row.investigation{border-left-color:var(--purple)}
+.alert-row.error{border-left-color:var(--bear)}
+.alert-t{font-size:10px;color:var(--muted);font-family:var(--mono);white-space:nowrap;padding-top:2px;min-width:40px}
+.alert-subj{font-size:13px;font-weight:600}
+.alert-body{font-size:12px;color:var(--muted);margin-top:2px;line-height:1.4}
+
+/* ── Chart ── */
+#m-chart-pills{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
+#m-chart-pills::-webkit-scrollbar{display:none}
+.m-pill{padding:6px 14px;border-radius:99px;font-size:13px;font-weight:700;font-family:var(--mono);background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;cursor:pointer;flex-shrink:0;min-height:36px}
+.m-pill.active{background:var(--accent);color:#000d0a;border-color:var(--accent)}
+#m-chart-area{width:100%;height:300px;border-radius:var(--radius);overflow:hidden;margin-top:10px;background:var(--surface2)}
+.m-ohlc{display:flex;justify-content:space-between;margin-top:10px;font-size:12px;color:var(--muted);font-family:var(--mono)}
+.m-ohlc span b{color:var(--text)}
+
+/* ── Investigate ── */
+.inv-search-wrap{position:relative}
+.inv-m-input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px 16px;font-size:16px;color:var(--text);outline:none}
+.inv-m-input:focus{border-color:var(--accent)}
+.inv-m-btn{width:100%;margin-top:8px;padding:14px;background:var(--accent);color:#000d0a;font-weight:700;font-size:15px;border:none;border-radius:10px;cursor:pointer;min-height:52px}
+.inv-m-card{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;position:relative}
+.inv-m-sym{font-size:18px;font-weight:800;font-family:var(--mono)}
+.inv-m-status{font-size:12px;color:var(--muted);margin-top:2px}
+.inv-m-verdict{font-size:15px;font-weight:700;margin-top:8px}
+.inv-m-summary{font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5}
+.inv-m-del{position:absolute;top:12px;right:12px;background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center}
+.inv-m-dd{position:absolute;top:calc(100%+4px);left:0;right:0;background:var(--surface2);border:1px solid var(--border);border-radius:10px;z-index:50;overflow:hidden;display:none}
+.inv-m-dd-item{padding:12px 16px;display:flex;align-items:center;gap:10px;cursor:pointer;border-bottom:1px solid var(--border)}
+.inv-m-dd-item:last-child{border-bottom:none}
+.inv-m-dd-sym{font-family:var(--mono);font-weight:700;color:var(--accent);min-width:50px}
+.inv-m-dd-name{font-size:13px;color:var(--muted)}
+
+/* ── Misc ── */
+.pill-up{color:var(--bull)} .pill-dn{color:var(--bear)}
+.empty-state{text-align:center;color:var(--muted);padding:48px 0;font-size:14px}
+.section-title{font-size:12px;font-weight:700;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px}
+.kill-banner{background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.3);border-radius:10px;padding:10px 14px;font-size:13px;color:var(--warn);font-weight:600;display:flex;align-items:center;gap:8px}
+.btn-clear{background:var(--surface2);border:1px solid var(--border);color:var(--muted);padding:8px 16px;border-radius:8px;font-size:13px;cursor:pointer;align-self:flex-end;min-height:44px}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="screen">
+
+    <!-- HOME -->
+    <div class="pane active" id="pane-home">
+      <div class="card">
+        <div class="card-label">Total Equity</div>
+        <div class="card-big" id="m-equity">—</div>
+        <div class="card-sub" id="m-pnl">—</div>
+      </div>
+      <div class="acct-row" id="m-accts"></div>
+      <div id="m-kill-wrap"></div>
+      <div class="card">
+        <div class="section-title">Recent Trades</div>
+        <div id="m-trades"><div class="empty-state">No trades yet</div></div>
+      </div>
+    </div>
+
+    <!-- SIGNALS -->
+    <div class="pane" id="pane-signals">
+      <div class="card">
+        <div class="section-title">Signals</div>
+        <div id="m-signals"><div class="empty-state">Waiting for scan…</div></div>
+      </div>
+    </div>
+
+    <!-- CHARTS -->
+    <div class="pane" id="pane-charts">
+      <div id="m-chart-pills"></div>
+      <div id="m-chart-area"></div>
+      <div class="m-ohlc" id="m-ohlc" style="display:none">
+        <span>O <b id="mo-o">—</b></span>
+        <span>H <b id="mo-h">—</b></span>
+        <span>L <b id="mo-l">—</b></span>
+        <span>C <b id="mo-c">—</b></span>
+      </div>
+    </div>
+
+    <!-- ALERTS -->
+    <div class="pane" id="pane-alerts">
+      <button class="btn-clear" onclick="mClearAlerts()">Clear</button>
+      <div id="m-alert-feed"><div class="empty-state">No alerts yet</div></div>
+    </div>
+
+    <!-- INVESTIGATE -->
+    <div class="pane" id="pane-investigate">
+      <div class="card">
+        <div class="inv-search-wrap">
+          <input class="inv-m-input" id="inv-m-input" placeholder="Symbol to investigate…"
+                 autocomplete="off" oninput="mInvSearch(this.value)"
+                 onblur="setTimeout(mInvDdClose,150)">
+          <div class="inv-m-dd" id="inv-m-dd"></div>
+        </div>
+        <button class="inv-m-btn" onclick="mInvStart()">🔍 Deep Dive</button>
+      </div>
+      <div id="m-inv-cards"><div class="empty-state">No active investigations</div></div>
+    </div>
+
+  </div><!-- /screen -->
+
+  <!-- Bottom nav -->
+  <nav id="nav">
+    <button class="nav-btn active" onclick="mTab('home')" id="nav-home">
+      <span class="icon">📊</span>Home
+    </button>
+    <button class="nav-btn" onclick="mTab('signals')" id="nav-signals">
+      <span class="icon">⚡</span>Signals
+    </button>
+    <button class="nav-btn" onclick="mTab('charts')" id="nav-charts">
+      <span class="icon">📈</span>Charts
+    </button>
+    <button class="nav-btn nav-badge" onclick="mTab('alerts')" id="nav-alerts" data-count="">
+      <span class="icon">🔔</span>Alerts
+    </button>
+    <button class="nav-btn" onclick="mTab('investigate')" id="nav-investigate">
+      <span class="icon">🔍</span>Investigate
+    </button>
+  </nav>
+</div>
+
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"
+        integrity="sha384-JZigAjwiaZtkUbA44CWkPaT3iBb/mU5pO6QOANp+OqHd4q+1+7MG1kzp2OOP9ZfP"
+        crossorigin="anonymous"></script>
+<script>
+const esc = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt$ = v => '$' + Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmtPct = v => (v>=0?'+':'')+Number(v).toFixed(2)+'%';
+let _state = {};
+let _mChart = null, _mSeries = null, _mSym = null;
+
+// ── Tab switching ──────────────────────────────────────────────────────────
+function mTab(name) {
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + name));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.id === 'nav-' + name));
+  if (name === 'charts' && _mSym) mLoadChart(_mSym);
+}
+
+// ── State rendering ────────────────────────────────────────────────────────
+function mApply(state) {
+  _state = state;
+
+  // Equity
+  if (state.equity != null) {
+    document.getElementById('m-equity').textContent = fmt$(state.equity);
+  }
+  if (state.performance) {
+    const pnl = state.performance.daily_pnl_pct ?? 0;
+    const el = document.getElementById('m-pnl');
+    el.textContent = fmtPct(pnl) + ' today';
+    el.className = 'card-sub ' + (pnl >= 0 ? 'pill-up' : 'pill-dn');
+  }
+
+  // Accounts
+  const acctWrap = document.getElementById('m-accts');
+  const accounts = state.accounts || {};
+  if (Object.keys(accounts).length) {
+    acctWrap.innerHTML = Object.entries(accounts).map(([label, a]) => {
+      const pnl = a.daily_pnl_pct ?? 0;
+      const kill = a.kill_switch_active ? '<div class="acct-kill">⚠ Kill switch active</div>' : '';
+      return `<div class="acct-card">
+        <div class="acct-name">${esc(label)}</div>
+        <div class="acct-eq">${fmt$(a.equity ?? 0)}</div>
+        <div class="acct-pnl ${pnl>=0?'pill-up':'pill-dn'}">${fmtPct(pnl)}</div>
+        ${kill}
+      </div>`;
+    }).join('');
+  }
+
+  // Kill switch banners
+  const killWrap = document.getElementById('m-kill-wrap');
+  const kills = Object.entries(accounts).filter(([,a]) => a.kill_switch_active);
+  killWrap.innerHTML = kills.map(([label]) =>
+    `<div class="kill-banner">⚠ ${esc(label.toUpperCase())} kill switch active — drawdown limit hit</div>`
+  ).join('');
+
+  // Signals
+  const sigs = state.signals || [];
+  const sigEl = document.getElementById('m-signals');
+  if (sigs.length) {
+    sigEl.innerHTML = sigs.map(s => {
+      const comp = (s.composite || 'neutral').toLowerCase();
+      const cls = comp === 'bullish' ? 'buy' : comp === 'bearish' ? 'sell' : 'hold';
+      const label = comp === 'bullish' ? 'BUY' : comp === 'bearish' ? 'SELL' : 'HOLD';
+      const conf = s.confidence != null ? Math.round(s.confidence * 100) + '%' : '—';
+      const price = s.price != null ? fmt$(s.price) : '—';
+      return `<div class="sig-row" onclick="mTab('charts');mSetSym('${esc(s.symbol)}')">
+        <span class="sig-sym">${esc(s.symbol)}</span>
+        <span class="sig-price">${price}</span>
+        <span class="sig-badge ${cls}">${label}</span>
+        <span class="sig-conf">${conf}</span>
+      </div>`;
+    }).join('');
+  } else {
+    sigEl.innerHTML = '<div class="empty-state">Waiting for scan…</div>';
+  }
+
+  // Chart pills (watchlist)
+  const wl = state.watchlist || sigs.map(s=>s.symbol);
+  const pillsEl = document.getElementById('m-chart-pills');
+  if (wl.length && pillsEl.children.length !== wl.length) {
+    if (!_mSym) _mSym = wl[0];
+    pillsEl.innerHTML = wl.map(sym =>
+      `<button class="m-pill ${sym===_mSym?'active':''}" onclick="mSetSym('${esc(sym)}')">${esc(sym)}</button>`
+    ).join('');
+  }
+
+  // Recent trades
+  const trades = state.recent_trades || [];
+  const tradeEl = document.getElementById('m-trades');
+  if (trades.length) {
+    tradeEl.innerHTML = trades.slice(0,8).map(t =>
+      `<div class="trade-row">
+        <span class="trade-side ${t.side}">${(t.side||'').toUpperCase()}</span>
+        <span class="trade-sym">${esc(t.symbol||'')}</span>
+        <span class="trade-val">${fmt$(t.price||0)}</span>
+        <span class="trade-time">${esc(t.time||'')}</span>
+      </div>`
+    ).join('');
+  } else {
+    tradeEl.innerHTML = '<div class="empty-state">No trades yet</div>';
+  }
+
+  // Alerts
+  const alerts = state.alert_log || [];
+  const alertFeed = document.getElementById('m-alert-feed');
+  const navAlerts = document.getElementById('nav-alerts');
+  navAlerts.dataset.count = alerts.length > 0 ? alerts.length : '';
+  if (alerts.length) {
+    alertFeed.innerHTML = alerts.map(a => {
+      const s = (a.subject||'').toUpperCase();
+      const cls = s.includes('KILL')||s.includes('DRAW') ? 'kill'
+                : s.includes('ERROR') ? 'error'
+                : s.includes('APPROV') ? 'approval'
+                : s.includes('INVEST')||s.includes('🟢')||s.includes('🔴') ? 'investigation'
+                : s.includes('BUY') ? 'buy'
+                : s.includes('SELL') ? 'sell' : '';
+      const t = new Date(a.time).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+      return `<div class="alert-row ${cls}">
+        <span class="alert-t">${t}</span>
+        <div><div class="alert-subj">${esc(a.subject)}</div><div class="alert-body">${esc(a.body)}</div></div>
+      </div>`;
+    }).join('');
+  } else {
+    alertFeed.innerHTML = '<div class="empty-state">No alerts yet</div>';
+  }
+
+  // Investigations
+  mRenderInv(state.investigations || {});
+}
+
+// ── Chart ──────────────────────────────────────────────────────────────────
+function mSetSym(sym) {
+  _mSym = sym;
+  document.querySelectorAll('.m-pill').forEach(p => p.classList.toggle('active', p.textContent === sym));
+  mLoadChart(sym);
+}
+
+function mLoadChart(sym) {
+  fetch('/api/chart/' + sym)
+    .then(r => r.json())
+    .then(d => {
+      const area = document.getElementById('m-chart-area');
+      if (!_mChart) {
+        _mChart = LightweightCharts.createChart(area, {
+          layout: { background:{color:'#1c2128'}, textColor:'#8b949e' },
+          grid: { vertLines:{color:'#30363d'}, horzLines:{color:'#30363d'} },
+          crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+          rightPriceScale: { borderColor:'#30363d' },
+          timeScale: { borderColor:'#30363d', timeVisible:true },
+          handleScroll: true, handleScale: true,
+        });
+        _mChart.timeScale().fitContent();
+        _mSeries = _mChart.addCandlestickSeries({
+          upColor:'#3fb950', downColor:'#f85149',
+          borderUpColor:'#3fb950', borderDownColor:'#f85149',
+          wickUpColor:'#3fb950', wickDownColor:'#f85149',
+        });
+      }
+      const candles = (d.candles||[]).sort((a,b)=>a.time-b.time);
+      _mSeries.setData(candles);
+      _mChart.timeScale().fitContent();
+      if (candles.length) {
+        const last = candles[candles.length-1];
+        document.getElementById('m-ohlc').style.display = 'flex';
+        document.getElementById('mo-o').textContent = '$'+last.open.toFixed(2);
+        document.getElementById('mo-h').textContent = '$'+last.high.toFixed(2);
+        document.getElementById('mo-l').textContent = '$'+last.low.toFixed(2);
+        document.getElementById('mo-c').textContent = '$'+last.close.toFixed(2);
+      }
+      // Resize chart to fill area
+      requestAnimationFrame(() => {
+        if (_mChart) _mChart.applyOptions({width: area.clientWidth, height: area.clientHeight});
+      });
+    }).catch(()=>{});
+}
+
+// ── Investigations ─────────────────────────────────────────────────────────
+function mRenderInv(invs) {
+  const el = document.getElementById('m-inv-cards');
+  const entries = Object.entries(invs);
+  if (!entries.length) { el.innerHTML = '<div class="empty-state">No active investigations</div>'; return; }
+  el.innerHTML = entries.map(([sym, inv]) => {
+    const statusColor = inv.status==='complete' ? 'var(--accent)' : inv.status==='error' ? 'var(--bear)' : 'var(--warn)';
+    const verdictHtml = inv.verdict ? `<div class="inv-m-verdict">${esc(inv.verdict)} ${inv.confidence ? '· '+Math.round(inv.confidence*100)+'%' : ''}</div>` : '';
+    const summaryHtml = inv.summary ? `<div class="inv-m-summary">${esc(inv.summary.slice(0,200))}${inv.summary.length>200?'…':''}</div>` : '';
+    return `<div class="inv-m-card">
+      <button class="inv-m-del" onclick="mInvDelete('${esc(sym)}')">✕</button>
+      <div class="inv-m-sym">${esc(sym)}</div>
+      <div class="inv-m-status" style="color:${statusColor}">${esc(inv.status||'queued')}</div>
+      ${verdictHtml}${summaryHtml}
+    </div>`;
+  }).join('');
+}
+
+let _invDdTerm = '';
+function mInvSearch(val) {
+  _invDdTerm = val;
+  const dd = document.getElementById('inv-m-dd');
+  if (!val || val.length < 1) { dd.style.display='none'; return; }
+  fetch('/api/search?q=' + encodeURIComponent(val))
+    .then(r => r.json()).then(d => {
+      if (!d.results || !d.results.length) { dd.style.display='none'; return; }
+      dd.innerHTML = d.results.slice(0,5).map(r =>
+        `<div class="inv-m-dd-item" onclick="mInvPick('${esc(r.symbol)}')">
+          <span class="inv-m-dd-sym">${esc(r.symbol)}</span>
+          <span class="inv-m-dd-name">${esc(r.name||'')}</span>
+        </div>`
+      ).join('');
+      dd.style.display = 'block';
+    }).catch(()=>{});
+}
+function mInvPick(sym) {
+  document.getElementById('inv-m-input').value = sym;
+  document.getElementById('inv-m-dd').style.display = 'none';
+}
+function mInvDdClose() { document.getElementById('inv-m-dd').style.display='none'; }
+async function mInvStart() {
+  const sym = document.getElementById('inv-m-input').value.trim().toUpperCase();
+  if (!sym) return;
+  await fetch('/api/investigate', {method:'POST',headers:{'Content-Type':'application/json',
+    ...(window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{})},
+    body:JSON.stringify({symbol:sym})});
+  document.getElementById('inv-m-input').value = '';
+}
+async function mInvDelete(sym) {
+  await fetch('/api/investigate/'+sym,{method:'DELETE',
+    headers:window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{}});
+}
+async function mClearAlerts() {
+  await fetch('/api/alerts/clear',{method:'POST',
+    headers:window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{}});
+}
+
+// ── SSE ───────────────────────────────────────────────────────────────────
+function connectSSE() {
+  const es = new EventSource('/events');
+  es.onmessage = e => { try { mApply(JSON.parse(e.data)); } catch {} };
+  es.onerror = () => { setTimeout(connectSSE, 5000); es.close(); };
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+fetch('/events').catch(()=>{});
+connectSSE();
+
+// Resize chart when tab becomes active
+window.addEventListener('resize', () => {
+  if (_mChart) {
+    const area = document.getElementById('m-chart-area');
+    _mChart.applyOptions({width: area.clientWidth, height: area.clientHeight});
+  }
+});
+</script>
+</body>
+</html>"""
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     # Inject the token so the JS can attach it to all mutating requests.
@@ -4394,6 +4849,12 @@ async def index() -> str:
     # so embedding it here does not widen the attack surface.
     token_script = f"<script>window._ARGUS_TOKEN={json.dumps(_dashboard_token)};</script>"
     return _HTML.replace("</head>", token_script + "\n</head>", 1)
+
+
+@app.get("/m", response_class=HTMLResponse)
+async def mobile() -> str:
+    token_script = f"<script>window._ARGUS_TOKEN={json.dumps(_dashboard_token)};</script>"
+    return _MOBILE_HTML.replace("</head>", token_script + "\n</head>", 1)
 
 
 def main(host: str = "127.0.0.1", port: int = 8000, token: str = "") -> None:
