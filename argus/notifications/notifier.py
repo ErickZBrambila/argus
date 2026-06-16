@@ -54,8 +54,17 @@ class Notifier:
 
         self._discord_webhook = discord_webhook_url
         self._ntfy_url = ntfy_url
+        self._log_fn = None
+
+    def set_log_fn(self, fn) -> None:
+        self._log_fn = fn
 
     def send(self, subject: str, body: str) -> None:
+        if self._log_fn:
+            try:
+                self._log_fn(subject, body)
+            except Exception:
+                pass
         self._try_macos(subject, body)
         self._try_discord(subject, body)
         self._try_ntfy(subject, body)

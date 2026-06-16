@@ -73,6 +73,50 @@ def _equity_save() -> None:
 
 _equity_load()  # restore on module import
 
+# ── Alert log ─────────────────────────────────────────────────────────────────
+_alert_log: _collections.deque = _collections.deque(maxlen=500)
+_ALERT_PERSIST_PATH = _pathlib.Path(__file__).parent.parent.parent / "alert_history.json"
+
+
+def _alert_load() -> None:
+    global _alert_log
+    try:
+        if not _ALERT_PERSIST_PATH.exists():
+            return
+        data = json.loads(_ALERT_PERSIST_PATH.read_text())
+        if data.get("date") != datetime.date.today().isoformat():
+            return  # stale — start fresh
+        _alert_log = _collections.deque(data.get("entries", []), maxlen=500)
+    except Exception as exc:
+        logger.debug("Alert log load failed: %s", exc)
+
+
+def _alert_save() -> None:
+    try:
+        _ALERT_PERSIST_PATH.write_text(json.dumps({
+            "date": datetime.date.today().isoformat(),
+            "entries": list(_alert_log),
+        }))
+    except Exception as exc:
+        logger.debug("Alert log save failed: %s", exc)
+
+
+def _push_alert_entry(subject: str, body: str) -> None:
+    """Append an alert entry and push to SSE clients."""
+    entry = {
+        "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "subject": subject,
+        "body": body,
+    }
+    _alert_log.appendleft(entry)
+    _alert_save()
+    with _state_lock:
+        snapshot = {**_state, "alert_log": list(_alert_log)}
+    _sse_push(json.dumps(snapshot, default=str))
+
+
+_alert_load()
+
 
 def register_chart_source(fn) -> None:
     global _chart_source_fn
@@ -228,6 +272,7 @@ def register_investigate(fn) -> None:
 def register_notifier(notifier) -> None:
     global _notifier
     _notifier = notifier
+    notifier.set_log_fn(_push_alert_entry)
 
 
 def _run_investigation(symbol: str) -> None:
@@ -437,6 +482,7 @@ def push_state(state: dict) -> None:
             **state,
             "equity_history": list(_equity_history),
             "equity_history_by_account": {k: list(v) for k, v in _equity_history_by_account.items()},
+            "alert_log": list(_alert_log),
         }
         _equity_save()
     _sse_push(json.dumps(snapshot, default=str))
@@ -857,6 +903,17 @@ async def deny_trade(trade_id: str) -> dict:
     logger.info("Trade %s denied via dashboard", trade_id)
     _push_approvals_state()
     return {"status": "denied", "trade_id": trade_id}
+
+
+@app.post("/api/alerts/clear", dependencies=[Depends(_require_auth)])
+async def clear_alerts() -> dict:
+    global _alert_log
+    _alert_log.clear()
+    _alert_save()
+    with _state_lock:
+        snapshot = {**_state, "alert_log": []}
+    _sse_push(json.dumps(snapshot, default=str))
+    return {"status": "cleared"}
 
 
 # ── SSE stream ────────────────────────────────────────────────────────────────
@@ -1308,6 +1365,21 @@ _HTML = """<!DOCTYPE html>
   .wl-dd-name { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wl-dd-empty { padding: 10px 14px; font-size: 12px; color: var(--text-dim); }
   .wl-dd-searching { padding: 10px 14px; font-size: 12px; color: var(--muted); }
+
+  /* ── Alerts tab ─────────────────────────────────────────────────────────── */
+  #tab-alerts.active { display: flex; flex-direction: column; gap: 0; grid-template-columns: none; }
+  .alert-feed { display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
+  .alert-entry { display: flex; gap: 12px; align-items: flex-start; padding: 10px 14px; background: var(--surface); border-radius: var(--radius-sm); border-left: 3px solid var(--border); }
+  .alert-entry.buy  { border-left-color: var(--bull); }
+  .alert-entry.sell { border-left-color: var(--bear); }
+  .alert-entry.kill { border-left-color: #ff8c00; }
+  .alert-entry.approval { border-left-color: var(--accent); }
+  .alert-entry.investigation { border-left-color: #a78bfa; }
+  .alert-entry.error { border-left-color: var(--bear); }
+  .alert-time { font-size: 11px; color: var(--muted); font-family: var(--mono); min-width: 52px; padding-top: 2px; white-space: nowrap; }
+  .alert-subject { font-size: 13px; font-weight: 600; color: var(--text); }
+  .alert-body { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+  .alert-clear-btn { align-self: flex-end; margin-bottom: 8px; font-size: 12px; padding: 4px 12px; }
 
   /* ── Investigations tab ─────────────────────────────────────────────────── */
   #tab-investigations.active { display: flex !important; flex-direction: column; grid-template-columns: none; gap: 14px; }
@@ -1771,6 +1843,7 @@ _HTML = """<!DOCTYPE html>
     <button class="tab-btn" onclick="switchTab('performance')">Performance</button>
     <button class="tab-btn" onclick="switchTab('charts')">Charts</button>
     <button class="tab-btn" onclick="switchTab('investigations')">Investigations</button>
+    <button class="tab-btn" onclick="switchTab('alerts')" id="alerts-tab-btn">Alerts</button>
   </nav>
   <main>
 
@@ -2046,6 +2119,18 @@ _HTML = """<!DOCTYPE html>
     </div>
 
   </div><!-- /tab-investigations -->
+
+  <div class="tab-pane" id="tab-alerts">
+    <div class="card card-full" style="grid-column:1/-1">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h2 class="card-title" style="margin:0">Alert History</h2>
+        <button class="btn alert-clear-btn" onclick="clearAlertLog()">Clear</button>
+      </div>
+      <div class="alert-feed" id="alert-feed">
+        <div class="empty" style="padding:48px 0">No alerts yet — BUY/SELL executions, investigations, and kill switch events will appear here</div>
+      </div>
+    </div>
+  </div><!-- /tab-alerts -->
 
   </main>
   <p class="timestamp" id="last-update" style="padding: 0 24px 16px;">Last update: —</p>
@@ -2787,6 +2872,7 @@ function applyState(state) {
   renderPerformance(state.performance);
   renderReadiness(state.readiness_scorecard, state.ai_vote);
   renderFlashcards(state);
+  if (state.alert_log) renderAlerts(state.alert_log);
   renderLogs(state.logs || []);
   // Refresh markers if chart is showing (new closed trades may have arrived)
   if (_chartSymbol && _lastCandles[_chartSymbol]) {
@@ -4181,6 +4267,46 @@ function connectSSE() {
     setTimeout(connectSSE, 5000);
     evtSource.close();
   };
+}
+
+// ── Alerts tab ───────────────────────────────────────────────────────────────
+function classifyAlert(subject) {
+  const s = (subject || '').toUpperCase();
+  if (s.includes('KILL') || s.includes('DRAWDOWN')) return 'kill';
+  if (s.includes('ERROR')) return 'error';
+  if (s.includes('APPROVAL')) return 'approval';
+  if (s.includes('INVESTIGAT') || s.includes('🟢') || s.includes('🔴')) return 'investigation';
+  if (s.includes('BUY')) return 'buy';
+  if (s.includes('SELL')) return 'sell';
+  return '';
+}
+
+function renderAlerts(alertLog) {
+  const feed = document.getElementById('alert-feed');
+  if (!feed) return;
+  // Badge on tab button
+  const btn = document.getElementById('alerts-tab-btn');
+  if (btn && alertLog.length) btn.textContent = `Alerts (${alertLog.length})`;
+  if (!alertLog.length) {
+    feed.innerHTML = '<div class="empty" style="padding:48px 0">No alerts yet — BUY/SELL executions, investigations, and kill switch events will appear here</div>';
+    return;
+  }
+  feed.innerHTML = alertLog.map(a => {
+    const cls = classifyAlert(a.subject);
+    const d = new Date(a.time);
+    const t = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    return `<div class="alert-entry ${cls}">
+      <span class="alert-time">${t}</span>
+      <div>
+        <div class="alert-subject">${escHtml(a.subject)}</div>
+        <div class="alert-body">${escHtml(a.body)}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function clearAlertLog() {
+  await apiFetch('/api/alerts/clear', {method:'POST'});
 }
 
 // Init
