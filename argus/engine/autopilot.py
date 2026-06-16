@@ -73,6 +73,9 @@ class Autopilot:
         self._last_evaluated_signals: dict[str, SignalResult] = {}
         # Decisions cache: symbol -> last TradeDecision (to reuse if signal hasn't changed)
         self._last_decisions: dict[str, TradeDecision] = {}
+        # Screener candidates: [{symbol, reason, category}] — refreshed daily at open
+        self._screener_candidates: list[dict] = []
+        self._screener_last_date: datetime.date = datetime.date.min
 
         logger.info(
             "Argus starting — mode=%s watchlist=%s",
@@ -195,6 +198,8 @@ class Autopilot:
             with get_session() as session:
                 for s in final_wl:
                     add_to_db_watchlist(session, s)
+
+        self._position_sync_done = False  # retry in tick loop once session is ready
 
         web_dashboard.register_autopilot(self)
         web_dashboard.register_notifier(self._notifier)
@@ -436,6 +441,47 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             "closed":     self._cfg.interval_closed,
         }.get(self._market_session, self._cfg.scan_interval_seconds)
 
+    def _sync_positions_to_watchlist(self) -> None:
+        """Add live brokerage positions to watchlist so they get scanned. Runs once per session."""
+        try:
+            import robin_stocks.robinhood as _rh
+            synced: list[str] = []
+            current_wl = set(web_dashboard.get_watchlist() or self._cfg.watchlist)
+            holdings: dict = _rh.account.build_holdings() or {}
+            for sym in holdings:
+                sym = sym.strip().upper()
+                if sym and sym not in current_wl:
+                    with get_session() as session:
+                        add_to_db_watchlist(session, sym)
+                    web_dashboard.add_to_runtime_watchlist(sym)
+                    current_wl.add(sym)
+                    synced.append(sym)
+            for item in (_rh.crypto.get_crypto_positions() or []):
+                sym = (item.get("currency", {}).get("code") or "").strip().upper()
+                qty = float(item.get("quantity", 0) or 0)
+                if sym and qty > 0 and sym not in current_wl:
+                    with get_session() as session:
+                        add_to_db_watchlist(session, sym)
+                    web_dashboard.add_to_runtime_watchlist(sym)
+                    current_wl.add(sym)
+                    synced.append(sym)
+            self._position_sync_done = True
+            if synced:
+                logger.info("Auto-synced open positions to watchlist: %s", synced)
+        except Exception as exc:
+            logger.debug("Position sync deferred: %s", exc)
+
+    def _refresh_screener(self) -> None:
+        try:
+            broker = self._accounts[0].broker
+            candidates = broker.get_screener_symbols()
+            if candidates:
+                self._screener_candidates = candidates
+                syms = [c["symbol"] for c in candidates]
+                logger.info("Screener updated: %d candidates %s", len(candidates), syms)
+        except Exception as exc:
+            logger.debug("Screener refresh failed: %s", exc)
+
     def set_scan_interval(self, seconds: Optional[int]) -> None:
         self._scan_interval_override = seconds
         logger.info(
@@ -459,8 +505,20 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
         import concurrent.futures as _cf
         watchlist = web_dashboard.get_watchlist() or self._cfg.watchlist
-        with _cf.ThreadPoolExecutor(max_workers=min(len(watchlist), 8), thread_name_prefix="sig") as ex:
-            futures = {ex.submit(_compute_signal, sym): sym for sym in watchlist}
+
+        # Refresh screener once per day at market open
+        today = datetime.date.today()
+        if today != self._screener_last_date and is_market_hours():
+            self._refresh_screener()
+            self._screener_last_date = today
+
+        # Scan watchlist + screener symbols (screener symbols are not persisted)
+        screener_syms = [c["symbol"] for c in self._screener_candidates
+                         if c["symbol"] not in set(watchlist)]
+        all_syms = list(watchlist) + screener_syms
+
+        with _cf.ThreadPoolExecutor(max_workers=min(len(all_syms), 8), thread_name_prefix="sig") as ex:
+            futures = {ex.submit(_compute_signal, sym): sym for sym in all_syms}
             for fut in _cf.as_completed(futures):
                 try:
                     sym, sig = fut.result()
@@ -469,10 +527,22 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 except Exception as exc:
                     logger.error("Signal error for %s: %s", futures[fut], exc)
 
-        # Build signals list in the order of the watchlist for UI consistency
+        # Lazy one-time position sync — runs once after session is proven live
+        if not self._position_sync_done and signal_map:
+            self._sync_positions_to_watchlist()
+
+        # Build signals list — watchlist first, then screener candidates
+        screener_sym_set = {c["symbol"] for c in self._screener_candidates}
         for sym in watchlist:
             if sym in signal_map:
                 signals.append(signal_map[sym].to_dict())
+        for candidate in self._screener_candidates:
+            sym = candidate["symbol"]
+            if sym in signal_map and sym not in set(watchlist):
+                d = signal_map[sym].to_dict()
+                d["screener_reason"] = candidate["reason"]
+                d["screener_category"] = candidate["category"]
+                signals.append(d)
 
         if not is_market_hours():
             self._latest_signals = signals
@@ -1041,6 +1111,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             "ai_status":         _get_ai_status(),
             "ai_models":         _get_model_info(),
             "watchlist":         web_dashboard.get_watchlist(),
+            "screener":          self._screener_candidates,
         }
         self._terminal.update(state)
         web_dashboard.push_state(state)

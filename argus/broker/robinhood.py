@@ -234,6 +234,72 @@ class RobinhoodBroker:
                 result[sym] = {"qty": qty, "avg_price": avg}
         return result
 
+    def get_screener_symbols(self) -> list[dict]:
+        """Return daily movers + upcoming earnings symbols as screener candidates.
+
+        Each entry: {"symbol": str, "reason": str, "category": "mover"|"earnings"}
+        Requires a live authenticated session; returns [] on paper or if unauthenticated.
+        """
+        if self.paper or not self._logged_in:
+            return []
+        result: list[dict] = []
+        seen: set[str] = set()
+        try:
+            import robin_stocks.robinhood as rh
+
+            # Top S&P 500 movers (up and down, up to 5 each)
+            for direction in ("up", "down"):
+                movers = rh.markets.get_top_movers_sp500(direction) or []
+                for m in movers[:5]:
+                    sym = (m.get("symbol") or "").strip().upper()
+                    if sym and _SYMBOL_RE.fullmatch(sym) and sym not in seen:
+                        seen.add(sym)
+                        pct = m.get("price_movement", {}).get("percent_change", "")
+                        result.append({
+                            "symbol": sym,
+                            "reason": f"S&P 500 top {direction} mover {pct}%",
+                            "category": "mover",
+                        })
+        except Exception as exc:
+            logger.debug("Screener movers fetch failed: %s", exc)
+
+        try:
+            import robin_stocks.robinhood as rh
+            import datetime as _dt
+
+            # Stocks with earnings in the next 7 days
+            upcoming = rh.stocks.get_earnings(None, info=None) if False else []
+            # get_earnings requires a symbol; use top_100 watchlist as universe instead
+            top = rh.markets.get_top_movers(info="symbol") or []
+            today = _dt.date.today()
+            for sym in top[:20]:
+                sym = (sym or "").strip().upper()
+                if not sym or not _SYMBOL_RE.fullmatch(sym) or sym in seen:
+                    continue
+                try:
+                    earnings = rh.stocks.get_earnings(sym, info=None) or []
+                    for e in earnings:
+                        report = e.get("report", {})
+                        date_str = report.get("date") if report else None
+                        if not date_str:
+                            continue
+                        edate = _dt.date.fromisoformat(date_str)
+                        days_out = (edate - today).days
+                        if 0 <= days_out <= 7:
+                            seen.add(sym)
+                            result.append({
+                                "symbol": sym,
+                                "reason": f"Earnings in {days_out}d ({date_str})",
+                                "category": "earnings",
+                            })
+                            break
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.debug("Screener earnings fetch failed: %s", exc)
+
+        return result
+
     def get_historical_prices(self, symbol: str, span: str = "month", interval: str = "day") -> list[dict]:
         symbol = _validated_symbol(symbol)
         if span not in _VALID_SPANS:

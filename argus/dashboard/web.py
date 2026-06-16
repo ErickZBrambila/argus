@@ -256,6 +256,12 @@ def get_watchlist() -> list[str]:
         return list(_runtime_watchlist)
 
 
+def add_to_runtime_watchlist(symbol: str) -> None:
+    with _watchlist_lock:
+        if symbol not in _runtime_watchlist:
+            _runtime_watchlist.append(symbol)
+
+
 # ── Investigations (up to 3 AI deep-dives) ───────────────────────────────────
 _MAX_INVESTIGATIONS = 3
 _investigations: dict[str, dict] = {}
@@ -926,6 +932,32 @@ async def clear_alerts() -> dict:
     return {"status": "cleared"}
 
 
+# ── Backtester ───────────────────────────────────────────────────────────────
+
+@app.post("/api/backtest", dependencies=[Depends(_require_auth)])
+async def run_backtest(payload: dict) -> dict:
+    symbol = (payload.get("symbol") or "").strip().upper()
+    span   = payload.get("span", "year")
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol required")
+    if span not in ("month", "3month", "year", "5year"):
+        span = "year"
+    if _autopilot is None:
+        raise HTTPException(status_code=503, detail="Autopilot not running")
+    try:
+        from argus.engine.backtest import BacktestEngine
+        broker = _autopilot._accounts[0].broker
+        engine = BacktestEngine(broker)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, engine.run, symbol, span)
+        return result.to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.error("Backtest failed for %s: %s", symbol, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 # ── SSE stream ────────────────────────────────────────────────────────────────
 
 @app.get("/events")
@@ -1375,6 +1407,14 @@ _HTML = """<!DOCTYPE html>
   .ct-dashlet-remove:hover { color: var(--danger); background: rgba(248,81,73,.12); }
   .ct-chart-area { width: 100%; height: 240px; border-radius: var(--radius-sm); overflow: hidden; }
   .ct-dashlet-footer { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 11px; flex-wrap: wrap; }
+  .ct-backtest-btn { background: var(--surface3); border: 1px solid var(--border); color: var(--muted); padding: 3px 9px; border-radius: 5px; font-size: 11px; cursor: pointer; margin-left: auto; }
+  .ct-backtest-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .ct-backtest-btn.loading { opacity: .5; pointer-events: none; }
+  .ct-backtest-result { margin-top: 10px; background: var(--surface3); border-radius: 8px; padding: 10px 12px; font-size: 12px; }
+  .ct-bt-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; }
+  .ct-bt-stat { background: var(--surface2); border-radius: 6px; padding: 7px 8px; text-align: center; }
+  .ct-bt-stat-label { font-size: 10px; color: var(--muted); letter-spacing: .3px; text-transform: uppercase; }
+  .ct-bt-stat-val { font-size: 15px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
   .ct-stat { color: var(--muted); }
   .ct-stat span { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
   .ct-tf-btns { display: flex; gap: 2px; margin-left: auto; margin-right: 4px; }
@@ -3907,7 +3947,9 @@ function ctAddDashlet(sym) {
         <button class="ct-type-btn active" id="ct-candles-${escHtml(sym)}" onclick="ctSetType('${escHtml(sym)}','candles')">Candles</button>
         <button class="ct-type-btn" id="ct-line-${escHtml(sym)}" onclick="ctSetType('${escHtml(sym)}','line')">Line</button>
       </div>
-    </div>`;
+      <button class="ct-backtest-btn" id="ct-bt-btn-${escHtml(sym)}" onclick="ctRunBacktest('${escHtml(sym)}')">⏱ Backtest</button>
+    </div>
+    <div class="ct-backtest-result" id="ct-bt-${escHtml(sym)}" style="display:none"></div>`;
   grid.appendChild(card);
   _ctCharts[sym] = null;  // pending init
 
@@ -4059,6 +4101,47 @@ function ctApplyTimeframeToSym(sym) {
   markers.sort((a,b) => a.time - b.time);
   try { inst.candle.setMarkers(markers); } catch(_){}
   inst.chart.timeScale().fitContent();
+}
+
+async function ctRunBacktest(sym) {
+  const btn = document.getElementById('ct-bt-btn-' + sym);
+  const panel = document.getElementById('ct-bt-' + sym);
+  if (!btn || !panel) return;
+  btn.classList.add('loading');
+  btn.textContent = '⏱ Running…';
+  panel.style.display = 'none';
+  try {
+    const r = await fetch('/api/backtest', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...(window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{})},
+      body: JSON.stringify({symbol: sym, span: 'year'}),
+    });
+    const d = await r.json();
+    if (!r.ok) { panel.textContent = d.detail || 'Backtest failed'; panel.style.display = ''; return; }
+    const ret = d.total_return_pct;
+    const retColor = ret >= 0 ? 'var(--bull)' : 'var(--bear)';
+    const ddColor = d.max_drawdown_pct > 20 ? 'var(--bear)' : d.max_drawdown_pct > 10 ? 'var(--warn)' : 'var(--text)';
+    const pfColor = d.profit_factor >= 1.5 ? 'var(--bull)' : d.profit_factor >= 1.0 ? 'var(--text)' : 'var(--bear)';
+    panel.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+        <span style="font-size:11px;font-weight:700;color:var(--muted)">BACKTEST · 1Y · INDICATORS ONLY</span>
+        <span style="font-size:11px;color:var(--muted)">${escHtml(d.start_date)} → ${escHtml(d.end_date)}</span>
+      </div>
+      <div class="ct-bt-grid">
+        <div class="ct-bt-stat"><div class="ct-bt-stat-label">Return</div><div class="ct-bt-stat-val" style="color:${retColor}">${ret>=0?'+':''}${ret.toFixed(1)}%</div></div>
+        <div class="ct-bt-stat"><div class="ct-bt-stat-label">Win Rate</div><div class="ct-bt-stat-val">${(d.win_rate*100).toFixed(0)}%</div></div>
+        <div class="ct-bt-stat"><div class="ct-bt-stat-label">Profit Factor</div><div class="ct-bt-stat-val" style="color:${pfColor}">${d.profit_factor.toFixed(2)}x</div></div>
+        <div class="ct-bt-stat"><div class="ct-bt-stat-label">Max Drawdown</div><div class="ct-bt-stat-val" style="color:${ddColor}">${d.max_drawdown_pct.toFixed(1)}%</div></div>
+      </div>
+      <div style="margin-top:6px;font-size:11px;color:var(--muted)">${d.trade_count} trades · $10k starting capital · $1k per position · 5% stop-loss</div>`;
+    panel.style.display = '';
+  } catch (e) {
+    panel.textContent = 'Network error';
+    panel.style.display = '';
+  } finally {
+    btn.classList.remove('loading');
+    btn.textContent = '⏱ Backtest';
+  }
 }
 
 function ctSetTimeframe(tf) {
