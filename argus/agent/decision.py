@@ -278,6 +278,64 @@ class DecisionEngine:
             logger.error("DecisionEngine failed for %s: %s", signal.symbol, exc)
             return _error_hold(signal.symbol, str(exc))
 
+    def go_live_vote(self, perf_summary: dict) -> dict:
+        """Asks both AIs for a YES/NO vote on going live based on performance data."""
+        prompt = f"""You are the risk committee for Argus. Review the following paper trading performance and vote on whether the system is ready for live capital deployment.
+
+PERFORMANCE SUMMARY:
+{json.dumps(perf_summary, indent=2)}
+
+Rules for voting:
+- "YES" only if win rate > 50% and profit factor > 1.2 and sample size > 20.
+- "NO" if there are consistent losses or high AI calibration errors.
+
+Respond ONLY with valid JSON:
+{{
+  "vote": "YES" | "NO",
+  "reasoning": "1-2 sentence justification"
+}}"""
+        
+        votes = {
+            "claude": {"vote": "NO", "reasoning": "Not called"},
+            "gemini": {"vote": "NO", "reasoning": "Not called"},
+            "agreed": False
+        }
+        
+        try:
+            if self._claude:
+                msg = self._claude._client.messages.create(
+                    model=self._claude._model,
+                    max_tokens=200,
+                    system="You are a trading risk auditor. Respond only in JSON.",
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                try:
+                    votes["claude"] = json.loads(msg.content[0].text)
+                except:
+                    pass
+
+            if self._gemini:
+                from google.genai import types as _gt
+                resp = self._gemini._client.models.generate_content(
+                    model=self._gemini._model,
+                    contents=prompt,
+                    config=_gt.GenerateContentConfig(
+                        system_instruction="You are a trading risk auditor. Respond only in JSON.",
+                        temperature=0.1,
+                        max_output_tokens=200,
+                    ),
+                )
+                try:
+                    votes["gemini"] = json.loads(resp.text.strip().replace("```json","").replace("```",""))
+                except:
+                    pass
+
+            votes["agreed"] = (votes["claude"].get("vote") == "YES" and votes["gemini"].get("vote") == "YES")
+        except Exception as e:
+            logger.warning("Go-live vote failed: %s", e)
+            
+        return votes
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

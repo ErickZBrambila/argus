@@ -30,6 +30,8 @@ from argus.storage.models import (
     delete_position,
     get_or_create_account_daily_stats,
     get_or_create_daily_stats,
+    get_db_watchlist,
+    add_to_db_watchlist,
     get_session,
     increment_day_trades,
     init_db,
@@ -164,6 +166,8 @@ class Autopilot:
         self._latest_signals: list[dict] = []
         # Cache: label → {"equity": float, "positions": dict} — refreshed each tick
         self._account_cache: dict[str, dict] = {}
+        self._last_ai_vote: dict = {}
+        self._ticks_since_vote = 999
 
         for acct in self._accounts:
             logger.info(
@@ -178,8 +182,22 @@ class Autopilot:
         signal.signal(signal.SIGINT, self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
 
+        # 1. Load watchlist from DB (persistent) or .env (fallback)
+        with get_session() as session:
+            db_wl = get_db_watchlist(session)
+        
+        if db_wl:
+            logger.info("Loaded persistent watchlist from database: %s", db_wl)
+            final_wl = db_wl
+        else:
+            final_wl = self._cfg.watchlist
+            logger.info("Database watchlist empty, seeding from .env: %s", final_wl)
+            with get_session() as session:
+                for s in final_wl:
+                    add_to_db_watchlist(session, s)
+
         web_dashboard.register_autopilot(self)
-        web_dashboard.set_watchlist_base(self._cfg.watchlist)
+        web_dashboard.set_watchlist_base(final_wl)
         web_dashboard.prefill_state({
             "paper_trade": self._cfg.paper_trade,
             "equity_goal": self._cfg.equity_goal,
@@ -977,6 +995,19 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             }
 
         from argus.dashboard.token_tracker import get_summary as _token_summary
+        tokens = _token_summary()
+        lifetime_cost = tokens.get("lifetime_cost_usd", 0.0)
+        
+        perf = self._flashcards.performance()
+        scorecard = self._flashcards.readiness_scorecard(lifetime_cost=lifetime_cost)
+        
+        # Periodic AI Vote (every 200 ticks or if we just became statistically ready)
+        if (self._ticks_since_vote >= 200) or (scorecard["is_ready"] and not self._last_ai_vote.get("agreed")):
+            self._last_ai_vote = self._decision.go_live_vote(perf)
+            self._ticks_since_vote = 0
+        else:
+            self._ticks_since_vote += 1
+
         recent_cards = self._flashcards.get_recent(20)
         state = {
             "paper_trade": self._cfg.paper_trade,
@@ -997,9 +1028,11 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             "scan_interval":     self._current_interval,
             "interval_override": self._scan_interval_override,
             "next_scan_at":      self._next_scan_at.isoformat() if self._next_scan_at else None,
-            "token_usage":       _token_summary(),
+            "token_usage":       tokens,
             "equity_goal":       self._cfg.equity_goal,
-            "performance":       self._flashcards.performance(),
+            "performance":       perf,
+            "readiness_scorecard": scorecard,
+            "ai_vote":           self._last_ai_vote,
             "ai_status":         _get_ai_status(),
             "ai_models":         _get_model_info(),
             "watchlist":         web_dashboard.get_watchlist(),

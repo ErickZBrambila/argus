@@ -25,6 +25,7 @@ _GEMINI_INPUT_COST  = 0.15 / 1_000_000
 _GEMINI_OUTPUT_COST = 0.60 / 1_000_000
 
 _PERSIST_PATH = pathlib.Path(__file__).parent.parent.parent / "token_usage.json"
+_TOTAL_PERSIST_PATH = pathlib.Path(__file__).parent.parent.parent / "total_token_usage.json"
 
 
 @dataclass
@@ -42,30 +43,33 @@ class TokenTracker:
         self._day    = datetime.date.today()
         self._claude = _ModelStats()
         self._gemini = _ModelStats()
+        self._total_cost_usd = 0.0
         self._load()
 
     def _load(self) -> None:
         try:
-            if not _PERSIST_PATH.exists():
-                return
-            data = json.loads(_PERSIST_PATH.read_text())
-            if data.get("date") != self._day.isoformat():
-                return
-            c = data.get("claude", {})
-            g = data.get("gemini", {})
-            self._claude = _ModelStats(
-                calls=c.get("calls", 0),
-                input_tokens=c.get("input_tokens", 0),
-                output_tokens=c.get("output_tokens", 0),
-                cache_read_tokens=c.get("cache_read_tokens", 0),
-                cost_usd=c.get("cost_usd", 0.0),
-            )
-            self._gemini = _ModelStats(
-                calls=g.get("calls", 0),
-                input_tokens=g.get("input_tokens", 0),
-                output_tokens=g.get("output_tokens", 0),
-                cost_usd=g.get("cost_usd", 0.0),
-            )
+            if _PERSIST_PATH.exists():
+                data = json.loads(_PERSIST_PATH.read_text())
+                if data.get("date") == self._day.isoformat():
+                    c = data.get("claude", {})
+                    g = data.get("gemini", {})
+                    self._claude = _ModelStats(
+                        calls=c.get("calls", 0),
+                        input_tokens=c.get("input_tokens", 0),
+                        output_tokens=c.get("output_tokens", 0),
+                        cache_read_tokens=c.get("cache_read_tokens", 0),
+                        cost_usd=c.get("cost_usd", 0.0),
+                    )
+                    self._gemini = _ModelStats(
+                        calls=g.get("calls", 0),
+                        input_tokens=g.get("input_tokens", 0),
+                        output_tokens=g.get("output_tokens", 0),
+                        cost_usd=g.get("cost_usd", 0.0),
+                    )
+            
+            if _TOTAL_PERSIST_PATH.exists():
+                total_data = json.loads(_TOTAL_PERSIST_PATH.read_text())
+                self._total_cost_usd = total_data.get("total_cost_usd", 0.0)
         except Exception as exc:
             logger.debug("Token tracker load failed: %s", exc)
 
@@ -86,6 +90,9 @@ class TokenTracker:
                     "output_tokens": self._gemini.output_tokens,
                     "cost_usd": round(self._gemini.cost_usd, 6),
                 },
+            }))
+            _TOTAL_PERSIST_PATH.write_text(json.dumps({
+                "total_cost_usd": round(self._total_cost_usd, 6),
             }))
         except Exception as exc:
             logger.debug("Token tracker save failed: %s", exc)
@@ -110,6 +117,7 @@ class TokenTracker:
             self._claude.output_tokens     += output_tokens
             self._claude.cache_read_tokens += cache_read_tokens
             self._claude.cost_usd          += cost
+            self._total_cost_usd           += cost
             self._save()
 
     def record_gemini(self, input_tokens: int, output_tokens: int) -> None:
@@ -120,6 +128,7 @@ class TokenTracker:
             self._gemini.input_tokens  += input_tokens
             self._gemini.output_tokens += output_tokens
             self._gemini.cost_usd      += cost
+            self._total_cost_usd       += cost
             self._save()
 
     def get_summary(self) -> dict:
@@ -142,6 +151,7 @@ class TokenTracker:
                 },
                 "total_calls":    self._claude.calls + self._gemini.calls,
                 "total_cost_usd": round(self._claude.cost_usd + self._gemini.cost_usd, 4),
+                "lifetime_cost_usd": round(self._total_cost_usd, 4),
             }
 
 

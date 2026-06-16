@@ -333,3 +333,48 @@ class FlashcardStore:
             "by_symbol": by_symbol_out,
             "by_confidence": by_conf,
         }
+
+    def readiness_scorecard(self, lifetime_cost: float = 0.0) -> dict:
+        """Calculates readiness goals for moving to live trading."""
+        with self._lock:
+            all_cards = list(self._cards.values())
+        closed = [c for c in all_cards if c.pnl_pct is not None]
+        
+        # 1. Sample Size Goal (30-50 trades)
+        sample_size = len(closed)
+        sample_size_ok = sample_size >= 30
+
+        # 2. Profit Factor (> 1.5)
+        gross_profit = sum(c.pnl_pct for c in closed if (c.pnl_pct or 0) > 0)
+        gross_loss = abs(sum(c.pnl_pct for c in closed if (c.pnl_pct or 0) < 0))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (99.9 if gross_profit > 0 else 0.0)
+        profit_factor_ok = profit_factor >= 1.5
+
+        # 3. Confidence Calibration
+        # Win rate of High Confidence (>= 0.7) vs Low Confidence (< 0.5)
+        high_conf = [c for c in closed if (c.decision_confidence or 0) >= 0.7]
+        low_conf = [c for c in closed if (c.decision_confidence or 0) < 0.5]
+        
+        high_conf_wr = len([c for c in high_conf if (c.pnl_pct or 0) > 0]) / len(high_conf) if high_conf else 0.0
+        low_conf_wr = len([c for c in low_conf if (c.pnl_pct or 0) > 0]) / len(low_conf) if low_conf else 0.0
+        calibration_ok = high_conf_wr > low_conf_wr and len(high_conf) >= 5
+
+        # 4. Token Efficiency (Profit > Token Cost)
+        # Assuming each 1% pnl_pct on a $1000 standard position is $10.
+        # This is a rough estimate since we don't know the exact dollar profit easily here without more math.
+        # Let's use the actual dollar_amount if available.
+        total_dollar_pnl = sum((c.pnl_pct / 100) * c.dollar_amount for c in closed if c.pnl_pct is not None)
+        cost_ok = total_dollar_pnl > lifetime_cost
+
+        # 5. Human Alignment (Approval rate > 90% on Default account)
+        default_trades = [c for c in all_cards if c.account == "default"]
+        alignment_ok = len(default_trades) >= 10
+
+        return {
+            "sample_size": {"val": sample_size, "goal": 30, "ok": sample_size_ok},
+            "profit_factor": {"val": round(profit_factor, 2), "goal": 1.5, "ok": profit_factor_ok},
+            "calibration": {"val": f"{high_conf_wr:.0%} vs {low_conf_wr:.0%}", "ok": calibration_ok},
+            "token_efficiency": {"val": f"${total_dollar_pnl:.2f} profit / ${lifetime_cost:.2f} cost", "ok": cost_ok},
+            "alignment": {"val": len(default_trades), "goal": 10, "ok": alignment_ok},
+            "is_ready": sample_size_ok and profit_factor_ok and calibration_ok and cost_ok
+        }

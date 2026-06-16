@@ -41,6 +41,7 @@ class SignalResult:
 
     composite: str        # "bullish" | "bearish" | "neutral"
     confidence: float     # 0.0 – 1.0
+    change_pct: float = 0.0  # Daily change percentage
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
@@ -135,13 +136,70 @@ class SignalEngine:
             logger.warning("Signal computation failed for %s: %s", symbol, exc)
             return None
 
+    def get_annotated_chart(self, symbol: str, span: str = "3month", interval: str = "day") -> list[dict]:
+        """Fetch historical prices and compute indicators for the full series."""
+        try:
+            raw = self._broker.get_historical_prices(symbol, span=span, interval=interval)
+            if not raw:
+                return []
+            df = _build_dataframe(raw)
+            if df is None or len(df) < 2:
+                return raw
+
+            import pandas_ta as ta
+            # Add indicators
+            df.ta.rsi(length=14, append=True)
+            df.ta.sma(length=20, append=True)
+            df.ta.ema(length=50, append=True)
+
+            # Replace NaNs with None for JSON compatibility
+            df = df.replace({np.nan: None})
+
+            # Convert back to list of dicts, preserving original keys where possible
+            results = []
+            for i, row in df.iterrows():
+                d = raw[i].copy()
+                d["rsi"] = row.get("RSI_14")
+                d["sma_20"] = row.get("SMA_20")
+                d["ema_50"] = row.get("EMA_50")
+                results.append(d)
+            return results
+        except Exception as exc:
+            logger.warning("Failed to annotate chart for %s: %s", symbol, exc)
+            return []
+
     def _compute(self, symbol: str) -> Optional[SignalResult]:
-        raw = self._broker.get_historical_prices(symbol, span="3month", interval="day")
-        if len(raw) < 50:
-            logger.warning("%s: not enough history (%d bars)", symbol, len(raw))
+        from argus.storage.models import get_session, get_cached_historicals, save_historicals
+        
+        # 1. Try to load from cache
+        with get_session() as session:
+            cached = get_cached_historicals(session, symbol)
+        
+        # 2. Fetch latest (short span) to fill gaps
+        raw = self._broker.get_historical_prices(symbol, span="week", interval="day")
+        
+        # 3. Merge and persist
+        if raw:
+            with get_session() as session:
+                save_historicals(session, symbol, raw)
+            # Re-fetch full cached series after update
+            with get_session() as session:
+                cached = get_cached_historicals(session, symbol)
+
+        # If cache is still empty or too small, fall back to full fetch
+        if len(cached) < 50:
+            raw_full = self._broker.get_historical_prices(symbol, span="3month", interval="day")
+            if raw_full:
+                with get_session() as session:
+                    save_historicals(session, symbol, raw_full)
+                with get_session() as session:
+                    cached = get_cached_historicals(session, symbol)
+
+        if len(cached) < 50:
+            logger.warning("%s: not enough history (%d bars)", symbol, len(cached))
             return None
 
-        df = _build_dataframe(raw)
+        df = _build_dataframe(cached)
         if df is None or len(df) < 50:
             return None
 
@@ -188,12 +246,20 @@ class SignalEngine:
         sma_20 = _safe(sma_col)
         ema_50 = _safe(ema_col)
 
+        # Daily change % (current vs prev close)
+        change_pct = 0.0
+        if len(df) >= 2:
+            prev_close = float(df.iloc[-2]["close"])
+            if prev_close > 0:
+                change_pct = (price - prev_close) / prev_close * 100
+
         composite, confidence = self._strategy.score(price, rsi, macd_hist, bb_upper, bb_lower, sma_20, ema_50)
 
         return SignalResult(
             symbol=symbol,
             price=price,
             volume=volume,
+            change_pct=change_pct,
             rsi=rsi,
             macd=macd,
             macd_signal=macd_sig,

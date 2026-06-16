@@ -4,11 +4,39 @@ All notable changes to Argus are documented here.
 Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`
 - **MAJOR** — breaking changes to config, API, or data formats
 - **MINOR** — new features, backwards-compatible
-- **PATCH** — bug fixes, documentation, refactors
+PATCH — bug fixes, documentation, refactors
+
+---
+
+## [0.5.4] — 2026-06-15
+
+### Added — Intelligence & Readiness
+- **Go-Live Readiness Scorecard** — Automated tracking of Sample Size, Profit Factor, and AI Calibration.
+- **AI Ensemble Audit** — Periodic "Risk Committee" vote where Claude and Gemini must independently approve going live.
+- **Lifetime Cost Tracking** — `total_token_usage.json` persists project-wide API costs to calculate true paper ROI.
+- **Signal Debouncing** — Skips LLM calls if technical signals haven't significantly changed, saving tokens.
+
+### Added — UI & Charting
+- **Advanced Charting** — Added Volume histogram, Synced RSI sub-pane, and SMA-20/EMA-50 overlays.
+- **Timeframe Picker** — Switch between 1D, 1W, 1M, 3M, and 1Y views directly on the dashboard.
+- **Live Price Patching** — Automatically detects delayed broker history and patches today's candle using live feeds.
+- **Persistent Watchlist** — Watchlist is now stored in SQLite and persists across sessions.
+- **Visual Feedback** — Table cells now "flash" green/red on real-time price and P&L updates.
+- **Ticker Color Logic** — Ticker symbols now correctly turn red/green based on daily price change.
+
+### Changed — Architecture refactor
+- **Monolith Decomposition** — Split `main.py` into `argus/engine/autopilot.py` and `argus/engine/session.py`.
+- **Strategy Pattern** — Refactored signal engine to use `StrategyProtocol` for pluggable trading logic.
+- **Historical Caching** — Implemented SQLite-backed caching for OHLCV data to reduce API latency.
+- **Dynamic AI Configuration** — Claude and Gemini models are now configurable via `.env` / Pydantic settings.
+
+### Added — Quality Assurance
+- **Test Suite** — Introduced `pytest` with unit tests for Risk Management, Decision Engine, and Signal logic.
 
 ---
 
 ## [0.5.3] — 2026-06-14
+
 
 ### Fixed — Reliability
 - **Parallel signal computation** — watchlist symbols now computed concurrently via `ThreadPoolExecutor(max_workers=8)` in `_tick()`; scan time scales with I/O latency of one symbol instead of N×latency

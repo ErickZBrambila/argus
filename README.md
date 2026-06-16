@@ -51,7 +51,7 @@ graph TD
     LB -->|"last 12 entries"| TERM
 ```
 
-The main loop (`Autopilot`) runs on an adaptive interval that changes with the NYSE market session. On each tick it detects the current session, computes signals **in parallel** across all watchlist symbols (`ThreadPoolExecutor`, up to 8 workers), then runs `_tick_account` independently for each configured account.
+The main loop (`Autopilot` in `argus.engine.autopilot`) runs on an adaptive interval that changes with the NYSE market session (logic in `argus.engine.session`). On each tick it detects the current session, computes signals **in parallel** across all watchlist symbols (`ThreadPoolExecutor`, up to 8 workers), then runs `_tick_account` independently for each configured account.
 
 ---
 
@@ -507,18 +507,31 @@ Look for patterns in: which `bb_position` + `signal_composite` combinations win 
 - Fractional shares are supported, so any dollar amount works regardless of share price.
 - Sessions are never cached to disk (`store_session=False`). The TOTP code is computed fresh each startup and the MFA secret is cleared from memory immediately after.
 
+### Go-Live Readiness Scorecard
+
+Argus now includes an automated **Go-Live Readiness Scorecard** in the **Performance** tab. This system removes the guesswork from deploying real capital by requiring statistical proof of edge:
+
+1.  **Sample Size**: Minimum 30 closed trades for statistical significance.
+2.  **Profit Factor**: Gross Profit / Gross Loss ratio of > 1.5.
+3.  **Calibration**: Proof that "High Confidence" AI trades outperform "Low Confidence" ones.
+4.  **Token Efficiency**: Net paper profit must exceed lifetime API (Claude/Gemini) costs.
+5.  **AI Ensemble Audit**: Claude and Gemini must independently review your paper performance and vote "YES" to going live.
+
+Only when all metrics are green and the AI Ensemble reaches consensus will the system display the **READY FOR LIVE TRADING** status.
+
 ### Go-Live Checklist
 
 Before setting `PAPER_TRADE=false`, verify all of the following in paper mode:
 
-- [ ] At least 5 full trading days completed without crashes
-- [ ] Win rate >= 50% across >= 10 closed trades (`argus_flashcards.jsonl`)
-- [ ] Kill switch has triggered and recovered correctly at least once
-- [ ] Approval flow on Default account tested end-to-end (both approve and deny paths)
-- [ ] Stop-loss sweep confirmed to close positions automatically
-- [ ] `argus-status` shows correct equity and P&L after each session
-- [ ] Notifications (email / SMS / Slack) delivering correctly
-- [ ] `DAILY_DRAWDOWN_LIMIT` set conservatively (e.g., `-0.02` for the first live week)
+- [ ] **Go-Live Readiness Scorecard** in the dashboard is 100% green.
+- [ ] **AI Ensemble Audit** has returned a consensus "YES" vote.
+- [ ] At least 5 full trading days completed without crashes.
+- [ ] Kill switch has triggered and recovered correctly at least once.
+- [ ] Approval flow on Default account tested end-to-end (both approve and deny paths).
+- [ ] Stop-loss sweep confirmed to close positions automatically.
+- [ ] `argus-status` shows correct equity and P&L after each session.
+- [ ] Notifications (email / SMS / Slack) delivering correctly.
+- [ ] `DAILY_DRAWDOWN_LIMIT` set conservatively (e.g., `-0.02` for the first live week).
 
 > ⚠️ Start with the Agentic account (smaller balance) for the first live week before trusting the Default account's approval flow with larger positions.
 
@@ -601,36 +614,40 @@ argus/
 │
 └── argus/                        # Main package
     ├── __init__.py               # Package version (__version__ = "0.5.3")
-    ├── main.py                   # Autopilot orchestration loop; AccountContext; market session detection
+    ├── main.py                   # Main entry point; CLI wrapper
     ├── config.py                 # Pydantic settings; keychain source; priority chain
     ├── secrets.py                # OS keychain read/write via keyring
     ├── setup_secrets.py          # argus-setup interactive CLI
     ├── install_service.py        # argus-service macOS launchd / systemd installer
     │
+    ├── engine/
+    │   ├── autopilot.py          # Autopilot orchestration loop; AccountContext
+    │   └── session.py            # Market session detection and adaptive intervals
+    │
     ├── agent/
-    │   └── decision.py           # DecisionEngine; _ClaudeEngine; _GeminiEngine; classify_risk()
+    │   └── decision.py           # DecisionEngine; AI consensus logic; AI Go-Live Audit
     │
     ├── broker/
     │   └── robinhood.py          # RobinhoodBroker; paper simulation; live order execution
     │
     ├── strategy/
-    │   └── indicators.py         # SignalEngine; SignalResult; pandas_ta indicator computation
+    │   └── indicators.py         # SignalEngine; Strategy Pattern; pandas_ta indicators
     │
     ├── risk/
     │   └── manager.py            # RiskManager; PDT tracking; drawdown kill switch; stop-loss
     │
     ├── dashboard/
-    │   ├── web.py                # FastAPI app; SSE stream; approval queue; REST endpoints; HTML UI
-    │   ├── terminal.py           # Rich terminal dashboard; NullTerminalDashboard for headless/Docker
-    │   ├── token_tracker.py      # Thread-safe daily token + cost tracker; resets at midnight
-    │   └── log_buffer.py         # In-memory log ring buffer (500 entries); logging handler installer
+    │   ├── web.py                # FastAPI app; SSE stream; advanced charting; HTML UI
+    │   ├── terminal.py           # Rich terminal dashboard; NullTerminalDashboard
+    │   ├── token_tracker.py      # Lifetime cost tracking; ROI calculation
+    │   └── log_buffer.py         # In-memory log ring buffer (500 entries)
     │
     ├── learning/
-    │   └── flashcards.py         # FlashcardStore; Flashcard dataclass; JSONL persistence
+    │   └── flashcards.py         # FlashcardStore; Readiness Scorecard logic
     │
     ├── notifications/
     │   └── notifier.py           # Notifier; email (aiosmtplib); SMS (Twilio); Slack
     │
     └── storage/
-        └── models.py             # SQLAlchemy models: Trade, Signal, Position, DailyStats
+        └── models.py             # SQLAlchemy models; Persistent Watchlist; Trade history
 ```

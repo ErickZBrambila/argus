@@ -18,6 +18,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from argus.storage.models import get_session, add_to_db_watchlist, remove_from_db_watchlist
+
 logger = logging.getLogger(__name__)
 
 # Shared state injected by main loop
@@ -195,7 +197,7 @@ def prefill_state(cfg: dict | None = None) -> None:
         _state.setdefault("paper_trade", cfg.get("paper_trade", True))
         _state.setdefault("equity_goal", cfg.get("equity_goal", 0))
     try:
-        from argus.main import get_market_session
+        from argus.engine.session import get_market_session
         _state["market_session"] = get_market_session()
     except Exception:
         _state.setdefault("market_session", "closed")
@@ -627,14 +629,20 @@ def _yf_chart_fallback(symbol: str, existing: list) -> list:
 
 
 @app.get("/api/chart/{symbol}")
-async def get_chart(symbol: str) -> dict:
+async def get_chart(
+    symbol: str,
+    span: str = Query("3month"),
+    interval: str = Query("day")
+) -> dict:
     symbol = symbol.upper().strip()
     if not _SYMBOL_RE.match(symbol):
         raise HTTPException(status_code=400, detail="Invalid symbol")
     if _chart_source_fn is None:
         return {"candles": [], "symbol": symbol}
     try:
-        raw = await asyncio.get_event_loop().run_in_executor(None, _chart_source_fn, symbol)
+        raw = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _chart_source_fn(symbol, span=span, interval=interval)
+        )
         candles = []
         for bar in (raw or []):
             try:
@@ -651,16 +659,31 @@ async def get_chart(symbol: str) -> dict:
                 h = float(bar.get("high_price")  or bar.get("high")  or 0)
                 lo= float(bar.get("low_price")   or bar.get("low")   or 0)
                 c = float(bar.get("close_price") or bar.get("close") or 0)
+                v = float(bar.get("volume") or 0)
                 # Skip zero-price or zero-spread bars — Robinhood placeholder data
                 if not c or (o == h == lo == c):
                     continue
-                candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c})
+                candles.append({
+                    "time": t, "open": o, "high": h, "low": lo, "close": c, "volume": v,
+                    "rsi": bar.get("rsi"), "sma_20": bar.get("sma_20"), "ema_50": bar.get("ema_50")
+                })
             except Exception:
                 pass
 
-        # Robinhood returns sparse or wrong data for newly-listed symbols;
-        # fall back to yfinance when fewer than 5 real candles survived filtering.
-        if len(candles) < 5:
+        # Always attempt to patch today's candle/data if it's missing or if the 
+        # last candle's timestamp is not today (for daily charts).
+        # Robinhood daily history is often delayed by 1 day.
+        import datetime as _dt
+        today_ts = int(_dt.datetime.combine(_dt.date.today(), _dt.time.min).timestamp())
+        needs_patch = False
+        if not candles:
+            needs_patch = True
+        elif interval == "day":
+            last_ts = candles[-1]["time"]
+            if last_ts < today_ts:
+                needs_patch = True
+
+        if needs_patch or len(candles) < 5:
             candles = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: _yf_chart_fallback(symbol, candles)
             )
@@ -731,7 +754,10 @@ async def search_symbols(q: str = Query(default="", max_length=60)) -> dict:
 async def get_flashcards() -> dict:
     cards = _state.get("flashcards", [])
     summary = _state.get("flashcard_summary", {})
-    return {"flashcards": cards, "summary": summary}
+    # Calculate scorecard on the fly or retrieve from state
+    # Best to retrieve from state if pushed by main loop
+    scorecard = _state.get("readiness_scorecard", {})
+    return {"flashcards": cards, "summary": summary, "scorecard": scorecard}
 
 
 @app.get("/api/watchlist")
@@ -748,6 +774,11 @@ async def add_to_watchlist_api(body: dict) -> dict:
     with _watchlist_lock:
         if symbol not in _runtime_watchlist:
             _runtime_watchlist.append(symbol)
+            try:
+                with get_session() as session:
+                    add_to_db_watchlist(session, symbol)
+            except Exception as e:
+                logger.warning("Failed to persist watchlist addition: %s", e)
         wl = list(_runtime_watchlist)
     with _state_lock:
         _state["watchlist"] = wl
@@ -765,6 +796,11 @@ async def remove_from_watchlist_api(symbol: str) -> dict:
         raise HTTPException(status_code=400, detail="Invalid symbol")
     with _watchlist_lock:
         _runtime_watchlist[:] = [s for s in _runtime_watchlist if s != symbol]
+        try:
+            with get_session() as session:
+                remove_from_db_watchlist(session, symbol)
+        except Exception as e:
+            logger.warning("Failed to persist watchlist removal: %s", e)
         wl = list(_runtime_watchlist)
     with _state_lock:
         _state["watchlist"] = wl
@@ -873,6 +909,11 @@ _HTML = """<!DOCTYPE html>
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+  @keyframes flash-green { 0% { background: rgba(63,185,80,0.3); } 100% { background: transparent; } }
+  @keyframes flash-red { 0% { background: rgba(248,81,73,0.3); } 100% { background: transparent; } }
+  .flash-green { animation: flash-green 1s ease-out; }
+  .flash-red { animation: flash-red 1s ease-out; }
 
   /* ── Layout ─────────────────────────────────────────────────────────────── */
   .app { display: flex; flex-direction: column; min-height: 100vh; }
@@ -1714,12 +1755,6 @@ _HTML = """<!DOCTYPE html>
 
   <div class="tab-pane active" id="tab-dashboard">
 
-    <!-- Token usage -->
-    <div class="card card-full">
-      <div class="card-title">Token Usage Today</div>
-      <div class="token-grid" id="token-grid"><div class="empty">No AI calls yet</div></div>
-    </div>
-
     <!-- Per-account panels -->
     <div class="card card-full">
       <div class="card-title">Accounts</div>
@@ -1733,75 +1768,6 @@ _HTML = """<!DOCTYPE html>
         <span id="stat-trades" style="display:none"></span>
         <span id="stat-daytrades" style="display:none"></span>
       </div>
-    </div>
-
-    <!-- Equity curve -->
-    <div class="card card-full">
-      <div class="card-title" style="display:flex;align-items:center;gap:10px;">
-        Equity Curve
-        <span id="eq-range-btns" style="display:flex;gap:4px;margin-left:auto">
-          <button class="eq-range-btn active" onclick="eqSetRange('session')">Session</button>
-          <button class="eq-range-btn" onclick="eqSetRange('1h')">1H</button>
-          <button class="eq-range-btn" onclick="eqSetRange('30m')">30M</button>
-        </span>
-      </div>
-      <div id="eq-chart" style="height:160px;position:relative"></div>
-      <div id="eq-stats" style="display:flex;gap:20px;padding:8px 2px 0;font-size:12px;color:var(--muted)"></div>
-    </div>
-
-    <!-- Controls -->
-    <div class="card card-full">
-      <div class="card-title">Controls</div>
-      <div class="controls">
-        <button class="btn btn-warning" id="btn-pause" onclick="togglePause()">⏸ Pause</button>
-        <button class="btn btn-ghost" id="btn-refresh" onclick="fetchAll()">↻ Refresh</button>
-        <select class="interval-select" id="interval-select" onchange="setScanInterval(this.value)" title="Scan interval">
-          <option value="auto">Auto (adaptive)</option>
-          <option value="30">30 sec</option>
-          <option value="60">1 min</option>
-          <option value="90">90 sec</option>
-          <option value="120">2 min</option>
-          <option value="300">5 min</option>
-          <option value="600">10 min</option>
-        </select>
-      </div>
-    </div>
-
-    <!-- Price chart -->
-    <div class="card card-full">
-      <div class="card-title">Price Chart</div>
-      <div class="chart-toolbar">
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1;">
-          <div class="chart-tabs" id="chart-tabs"></div>
-          <button class="chart-add-btn" onclick="chartSearchOpen()" title="Add symbol">＋</button>
-          <div class="chart-search-wrap" id="chart-search-wrap">
-            <input class="chart-search-input" id="chart-search-input" placeholder="Search name or ticker…"
-                   autocomplete="off"
-                   oninput="chartSearchDebounce(this.value)"
-                   onkeydown="chartSearchKeydown(event)"
-                   onblur="setTimeout(chartSearchClose,150)">
-            <div class="chart-search-dd" id="chart-search-dd"></div>
-          </div>
-        </div>
-        <div class="chart-type-btns">
-          <button class="chart-type-btn active" id="btn-candles" onclick="setChartType('candles')">Candles</button>
-          <button class="chart-type-btn" id="btn-line" onclick="setChartType('line')">Line</button>
-        </div>
-      </div>
-      <div id="price-chart"></div>
-      <div id="chart-sparse-warn" style="display:none;margin:6px 0 0;padding:6px 10px;background:rgba(240,180,41,.08);border:1px solid rgba(240,180,41,.3);border-radius:6px;font-size:12px;color:#f0b429;"></div>
-      <div class="chart-legend">
-        <div class="legend-item"><div class="legend-dot" style="background:#00D4AA"></div> Price</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#3fb950"></div> BUY</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#f85149"></div> SELL / stop-loss</div>
-        <div class="legend-item"><div class="legend-dash" style="border-color:#60a5fa"></div> Trend projection</div>
-      </div>
-    </div>
-
-    <!-- Pending approvals -->
-    <div class="card card-full approval-card" id="approvals-section">
-      <div class="card-title" style="color:var(--yellow);--border-subtle:rgba(210,153,34,.2)">⚠ Pending Approval — Default Account</div>
-      <div id="approvals-list"></div>
     </div>
 
     <!-- Open positions -->
@@ -1822,6 +1788,85 @@ _HTML = """<!DOCTYPE html>
           </thead>
           <tbody id="positions-body"></tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Equity curve -->
+    <div class="card card-full">
+      <div class="card-title" style="display:flex;align-items:center;gap:10px;">
+        Equity Curve
+        <span id="eq-range-btns" style="display:flex;gap:4px;margin-left:auto">
+          <button class="eq-range-btn active" onclick="eqSetRange('session')">Session</button>
+          <button class="eq-range-btn" onclick="eqSetRange('1h')">1H</button>
+          <button class="eq-range-btn" onclick="eqSetRange('30m')">30M</button>
+        </span>
+      </div>
+      <div id="eq-chart" style="height:160px;position:relative"></div>
+      <div id="eq-stats" style="display:flex;gap:20px;padding:8px 2px 0;font-size:12px;color:var(--muted)"></div>
+    </div>
+
+    <!-- Price chart -->
+    <div class="card card-full">
+      <div class="card-title">Price Chart</div>
+      <div class="chart-toolbar">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1;">
+          <div class="chart-tabs" id="chart-tabs"></div>
+          <button class="chart-add-btn" onclick="chartSearchOpen()" title="Add symbol">＋</button>
+          <div class="chart-search-wrap" id="chart-search-wrap">
+            <input class="chart-search-input" id="chart-search-input" placeholder="Search name or ticker…"
+                   autocomplete="off"
+                   oninput="chartSearchDebounce(this.value)"
+                   onkeydown="chartSearchKeydown(event)"
+                   onblur="setTimeout(chartSearchClose,150)">
+            <div class="chart-search-dd" id="chart-search-dd"></div>
+          </div>
+          <div class="ct-tf-btns" style="margin-left: 8px;">
+            <button class="ct-tf-btn" onclick="setChartTimeframe('5minute','day')" data-tf="5minute-day">1D</button>
+            <button class="ct-tf-btn" onclick="setChartTimeframe('10minute','week')" data-tf="10minute-week">1W</button>
+            <button class="ct-tf-btn" onclick="setChartTimeframe('hour','month')" data-tf="hour-month">1M</button>
+            <button class="ct-tf-btn active" onclick="setChartTimeframe('day','3month')" data-tf="day-3month">3M</button>
+            <button class="ct-tf-btn" onclick="setChartTimeframe('day','year')" data-tf="day-year">1Y</button>
+          </div>
+        </div>
+        <div class="chart-type-btns">
+          <button class="chart-type-btn active" id="btn-candles" onclick="setChartType('candles')">Candles</button>
+          <button class="chart-type-btn" id="btn-line" onclick="setChartType('line')">Line</button>
+        </div>
+      </div>
+      <div id="price-chart"></div>
+      <div id="rsi-chart" style="height:100px;border-top:1px solid var(--border);margin-top:10px;"></div>
+      <div id="chart-sparse-warn" style="display:none;margin:6px 0 0;padding:6px 10px;background:rgba(240,180,41,.08);border:1px solid rgba(240,180,41,.3);border-radius:6px;font-size:12px;color:#f0b429;"></div>
+      <div class="chart-legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#00D4AA"></div> Price</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#FFD700"></div> SMA-20</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#58a6ff"></div> EMA-50</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#3fb950"></div> BUY</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#f85149"></div> SELL / stop-loss</div>
+        <div class="legend-item"><div class="legend-dash" style="border-color:#60a5fa"></div> Trend projection</div>
+      </div>
+    </div>
+
+    <!-- Pending approvals -->
+    <div class="card card-full approval-card" id="approvals-section">
+      <div class="card-title" style="color:var(--yellow);--border-subtle:rgba(210,153,34,.2)">⚠ Pending Approval — Default Account</div>
+      <div id="approvals-list"></div>
+    </div>
+
+    <!-- Controls -->
+    <div class="card card-full">
+      <div class="card-title">Controls</div>
+      <div class="controls">
+        <button class="btn btn-warning" id="btn-pause" onclick="togglePause()">⏸ Pause</button>
+        <button class="btn btn-ghost" id="btn-refresh" onclick="fetchAll()">↻ Refresh</button>
+        <select class="interval-select" id="interval-select" onchange="setScanInterval(this.value)" title="Scan interval">
+          <option value="auto">Auto (adaptive)</option>
+          <option value="30">30 sec</option>
+          <option value="60">1 min</option>
+          <option value="90">90 sec</option>
+          <option value="120">2 min</option>
+          <option value="300">5 min</option>
+          <option value="600">10 min</option>
+        </select>
       </div>
     </div>
 
@@ -1863,11 +1908,17 @@ _HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Flashcards -->
+    <!-- Trade Decisions -->
     <div class="card card-full">
       <div class="card-title">Trade Decisions <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-dim)">— what the AI did and why · click any card to see the full reasoning</span></div>
       <div class="fc-summary" id="fc-summary"></div>
       <div class="fc-grid" id="fc-grid"><div class="empty">No trades recorded yet</div></div>
+    </div>
+
+    <!-- Token usage -->
+    <div class="card card-full">
+      <div class="card-title">Token Usage Today</div>
+      <div class="token-grid" id="token-grid"><div class="empty">No AI calls yet</div></div>
     </div>
 
     <!-- Log tail -->
@@ -1890,6 +1941,14 @@ _HTML = """<!DOCTYPE html>
   </div><!-- /tab-dashboard -->
 
   <div class="tab-pane" id="tab-performance">
+
+    <!-- Go-Live Readiness -->
+    <div class="card card-full" id="readiness-card" style="border-color: var(--accent); background: rgba(0,212,170,0.02);">
+      <div class="card-title" style="color: var(--accent);">Go-Live Readiness Scorecard</div>
+      <div id="readiness-container">
+        <div class="empty">Calculating readiness...</div>
+      </div>
+    </div>
 
     <!-- Performance Analytics -->
     <div class="card card-full">
@@ -2094,6 +2153,71 @@ function renderPerformance(perf) {
     </div>`;
   }).join('') || '<div class="empty">No data</div>';
   document.getElementById('perf-confidence').innerHTML = confRows;
+}
+
+function renderReadiness(scorecard, aiVote) {
+  if (!scorecard || !scorecard.sample_size) {
+    document.getElementById('readiness-container').innerHTML = '<div class="empty">Calculating goals...</div>';
+    return;
+  }
+
+  const s = scorecard;
+  const readyPill = (s.is_ready && aiVote && aiVote.agreed)
+    ? '<span class="pill pill-win" style="font-size:12px;padding:4px 12px">READY FOR LIVE TRADING</span>' 
+    : '<span class="pill pill-neutral" style="font-size:12px;padding:4px 12px">ACCUMULATING DATA</span>';
+
+  const rows = [
+    { label: 'Sample Size', val: `${s.sample_size.val} / ${s.sample_size.goal}`, ok: s.sample_size.ok, hint: 'Minimum trades for significance' },
+    { label: 'Profit Factor', val: `${s.profit_factor.val} / ${s.profit_factor.goal}`, ok: s.profit_factor.ok, hint: 'Gross Profit / Gross Loss' },
+    { label: 'Calibration', val: s.calibration.val, ok: s.calibration.ok, hint: 'High-conf vs Low-conf win rate' },
+    { label: 'Efficiency', val: s.token_efficiency.val, ok: s.token_efficiency.ok, hint: 'Net profit vs API costs' }
+  ];
+
+  let voteHtml = '';
+  if (aiVote) {
+    const cv = aiVote.claude || {vote:'NO', reasoning:'-'};
+    const gv = aiVote.gemini || {vote:'NO', reasoning:'-'};
+    voteHtml = `
+      <div style="margin-top:20px; border-top: 1px solid var(--border); padding-top:16px;">
+        <div class="card-title" style="margin-bottom:12px; font-size:9.5px;">AI Ensemble Audit</div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+          <div class="perf-stat" style="border-left: 3px solid ${cv.vote === 'YES' ? 'var(--green)' : 'var(--red)'}">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <span style="font-weight:700; color:var(--purple); font-size:11px;">CLAUDE</span>
+              <span class="pill ${cv.vote === 'YES' ? 'pill-win' : 'pill-loss'}">${cv.vote}</span>
+            </div>
+            <div style="font-size:11.5px; color:var(--muted); margin-top:6px; line-height:1.4;">${escHtml(cv.reasoning)}</div>
+          </div>
+          <div class="perf-stat" style="border-left: 3px solid ${gv.vote === 'YES' ? 'var(--green)' : 'var(--red)'}">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <span style="font-weight:700; color:var(--blue); font-size:11px;">GEMINI</span>
+              <span class="pill ${gv.vote === 'YES' ? 'pill-win' : 'pill-loss'}">${gv.vote}</span>
+            </div>
+            <div style="font-size:11.5px; color:var(--muted); margin-top:6px; line-height:1.4;">${escHtml(gv.reasoning)}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  document.getElementById('readiness-container').innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+      <div style="font-size:13px;color:var(--muted);max-width:320px;">
+        These goals track statistical evidence of a profitable edge and AI alignment before deploying real capital.
+      </div>
+      <div>${readyPill}</div>
+    </div>
+    <div class="perf-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));">
+      ${rows.map(r => `
+        <div class="perf-stat" style="border:1px solid ${r.ok ? 'rgba(63,185,80,0.2)' : 'var(--border)'}">
+          <div class="perf-stat-label">${r.label}</div>
+          <div class="perf-stat-value" style="color:${r.ok ? 'var(--green)' : 'var(--text)'}">${r.val}</div>
+          <div class="perf-stat-sub">${r.hint}</div>
+        </div>
+      `).join('')}
+    </div>
+    ${voteHtml}
+  `;
 }
 let pendingCloseSymbol = null;
 let valuesHidden = true;
@@ -2417,13 +2541,14 @@ function renderAccounts(accounts) {
 
     return `<div class="acct-panel ${cls}">
       <div class="acct-panel-title ${cls}">${label.toUpperCase()}</div>
-      <div class="acct-equity ${cls} private">${'$' + equity.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+      <div class="acct-equity ${cls} private" id="acct-equity-${label}">${'$' + equity.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</div>
       <div class="acct-row">
         <span class="acct-row-label">Daily P&L</span>
-        <span class="${pnlCls} private">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${pnlPct.toFixed(2)}%)</span>
+        <span class="${pnlCls} private" id="acct-pnl-${label}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${pnlPct.toFixed(2)}%)</span>
       </div>
       <div class="acct-row">
         <span class="acct-row-label">Mode</span>
+
         <span class="acct-mode ${modeCls}">${modeLabel}</span>
       </div>
       <div class="acct-row">
@@ -2452,7 +2577,54 @@ function updateAiStatus(ai) {
   });
 }
 
+function triggerFlashes(state, prev) {
+  // Accounts
+  if (state.accounts && prev.accounts) {
+    Object.keys(state.accounts).forEach(label => {
+      const a = state.accounts[label];
+      const pa = prev.accounts[label];
+      if (!pa) return;
+      if (a.equity !== pa.equity) {
+        const el = document.getElementById(`acct-equity-${label}`);
+        if (el) {
+          const cls = a.equity > pa.equity ? 'flash-green' : 'flash-red';
+          el.classList.add(cls);
+          setTimeout(() => el.classList.remove(cls), 1000);
+        }
+      }
+    });
+  }
+  // Positions
+  if (state.positions && prev.positions) {
+    Object.keys(state.positions).forEach(sym => {
+      const p = state.positions[sym];
+      const pp = prev.positions[sym];
+      if (!pp) return;
+      const safeSym = sym.replace(/\s*\[.*?\]/,'').replace(/[^A-Z0-9]/g, '_');
+      if (p.current_price !== pp.current_price) {
+        const el = document.getElementById(`pos-price-${safeSym}`);
+        if (el) {
+          const cls = p.current_price > pp.current_price ? 'flash-green' : 'flash-red';
+          el.classList.add(cls);
+          setTimeout(() => el.classList.remove(cls), 1000);
+        }
+      }
+      if (p.unrealized_pnl_pct !== pp.unrealized_pnl_pct) {
+        const el = document.getElementById(`pos-pnl-${safeSym}`);
+        if (el) {
+          const cls = p.unrealized_pnl_pct > pp.unrealized_pnl_pct ? 'flash-green' : 'flash-red';
+          el.classList.add(cls);
+          setTimeout(() => el.classList.remove(cls), 1000);
+        }
+      }
+    });
+  }
+}
+
+let _lastState = null;
 function applyState(state) {
+  const prevState = _lastState;
+  _lastState = state;
   window._argusState = state;
   paused = state.paused || false;
   if (state.equity_goal) _equityGoal = state.equity_goal;
@@ -2490,12 +2662,13 @@ function applyState(state) {
       const p = pos[sym];
       const pct = p.unrealized_pnl_pct || 0;
       const rawSym = sym.replace(/\s*\[.*?\]/,'');
+      const safeSym = rawSym.replace(/[^A-Z0-9]/g, '_');
       return `<tr class="tr-hover">
         <td class="accent">${escHtml(sym)}</td>
         <td class="txt-right">${fmt(p.quantity,4)}</td>
         <td class="txt-right">${fmtDollar(p.entry_price)}</td>
-        <td class="txt-right">${fmtDollar(p.current_price)}</td>
-        <td class="txt-right ${pnlClass(pct)}">${pct >= 0 ? '+' : ''}${fmt(pct)}%</td>
+        <td class="txt-right" id="pos-price-${safeSym}">${fmtDollar(p.current_price)}</td>
+        <td class="txt-right ${pnlClass(pct)}" id="pos-pnl-${safeSym}">${pct >= 0 ? '+' : ''}${fmt(pct)}%</td>
         <td class="txt-right muted">${fmtDollar(p.stop_loss_price)}</td>
         <td class="txt-center">
           <button class="btn btn-danger" style="padding:5px 11px;font-size:11px;font-weight:700" onclick="confirmClose('${escHtml(rawSym)}')">Close</button>
@@ -2591,12 +2764,15 @@ function applyState(state) {
 
   renderTokenUsage(state.token_usage);
   renderPerformance(state.performance);
+  renderReadiness(state.readiness_scorecard, state.ai_vote);
   renderFlashcards(state);
   renderLogs(state.logs || []);
   // Refresh markers if chart is showing (new closed trades may have arrived)
   if (_chartSymbol && _lastCandles[_chartSymbol]) {
     placeTradeMarkers(_chartSymbol, _lastCandles[_chartSymbol]);
   }
+
+  if (prevState) triggerFlashes(state, prevState);
 
   document.getElementById('last-update').textContent = 'Last update: ' + new Date().toLocaleTimeString();
   document.getElementById('btn-pause').textContent = (state.paused || paused) ? '▶ Resume' : '⏸ Pause';
@@ -2864,10 +3040,26 @@ async function doClose(symbol) {
 let _chart        = null;
 let _candleSeries = null;
 let _lineSeries   = null;
+let _volumeSeries = null;
+let _smaSeries    = null;
+let _emaSeries    = null;
 let _predSeries   = null;   // dashed prediction line
+let _rsiChart     = null;
+let _rsiSeries    = null;
 let _chartSymbol  = null;
 let _chartType    = 'candles';   // 'candles' | 'line'
+let _chartSpan     = '3month';
+let _chartInterval = 'day';
 let _lastCandles  = {};
+
+async function setChartTimeframe(interval, span) {
+  _chartInterval = interval;
+  _chartSpan     = span;
+  document.querySelectorAll('.ct-tf-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tf === `${interval}-${span}`);
+  });
+  if (_chartSymbol) loadChart(_chartSymbol);
+}
 
 const _CHART_OPTS = {
   layout: { background: { color: '#161920' }, textColor: '#8892a4' },
@@ -2897,6 +3089,18 @@ function initChart() {
     visible: false,
   });
 
+  _volumeSeries = _chart.addHistogramSeries({
+    color: '#26a69a',
+    priceFormat: { type: 'volume' },
+    priceScaleId: '', // overlay
+  });
+  _volumeSeries.priceScale().applyOptions({
+    scaleMargins: { top: 0.8, bottom: 0 },
+  });
+
+  _smaSeries = _chart.addLineSeries({ color: '#FFD700', lineWidth: 1.5, title: 'SMA-20' });
+  _emaSeries = _chart.addLineSeries({ color: '#58a6ff', lineWidth: 1.5, title: 'EMA-50' });
+
   _predSeries = _chart.addLineSeries({
     color: '#60a5fa', lineWidth: 1,
     lineStyle: LightweightCharts.LineStyle.Dashed,
@@ -2904,7 +3108,37 @@ function initChart() {
     title: 'trend',
   });
 
-  new ResizeObserver(() => _chart.applyOptions({ width: el.clientWidth })).observe(el);
+  // RSI Chart
+  const rsiEl = document.getElementById('rsi-chart');
+  _rsiChart = LightweightCharts.createChart(rsiEl, {
+    ..._CHART_OPTS,
+    height: 100,
+    timeScale: { ..._CHART_OPTS.timeScale, visible: false }, // hide time scale, synced with main
+  });
+  _rsiSeries = _rsiChart.addLineSeries({ color: '#c084fc', lineWidth: 1.5, title: 'RSI' });
+  _rsiSeries.createPriceLine({ price: 70, color: '#f85149', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70' });
+  _rsiSeries.createPriceLine({ price: 30, color: '#3fb950', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '30' });
+
+  // Sync RSI with Main Chart
+  _chart.timeScale().subscribeVisibleTimeRangeChange(range => {
+    _rsiChart.timeScale().setVisibleRange(range);
+  });
+  _rsiChart.timeScale().subscribeVisibleTimeRangeChange(range => {
+    _chart.timeScale().setVisibleRange(range);
+  });
+  _chart.subscribeCrosshairMove(param => {
+    if (param.time) _rsiChart.setCrosshairPosition(param.point.x, param.time, _rsiSeries);
+    else _rsiChart.clearCrosshairPosition();
+  });
+  _rsiChart.subscribeCrosshairMove(param => {
+    if (param.time) _chart.setCrosshairPosition(param.point.x, param.time, _candleSeries);
+    else _chart.clearCrosshairPosition();
+  });
+
+  new ResizeObserver(() => {
+    _chart.applyOptions({ width: el.clientWidth });
+    _rsiChart.applyOptions({ width: el.clientWidth });
+  }).observe(el);
 }
 
 function setChartType(type) {
@@ -2970,13 +3204,25 @@ async function loadChart(symbol) {
   document.querySelectorAll('.chart-tab').forEach(t =>
     t.classList.toggle('active', t.dataset.sym === symbol));
   try {
-    const res  = await fetch(`/api/chart/${encodeURIComponent(symbol)}`);
+    const res  = await fetch(`/api/chart/${encodeURIComponent(symbol)}?span=${_chartSpan}&interval=${_chartInterval}`);
     const data = await res.json();
     const candles = (data.candles || []).sort((a, b) => a.time - b.time);
     _lastCandles[symbol] = candles;
 
     _candleSeries.setData(candles);
     _lineSeries.setData(candles.map(c => ({ time: c.time, value: c.close })));
+
+    // Volume
+    _volumeSeries.setData(candles.map(c => ({
+      time: c.time,
+      value: c.volume,
+      color: c.close >= c.open ? 'rgba(0, 212, 170, 0.5)' : 'rgba(248, 81, 73, 0.5)'
+    })));
+
+    // Indicators
+    _smaSeries.setData(candles.filter(c => c.sma_20 != null).map(c => ({ time: c.time, value: c.sma_20 })));
+    _emaSeries.setData(candles.filter(c => c.ema_50 != null).map(c => ({ time: c.time, value: c.ema_50 })));
+    _rsiSeries.setData(candles.filter(c => c.rsi != null).map(c => ({ time: c.time, value: c.rsi })));
 
     // Prediction line — needs at least 5 points for a meaningful trend
     if (candles.length >= 5) {
@@ -3153,28 +3399,29 @@ function updatePriceChips(signals, watchlist) {
   const priceMap = {};
   (signals || []).forEach(s => { if (s.symbol) priceMap[s.symbol] = s; });
 
-  // Canonical symbol order: watchlist first, then any extra symbols in signals
+  // Strictly follow watchlist order; ignore extra signal symbols not in watchlist
   const wl = watchlist || (window._argusState && window._argusState.watchlist) || [];
-  const signalSyms = (signals || []).map(s => s.symbol).filter(Boolean);
-  const order = [...new Set([...wl, ...signalSyms])];
-  if (!order.length) return;
+  if (!wl.length) {
+    rail.innerHTML = '';
+    return;
+  }
 
   const existing = new Map([...rail.querySelectorAll('.price-chip')].map(el => [el.dataset.sym, el]));
   const seen = new Set();
 
-  order.forEach((sym, idx) => {
+  wl.forEach((sym) => {
     seen.add(sym);
     const s = priceMap[sym];
     const price = s && s.price != null ? '$' + s.price.toFixed(s.price < 10 ? 4 : 2) : '—';
-    const bull  = s && s.composite === 'bullish';
-    const bear  = s && s.composite === 'bearish';
-    const arrow = bull ? '▲' : bear ? '▼' : '—';
-    const arrowCls = bull ? 'up' : bear ? 'down' : 'flat';
-    const priceColor = bull ? 'var(--green)' : bear ? 'var(--danger)' : 'var(--muted)';
+    const change = s ? (s.change_pct || 0) : 0;
+    const arrow = change > 0 ? '▲' : change < 0 ? '▼' : '—';
+    const arrowCls = change > 0 ? 'up' : change < 0 ? 'down' : 'flat';
+    const priceColor = change > 0 ? 'var(--green)' : change < 0 ? 'var(--red)' : 'var(--muted)';
 
     if (existing.has(sym)) {
       // Update in-place
       const chip = existing.get(sym);
+      chip.title = s ? `${change >= 0 ? '+' : ''}${change.toFixed(2)}% today` : '';
       const priceEl = chip.querySelector('.price-chip-price');
       priceEl.textContent = price;
       priceEl.style.color = priceColor;
@@ -3187,6 +3434,7 @@ function updatePriceChips(signals, watchlist) {
       const chip = document.createElement('span');
       chip.className = 'price-chip';
       chip.dataset.sym = sym;
+      chip.title = s ? `${change >= 0 ? '+' : ''}${change.toFixed(2)}% today` : '';
       chip.innerHTML =
         `<span class="price-chip-sym">${escHtml(sym)}</span>` +
         `<span class="price-chip-price" style="color:${priceColor}">${price}</span>` +
@@ -3195,7 +3443,7 @@ function updatePriceChips(signals, watchlist) {
     }
   });
 
-  // Remove chips for symbols no longer in watchlist or signals
+  // Remove chips for symbols no longer in watchlist
   existing.forEach((el, sym) => { if (!seen.has(sym)) el.remove(); });
 }
 

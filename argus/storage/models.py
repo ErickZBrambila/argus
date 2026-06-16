@@ -88,6 +88,21 @@ class Signal(Base):
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
 
+class HistoricalPrice(Base):
+    __tablename__ = "historical_prices"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    open = Column(Float, nullable=False)
+    high = Column(Float, nullable=False)
+    low = Column(Float, nullable=False)
+    close = Column(Float, nullable=False)
+    volume = Column(Float, nullable=True)
+
+    __table_args__ = (UniqueConstraint("symbol", "timestamp", name="uq_symbol_timestamp"),)
+
+
 class DailyStats(Base):
     __tablename__ = "daily_stats"
 
@@ -112,6 +127,16 @@ class AccountDailyStats(Base):
     kill_switch_triggered = Column(Boolean, default=False)
 
     __table_args__ = (UniqueConstraint("date", "account_label", name="uq_account_daily"),)
+
+
+class Watchlist(Base):
+    """Persistent user watchlist symbols."""
+    __tablename__ = "watchlist"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(20), nullable=False, unique=True, index=True)
+    order = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
 
 
 # ── Engine / session factory ─────────────────────────────────────────────────
@@ -291,3 +316,67 @@ def mark_account_kill_switch(
     )
     if row and not row.kill_switch_triggered:
         row.kill_switch_triggered = True
+
+
+def get_cached_historicals(session: Session, symbol: str, limit: int = 500) -> list[dict]:
+    rows = (
+        session.query(HistoricalPrice)
+        .filter_by(symbol=symbol)
+        .order_by(HistoricalPrice.timestamp.asc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "begins_at": r.timestamp.isoformat(),
+            "open_price": str(r.open),
+            "high_price": str(r.high),
+            "low_price": str(r.low),
+            "close_price": str(r.close),
+            "volume": int(r.volume or 0),
+            "symbol": r.symbol,
+        }
+        for r in rows
+    ]
+
+
+def save_historicals(session: Session, symbol: str, data: list[dict]) -> None:
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    for d in data:
+        try:
+            ts_str = d.get("begins_at")
+            if not ts_str:
+                continue
+            # Handle both ISO strings and date strings
+            if "T" in ts_str:
+                ts = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            else:
+                ts = datetime.datetime.strptime(ts_str, "%Y-%m-%d").replace(tzinfo=_UTC)
+            
+            stmt = sqlite_insert(HistoricalPrice).values(
+                symbol=symbol,
+                timestamp=ts,
+                open=float(d.get("open_price") or d.get("open", 0)),
+                high=float(d.get("high_price") or d.get("high", 0)),
+                low=float(d.get("low_price") or d.get("low", 0)),
+                close=float(d.get("close_price") or d.get("close", 0)),
+                volume=float(d.get("volume") or 0),
+            ).on_conflict_do_nothing()
+            session.execute(stmt)
+        except Exception as e:
+            logger.debug("Failed to save historical candle for %s: %s", symbol, e)
+
+
+def get_db_watchlist(session: Session) -> list[str]:
+    rows = session.query(Watchlist).order_by(Watchlist.order.asc(), Watchlist.symbol.asc()).all()
+    return [r.symbol for r in rows]
+
+
+def add_to_db_watchlist(session: Session, symbol: str) -> None:
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    stmt = sqlite_insert(Watchlist).values(symbol=symbol).on_conflict_do_nothing()
+    session.execute(stmt)
+
+
+def remove_from_db_watchlist(session: Session, symbol: str) -> None:
+    session.query(Watchlist).filter_by(symbol=symbol).delete()
