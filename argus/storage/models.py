@@ -281,13 +281,24 @@ def increment_day_trades(session: Session) -> None:
 
 
 def count_day_trades_last_5_days(session: Session) -> int:
-    cutoff = datetime.date.today() - datetime.timedelta(days=5)
+    """Sum day trades for the past 5 days, EXCLUDING today.
+    Today's trades are tracked in-memory via RiskManager._day_trade_count so they
+    are not double-counted when approve_buy adds from_db + _day_trade_count."""
+    today = datetime.date.today()
+    cutoff = today - datetime.timedelta(days=5)
     result = (
         session.query(func.sum(DailyStats.day_trades))
-        .filter(DailyStats.date >= cutoff)
+        .filter(DailyStats.date >= cutoff, DailyStats.date < today)
         .scalar()
     )
     return int(result or 0)
+
+
+def get_today_day_trades(session: Session) -> int:
+    """Return today's day trade count from DailyStats (for restart recovery)."""
+    today = datetime.date.today()
+    row = session.query(DailyStats).filter_by(date=today).first()
+    return int((row.day_trades or 0) if row else 0)
 
 
 def get_or_create_account_daily_stats(

@@ -31,6 +31,7 @@ from argus.storage.models import (
     get_or_create_account_daily_stats,
     get_or_create_daily_stats,
     get_db_watchlist,
+    get_today_day_trades,
     add_to_db_watchlist,
     get_session,
     increment_day_trades,
@@ -923,18 +924,26 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
     def _execute_sell(self, acct: AccountContext, symbol: str, quantity: float, reason: str = "") -> bool:
         """Returns True if the sell was successfully filled."""
+        # ── Step 1: broker order ─────────────────────────────────────────────
         try:
             result = acct.broker.sell(symbol, quantity)
-            if not result.filled:
-                logger.warning("[%s][%s] Sell order not filled", acct.label, symbol)
-                return False
+        except Exception as exc:
+            logger.error("[%s] Execute sell broker call failed for %s: %s", acct.label, symbol, exc)
+            return False
 
-            outcome = "stop-loss" if "stop-loss" in reason.lower() else "sell"
-            for card in self._flashcards.get_all():
-                if card.symbol == symbol and card.account == acct.label and card.exit_price is None:
-                    self._flashcards.close_trade(card.trade_id, result.price, outcome)
-                    break
+        if not result.filled:
+            logger.warning("[%s][%s] Sell order not filled", acct.label, symbol)
+            return False
 
+        # ── Step 2: flashcard close ──────────────────────────────────────────
+        outcome = "stop-loss" if "stop-loss" in reason.lower() else "sell"
+        for card in self._flashcards.get_all():
+            if card.symbol == symbol and card.account == acct.label and card.exit_price is None:
+                self._flashcards.close_trade(card.trade_id, result.price, outcome)
+                break
+
+        # ── Step 3: DB write (broker already filled — critical if this fails) ─
+        try:
             with get_session() as session:
                 delete_position(session, symbol, acct.label)
                 session.add(Trade(
@@ -952,23 +961,32 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 if self._is_day_trade(symbol):
                     acct.risk.record_day_trade()
                     increment_day_trades(session)
-
-            self._recent_trades.appendleft({
-                "time": datetime.datetime.now(_UTC).strftime("%H:%M:%S"),
-                "symbol": symbol,
-                "side": "sell",
-                "quantity": result.quantity,
-                "price": result.price,
-                "account": acct.label,
-            })
-            self._notifier.send(
-                f"[{acct.label.upper()}] SELL {symbol}",
-                f"Sold {result.quantity:.4f} {symbol} @ ${result.price:.4f} | {reason[:100]}",
-            )
-            return True
         except Exception as exc:
-            logger.error("[%s] Execute sell failed for %s: %s", acct.label, symbol, exc)
-            return False
+            logger.critical(
+                "[%s] BROKER SELL MAY HAVE FILLED BUT DB WRITE FAILED for %s: %s — check brokerage positions!",
+                acct.label, symbol, exc,
+            )
+            self._notifier.send(
+                f"[{acct.label.upper()}] CRITICAL: Sell DB write failed — {symbol}",
+                f"Broker sell order may have filled but local records were not updated. "
+                f"Check your brokerage account for {symbol} position. Error: {str(exc)[:200]}",
+            )
+            return True  # sell did fill at the broker; caller should treat as success
+
+        # ── Step 4: in-memory + notification ────────────────────────────────
+        self._recent_trades.appendleft({
+            "time": datetime.datetime.now(_UTC).strftime("%H:%M:%S"),
+            "symbol": symbol,
+            "side": "sell",
+            "quantity": result.quantity,
+            "price": result.price,
+            "account": acct.label,
+        })
+        self._notifier.send(
+            f"[{acct.label.upper()}] SELL {symbol}",
+            f"Sold {result.quantity:.4f} {symbol} @ ${result.price:.4f} | {reason[:100]}",
+        )
+        return True
 
     def _is_day_trade(self, symbol: str) -> bool:
         """True if there is a BUY trade for this symbol today (making this sell a day trade)."""
@@ -1198,10 +1216,11 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
     # ── Storage helpers ──────────────────────────────────────────────────────
 
     def _restore_session_state(self) -> None:
-        """Load per-account starting equity and kill switch from today's DB rows."""
+        """Load per-account starting equity, kill switch, and day trade count from today's DB rows."""
         today = datetime.date.today()
         restored_ks: list[str] = []
         with get_session() as session:
+            today_dt = get_today_day_trades(session)
             for acct in self._accounts:
                 row = get_or_create_account_daily_stats(
                     session, today, acct.label, acct.risk.session_entry_equity
@@ -1215,6 +1234,10 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     restored_ks.append(acct.label)
                 else:
                     acct.risk._kill_switch = False
+                # Seed today's in-memory day trade count from DB so restarts don't
+                # under-count and mistakenly allow buys that would breach PDT.
+                if today_dt > acct.risk._day_trade_count:
+                    acct.risk._day_trade_count = today_dt
         if restored_ks:
             logger.warning(
                 "Kill switch restored for [%s] — drawdown limit was exceeded earlier today",

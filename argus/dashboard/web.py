@@ -32,6 +32,8 @@ _paused: bool = False
 _sse_queue: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=5)
 # Per-subscriber async queues — only accessed within the event loop
 _subscribers: set[asyncio.Queue] = set()
+# Cap concurrent backtests so "Backtest All" (22 symbols) doesn't flood the thread pool
+_backtest_sem = asyncio.Semaphore(4)
 
 # Chart data source — registered by main loop
 _chart_source_fn = None   # callable(symbol: str) -> list[dict]
@@ -1073,7 +1075,8 @@ async def run_backtest(payload: dict) -> dict:
         broker = _autopilot._accounts[0].broker
         engine = BacktestEngine(broker)
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, engine.run, symbol, span)
+        async with _backtest_sem:
+            result = await loop.run_in_executor(None, engine.run, symbol, span)
         return result.to_dict()
     except ValueError as exc:
         logger.warning("Backtest validation error for %s: %s", symbol, exc)
