@@ -5098,7 +5098,18 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
 #conn-dot{width:8px;height:8px;border-radius:99px;background:var(--bull);flex-shrink:0;transition:background .4s;box-shadow:0 0 6px var(--bull)}
 #conn-dot.offline{background:var(--bear);box-shadow:0 0 6px var(--bear)}
 #conn-dot.reconnecting{background:var(--warn);box-shadow:0 0 6px var(--warn)}
-#conn-status-bar{display:flex;align-items:center;gap:6px;padding:8px 16px 0;font-size:11px;color:var(--muted)}
+#conn-status-bar{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)}
+
+/* ── Market status bar ── */
+#m-status-bar{display:flex;align-items:center;justify-content:space-between;padding:5px 14px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0}
+.m-sess-badge{font-size:10px;font-weight:700;padding:3px 9px;border-radius:99px;letter-spacing:.3px;white-space:nowrap}
+.m-sess-open {background:rgba(63,185,80,.15);color:var(--bull);border:1px solid rgba(63,185,80,.3)}
+.m-sess-pre  {background:rgba(88,166,255,.12);color:var(--blue);border:1px solid rgba(88,166,255,.25)}
+.m-sess-after{background:rgba(210,153,34,.12);color:var(--warn);border:1px solid rgba(210,153,34,.25)}
+.m-sess-closed{background:var(--surface2);color:var(--muted);border:1px solid var(--border)}
+#m-mc{display:flex;align-items:center;gap:4px;font-family:var(--mono)}
+#m-mc-label{font-size:10px;color:var(--muted)}
+#m-mc-val{font-size:11px;font-weight:700;min-width:52px;text-align:right;font-variant-numeric:tabular-nums}
 
 /* ── Actionable signal summary ── */
 .top-signals{display:flex;flex-direction:column;gap:6px;margin-bottom:4px}
@@ -5149,6 +5160,17 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
 <body>
 <div id="app">
   <div class="m-price-rail" id="m-price-rail"></div>
+  <div id="m-status-bar">
+    <div id="conn-status-bar">
+      <span id="conn-dot"></span>
+      <span id="conn-label">Connecting…</span>
+    </div>
+    <span class="m-sess-badge m-sess-closed" id="m-session-badge">CLOSED</span>
+    <div id="m-mc">
+      <span id="m-mc-label">Opens in</span>
+      <span id="m-mc-val">—</span>
+    </div>
+  </div>
   <div id="screen">
     <div id="ptr">↓ Release to refresh</div>
 
@@ -5434,6 +5456,9 @@ function mApply(state) {
 
   // Investigations
   mRenderInv(state.investigations || {});
+
+  // Market session badge
+  mUpdateSession(state.market_session || 'closed');
 }
 
 function mRenderPriceRail(signals) {
@@ -5681,6 +5706,58 @@ function _setConn(state) {
   if (dot) dot.className = state === 'online' ? '' : state === 'reconnecting' ? 'reconnecting' : 'offline';
   if (lbl) lbl.textContent = state === 'online' ? 'Live' : state === 'reconnecting' ? 'Reconnecting…' : 'Offline';
 }
+
+// ── Mobile market session badge ────────────────────────────────────────────
+const _M_SESS_LABELS  = {open:'MARKET OPEN',premarket:'PRE-MARKET',afterhours:'AFTER-HOURS',closed:'CLOSED'};
+const _M_SESS_CLASSES = {open:'m-sess-open',premarket:'m-sess-pre',afterhours:'m-sess-after',closed:'m-sess-closed'};
+function mUpdateSession(session) {
+  const el = document.getElementById('m-session-badge');
+  if (!el) return;
+  el.textContent = _M_SESS_LABELS[session] || (session||'closed').toUpperCase();
+  el.className   = 'm-sess-badge ' + (_M_SESS_CLASSES[session] || 'm-sess-closed');
+}
+
+// ── Mobile market open/close countdown ────────────────────────────────────
+function mMarketCountdown() {
+  const labelEl = document.getElementById('m-mc-label');
+  const valEl   = document.getElementById('m-mc-val');
+  if (!labelEl || !valEl) return;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit',
+    hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false,
+  }).formatToParts(new Date());
+  const p = {};
+  parts.forEach(({type,value}) => { p[type] = parseInt(value); });
+  const h = p.hour % 24, min = p.minute, s = p.second;
+  const dow = new Date(p.year, p.month - 1, p.day).getDay();
+  const secOfDay = h * 3600 + min * 60 + s;
+  const OPEN = 9 * 3600 + 30 * 60, CLOSE = 16 * 3600;
+  const isWeekday = dow >= 1 && dow <= 5;
+  function fmt(secs) {
+    secs = Math.max(0, secs);
+    const hh = Math.floor(secs / 3600), mm = Math.floor((secs % 3600) / 60), ss = secs % 60;
+    return hh > 0 ? `${hh}h ${String(mm).padStart(2,'0')}m`
+                  : `${String(mm).padStart(2,'0')}m ${String(ss).padStart(2,'0')}s`;
+  }
+  if (!isWeekday) {
+    const daysUntilMon = dow === 0 ? 1 : 2;
+    labelEl.textContent = 'Opens in';
+    valEl.textContent   = fmt(daysUntilMon * 86400 + OPEN - secOfDay);
+  } else if (secOfDay < OPEN) {
+    labelEl.textContent = 'Opens in';
+    valEl.textContent   = fmt(OPEN - secOfDay);
+  } else if (secOfDay < CLOSE) {
+    labelEl.textContent = 'Closes in';
+    valEl.textContent   = fmt(CLOSE - secOfDay);
+  } else {
+    const daysAhead = dow === 5 ? 3 : 1;
+    labelEl.textContent = 'Opens in';
+    valEl.textContent   = fmt(daysAhead * 86400 + OPEN - secOfDay);
+  }
+}
+mMarketCountdown();
+setInterval(mMarketCountdown, 1000);
+
 function connectSSE() {
   _setConn('reconnecting');
   const tok = window._ARGUS_TOKEN || '';
