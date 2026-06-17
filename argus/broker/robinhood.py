@@ -189,23 +189,29 @@ class RobinhoodBroker:
     def get_portfolio_equity(self) -> float:
         if self.paper:
             with self._paper_lock:
-                return self._paper_equity + self._paper_unrealized_unsafe()
+                # cash remaining + full market value of open positions
+                return self._paper_equity + self._paper_position_value_unsafe()
         return self._live_equity()
 
     def _live_equity(self) -> float:
         import robin_stocks.robinhood as rh
+        # WARNING: load_portfolio_profile() returns the default account regardless of
+        # self.account_number. In multi-account live mode both brokers will report the
+        # same equity. Fix before enabling live trading on multiple accounts.
         profile = rh.profiles.load_portfolio_profile()
         return float(profile.get("equity", 0))
 
-    def _paper_unrealized_unsafe(self) -> float:
-        """Must be called with _paper_lock held."""
+    def _paper_position_value_unsafe(self) -> float:
+        """Return total market value of all open positions. Must be called with _paper_lock held."""
+        # Snapshot positions first so we can release the lock before network calls
+        snapshot = dict(self._paper_positions)
         total = 0.0
-        for sym, pos in self._paper_positions.items():
+        for sym, pos in snapshot.items():
             try:
                 price = self._live_get_price(sym)
             except Exception:
                 price = pos["avg_price"]
-            total += (price - pos["avg_price"]) * pos["qty"]
+            total += price * pos["qty"]
         return total
 
     def get_open_positions(self) -> dict[str, dict]:

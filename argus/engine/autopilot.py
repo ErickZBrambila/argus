@@ -31,6 +31,7 @@ from argus.storage.models import (
     get_or_create_account_daily_stats,
     get_or_create_daily_stats,
     get_db_watchlist,
+    get_sell_by_dates,
     get_today_day_trades,
     add_to_db_watchlist,
     get_session,
@@ -51,6 +52,8 @@ _RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 # Symbols to watch for their FIRST bullish signal — fire a high-priority ntfy alert
 # when the composite flips to bullish for the first time (new listings, IPO watchlist, etc.)
 _PRIORITY_WATCH_SYMBOLS: frozenset[str] = frozenset({"SPCX"})
+# Force-sell this many calendar days before the sell_by_date deadline
+_SELL_BY_FORCE_DAYS = 7
 
 
 @dataclass
@@ -95,7 +98,9 @@ class Autopilot:
             from argus.storage.models import get_exit_only_symbols
             with get_session() as _s:
                 _eos = list(get_exit_only_symbols(_s))
+                _sbd = get_sell_by_dates(_s)
             web_dashboard._state["exit_only_symbols"] = _eos
+            web_dashboard._state["sell_by_dates"] = _sbd
         except Exception:
             pass
 
@@ -682,6 +687,17 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
         daily_pnl_pct = self._daily_pnl_pct(acct, equity)
 
+        # Load sell-time constraints once for the entire tick (avoid per-symbol DB round-trips)
+        try:
+            with get_session() as session:
+                from argus.storage.models import get_exit_only_symbols
+                _exit_only = get_exit_only_symbols(session)
+                _sell_by   = get_sell_by_dates(session)
+                _db_day_trades = count_day_trades_last_5_days(session)
+        except Exception as exc:
+            logger.error("[%s] Could not load sell constraints: %s", acct.label, exc)
+            _exit_only, _sell_by, _db_day_trades = set(), {}, 0
+
         for symbol, sig in signal_map.items():
             try:
                 # DEBOUNCING CHECK
@@ -719,15 +735,35 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     decision.reasoning[:80],
                 )
 
+                # ── Deadline exit override ───────────────────────────────────
+                sbd_str = _sell_by.get(symbol)
+                if sbd_str:
+                    sbd = datetime.date.fromisoformat(sbd_str)
+                    days_left = (sbd - datetime.date.today()).days
+                    if symbol in open_positions and days_left <= _SELL_BY_FORCE_DAYS:
+                        logger.warning(
+                            "[%s][%s] DEADLINE EXIT — forcing SELL with %d days until %s",
+                            acct.label, symbol, days_left, sbd_str,
+                        )
+                        self._execute_sell(
+                            acct, symbol, open_positions[symbol]["qty"],
+                            reason=f"Deadline exit — sell by {sbd_str} ({days_left}d remaining)",
+                        )
+                        open_positions.pop(symbol, None)
+                        decisions[symbol] = decision
+                        continue
+                    if decision.action == "BUY":
+                        logger.info(
+                            "[%s][%s] BUY blocked — sell_by_date %s (%d days)",
+                            acct.label, symbol, sbd_str, days_left,
+                        )
+                        continue
+
                 if decision.action == "BUY":
-                    with get_session() as session:
-                        db_day_trades = count_day_trades_last_5_days(session)
-                        from argus.storage.models import get_exit_only_symbols
-                        exit_only = get_exit_only_symbols(session)
-                    if symbol in exit_only:
+                    if symbol in _exit_only:
                         logger.info("[%s][%s] BUY skipped — exit-only symbol", acct.label, symbol)
                         continue
-                    risk_check = acct.risk.approve_buy(symbol, equity, open_positions, db_day_trades)
+                    risk_check = acct.risk.approve_buy(symbol, equity, open_positions, _db_day_trades)
                     if not risk_check.allowed:
                         logger.info("[%s][%s] BUY blocked: %s", acct.label, symbol, risk_check.reason)
                         continue
@@ -820,7 +856,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
                 # Auto-expire if price has drifted too far from when trade was queued
                 price_at_queue = info.get("price_at_queue")
-                if price_at_queue and sym in self._last_signal_map:
+                if price_at_queue and price_at_queue > 0 and sym in self._last_signal_map:
                     current_price = self._last_signal_map[sym].price
                     drift = (current_price - price_at_queue) / price_at_queue
                     action = info.get("action", "BUY")
@@ -958,7 +994,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 ))
                 self._increment_trade_count(session)
                 # Detect day trade: same symbol bought today on this account
-                if self._is_day_trade(symbol):
+                if self._is_day_trade(acct, symbol):
                     acct.risk.record_day_trade()
                     increment_day_trades(session)
         except Exception as exc:
@@ -988,8 +1024,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         )
         return True
 
-    def _is_day_trade(self, symbol: str) -> bool:
-        """True if there is a BUY trade for this symbol today (making this sell a day trade)."""
+    def _is_day_trade(self, acct: "AccountContext", symbol: str) -> bool:
+        """True if this account bought symbol today — making the same-day sell a day trade."""
         today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min, tzinfo=_UTC)
         try:
             with get_session() as session:
@@ -998,6 +1034,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     .filter(
                         Trade.symbol == symbol,
                         Trade.side == "buy",
+                        Trade.paper == acct.broker.paper,
                         Trade.created_at >= today_start,
                     )
                     .count()
@@ -1084,8 +1121,9 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             )
             return
 
-        # Step 3: re-buy on target account
-        self._execute_buy(to_acct, symbol, dollar_value, f"promoted from {from_label}")
+        # Step 3: re-buy on target account — cap at what risk check approved
+        capped_amount = min(dollar_value, risk_check.dollar_amount)
+        self._execute_buy(to_acct, symbol, capped_amount, f"promoted from {from_label}")
 
     # ── Dashboard state ──────────────────────────────────────────────────────
 
@@ -1098,7 +1136,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         for acct in self._accounts:
             try:
                 cached = self._account_cache.get(acct.label, {})
-                eq = cached.get("equity") or acct.broker.get_portfolio_equity()
+                eq = cached["equity"] if "equity" in cached else acct.broker.get_portfolio_equity()
                 positions_raw = cached.get("positions") or acct.broker.get_open_positions()
                 total_equity += eq
                 total_entry_equity += acct.risk.session_entry_equity
@@ -1132,7 +1170,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         for acct in self._accounts:
             cached = self._account_cache.get(acct.label, {})
             try:
-                eq = cached.get("equity") or acct.broker.get_portfolio_equity()
+                eq = cached["equity"] if "equity" in cached else acct.broker.get_portfolio_equity()
             except Exception:
                 eq = 0.0
             entry_eq = acct.risk.session_entry_equity

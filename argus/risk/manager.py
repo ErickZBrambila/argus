@@ -89,8 +89,9 @@ class RiskManager:
         if self._kill_switch:
             return RiskDecision(False, "Kill switch active — daily drawdown limit hit")
 
-        if self.check_drawdown(current_equity):
-            return RiskDecision(False, "Drawdown limit reached")
+        # Do NOT call check_drawdown here — it would set the kill switch silently
+        # with no DB persistence or ntfy alert. The real drawdown guard runs in
+        # _tick_account before any symbol processing.
 
         if symbol in current_positions:
             return RiskDecision(False, f"Already holding {symbol}")

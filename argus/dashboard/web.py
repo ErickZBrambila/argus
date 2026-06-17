@@ -290,6 +290,7 @@ def prefill_state(cfg: dict | None = None) -> None:
         _state.setdefault("signals", [])
         _state.setdefault("positions", {})
         _state.setdefault("exit_only_symbols", [])
+        _state.setdefault("sell_by_dates", {})
 
 
 def get_watchlist() -> list[str]:
@@ -1019,6 +1020,37 @@ async def set_exit_only_api(symbol: str, payload: dict) -> dict:
     return {"symbol": symbol, "exit_only": value, "exit_only_symbols": list(exit_only)}
 
 
+@app.post("/api/watchlist/{symbol}/sell-by", dependencies=[Depends(_require_auth)])
+async def set_sell_by_api(symbol: str, payload: dict) -> dict:
+    symbol = symbol.upper().strip()
+    if not _SYMBOL_RE.match(symbol):
+        raise HTTPException(status_code=400, detail="Invalid symbol")
+    raw_date = payload.get("date")  # ISO string "YYYY-MM-DD" or null/""
+    import datetime as _dt2
+    date_val = None
+    if raw_date:
+        try:
+            date_val = _dt2.date.fromisoformat(str(raw_date).strip())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date — use YYYY-MM-DD")
+    try:
+        from argus.storage.models import set_sell_by_date, get_sell_by_dates
+        with get_session() as session:
+            set_sell_by_date(session, symbol, date_val)
+            session.flush()
+            sell_by = get_sell_by_dates(session)
+    except Exception as exc:
+        logger.error("set_sell_by_date failed for %s: %s", symbol, exc)
+        raise HTTPException(status_code=500, detail="Failed to update sell-by date")
+    with _state_lock:
+        _state["sell_by_dates"] = sell_by
+        snapshot = dict(_state)
+    _sse_push(json.dumps(snapshot, default=str))
+    logger.info("sell_by_date %s → %s", symbol, date_val)
+    return {"symbol": symbol, "sell_by_date": date_val.isoformat() if date_val else None,
+            "sell_by_dates": sell_by}
+
+
 @app.get("/api/approvals", dependencies=[Depends(_require_auth)])
 async def get_approvals() -> dict:
     with _approval_lock:
@@ -1548,6 +1580,16 @@ _HTML = """<!DOCTYPE html>
   .ct-exit-only-btn { background: none; border: 1px solid var(--border); color: var(--muted); padding: 2px 8px; border-radius: 5px; font-size: 10px; font-weight: 700; cursor: pointer; white-space: nowrap; }
   .ct-exit-only-btn:hover { border-color: var(--warn); color: var(--warn); }
   .ct-exit-only-btn.active { background: rgba(210,153,34,.15); color: var(--warn); border-color: var(--warn); }
+  .ct-deadline-badge { font-size: 9px; font-weight: 800; padding: 2px 6px; border-radius: 4px; letter-spacing: .5px; background: rgba(248,81,73,.15); color: var(--bear); border: 1px solid rgba(248,81,73,.4); white-space: nowrap; cursor: default; }
+  .ct-deadline-badge.soon { background: rgba(248,81,73,.3); animation: deadline-pulse 1.5s ease-in-out infinite; }
+  @keyframes deadline-pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+  .ct-sell-by-wrap { display: flex; align-items: center; gap: 4px; }
+  .ct-sell-by-input { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 2px 6px; border-radius: 5px; font-size: 10px; cursor: pointer; }
+  .ct-sell-by-input:focus { border-color: var(--bear); outline: none; }
+  .ct-sell-by-btn { background: none; border: 1px solid var(--border); color: var(--muted); padding: 2px 7px; border-radius: 5px; font-size: 10px; font-weight: 700; cursor: pointer; }
+  .ct-sell-by-btn:hover { border-color: var(--bear); color: var(--bear); }
+  .ct-sell-by-clear { color: var(--muted); font-size: 10px; cursor: pointer; background: none; border: none; padding: 0 2px; display: none; }
+  .ct-sell-by-clear.visible { display: inline; }
   .ct-dashlet.exit-only { border-color: rgba(210,153,34,.35); }
   .ct-chart-area { width: 100%; height: 240px; border-radius: var(--radius-sm); overflow: hidden; }
   .ct-dashlet-footer { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 11px; flex-wrap: wrap; }
@@ -2541,14 +2583,23 @@ function switchTab(name) {
   }
 }
 
-async function promotePosition(symbol, fromAccount) {
+async function promotePosition(symbol, fromAccount, btn) {
   if (!confirm(`Sell ${symbol} from ${fromAccount} and re-buy on Agentic?`)) return;
-  const r = await apiFetch('/api/promote/' + symbol, {
-    method: 'POST',
-    body: JSON.stringify({from_account: fromAccount, to_account: 'agentic'})
-  });
-  const d = await r.json();
-  alert(d.status === 'queued' ? `Promotion queued for ${symbol}` : JSON.stringify(d));
+  if (btn) { btn.disabled = true; btn.textContent = 'Queuing…'; }
+  try {
+    const r = await apiFetch('/api/promote/' + symbol, {
+      method: 'POST',
+      body: JSON.stringify({from_account: fromAccount, to_account: 'agentic'})
+    });
+    const d = await r.json();
+    if (btn) {
+      btn.textContent = d.status === 'queued' ? 'Queued ✓' : 'Done ✓';
+      btn.style.color = 'var(--bull)';
+      btn.style.borderColor = 'var(--bull)';
+    }
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Promote ↑'; }
+  }
 }
 
 function renderPerformance(perf) {
@@ -3149,7 +3200,7 @@ function applyState(state) {
         <td class="txt-right muted">${fmtDollar(p.stop_loss_price)}</td>
         <td class="txt-center">
           <button class="btn btn-danger" style="padding:5px 11px;font-size:11px;font-weight:700" onclick="confirmClose('${escHtml(rawSym)}')">Close</button>
-          ${(p.account||'').toLowerCase()==='default' ? `<button class="btn-promote" onclick="promotePosition('${escHtml(rawSym)}','default')" title="Sell here, re-buy on Agentic">Promote ↑</button>` : ''}
+          ${(p.account||'').toLowerCase()==='default' ? `<button class="btn-promote" onclick="promotePosition('${escHtml(rawSym)}','default',this)" title="Sell here, re-buy on Agentic">Promote ↑</button>` : ''}
         </td>
       </tr>`;
     }).join('');
@@ -3232,6 +3283,7 @@ function applyState(state) {
   updateTicker(state.signals);
   if (state.watchlist) { ctApplyWatchlist(state.watchlist); buildChartTabs(state.watchlist); }
   if (state.exit_only_symbols !== undefined) ctApplyExitOnlyState(state.exit_only_symbols);
+  if (state.sell_by_dates !== undefined) ctApplySellByState(state.sell_by_dates);
   if (state.investigations) renderInvestigations(state.investigations);
   if (state.equity_history) eqRender(state.equity_history, state.equity_history_by_account || {});
   // Scan timing
@@ -3258,7 +3310,20 @@ function applyState(state) {
 }
 
 async function decideApproval(tradeId, decision) {
-  await apiFetch(`/api/${decision}/${encodeURIComponent(tradeId)}`, {method:'POST'});
+  // Immediate optimistic UI — replace all approve/deny buttons for this trade with a status chip
+  document.querySelectorAll(`[onclick*="${tradeId}"]`).forEach(btn => {
+    const wrap = btn.closest('.approval-actions, .alert-inline-btns');
+    if (wrap) {
+      const label = decision === 'approve' ? '✓ Approved — executing at next scan' : '✗ Denied';
+      const cls   = decision === 'approve' ? 'color:var(--bull)' : 'color:var(--bear)';
+      wrap.innerHTML = `<span style="font-size:12px;font-weight:700;${cls}">${label}</span>`;
+    }
+  });
+  try {
+    await apiFetch(`/api/${decision}/${encodeURIComponent(tradeId)}`, {method:'POST'});
+  } catch(e) {
+    // 404 = already decided (e.g. double-click) — UI already updated, silently ignore
+  }
 }
 
 function _timeAgo(date) {
@@ -4104,10 +4169,14 @@ function ctAddDashlet(sym) {
   ).join('');
 
   const isExitOnly = (window._argusState && (window._argusState.exit_only_symbols||[])).includes(sym);
+  const _sbd = (window._argusState && window._argusState.sell_by_dates && window._argusState.sell_by_dates[sym]) || '';
+  const _sbdDays = _sbd ? Math.ceil((new Date(_sbd+'T00:00:00') - new Date()) / 86400000) : null;
+  const _hasSbd = !!_sbd;
   card.innerHTML = `
     <div class="ct-dashlet-header">
       <span class="ct-dashlet-sym">${escHtml(sym)}</span>
-      ${isExitOnly ? '<span class="ct-exit-only-badge">EXIT ONLY</span>' : ''}
+      ${isExitOnly ? '<span class="ct-exit-only-badge" id="ct-eo-badge-${escHtml(sym)}">EXIT ONLY</span>' : ''}
+      ${_hasSbd ? `<span class="ct-deadline-badge${_sbdDays<=7?' soon':''}" id="ct-dl-badge-${escHtml(sym)}" title="Sell by ${escHtml(_sbd)}">DEADLINE ${_sbdDays}d</span>` : `<span class="ct-deadline-badge" id="ct-dl-badge-${escHtml(sym)}" style="display:none"></span>`}
       <span class="ct-dashlet-price" id="ct-price-${escHtml(sym)}">—</span>
       <span class="ct-dashlet-sig" id="ct-sig-${escHtml(sym)}"></span>
       <div class="ct-tf-btns">${tfBtns}</div>
@@ -4130,6 +4199,12 @@ function ctAddDashlet(sym) {
         <button class="ct-bt-span-btn" id="ct-bt-s5y-${escHtml(sym)}" onclick="ctBtSetSpan('${escHtml(sym)}','5year',this)">5Y</button>
         <button class="ct-backtest-btn" id="ct-bt-btn-${escHtml(sym)}" onclick="ctRunBacktest('${escHtml(sym)}')">⏱ Backtest</button>
         <button class="ct-exit-only-btn${isExitOnly?' active':''}" id="ct-eo-btn-${escHtml(sym)}" onclick="ctToggleExitOnly('${escHtml(sym)}')" title="No new buys — hold until natural exit">⚠ Exit Only</button>
+        <div class="ct-sell-by-wrap" title="Auto-sell deadline (tax-loss or target exit)">
+          <input class="ct-sell-by-input" type="date" id="ct-sbd-${escHtml(sym)}" value="${escHtml(_sbd)}"
+                 onchange="ctSetSellBy('${escHtml(sym)}',this.value)">
+          <button class="ct-sell-by-btn" onclick="ctSetSellBy('${escHtml(sym)}',document.getElementById('ct-sbd-${escHtml(sym)}').value)">📅 Deadline</button>
+          <button class="ct-sell-by-clear${_hasSbd?' visible':''}" id="ct-sbd-clr-${escHtml(sym)}" onclick="ctClearSellBy('${escHtml(sym)}')" title="Clear deadline">✕</button>
+        </div>
       </div>
     </div>
     <div class="ct-backtest-result" id="ct-bt-${escHtml(sym)}" style="display:none"></div>`;
@@ -4480,6 +4555,51 @@ function ctApplyExitOnlyState(exitOnlySymbols) {
       } else if (!set.has(sym) && badge) {
         badge.remove();
       }
+    }
+  }
+}
+
+async function ctSetSellBy(sym, dateStr) {
+  if (!dateStr) return;
+  await apiFetch(`/api/watchlist/${encodeURIComponent(sym)}/sell-by`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({date: dateStr}),
+  });
+  // SSE will push updated state
+}
+
+async function ctClearSellBy(sym) {
+  await apiFetch(`/api/watchlist/${encodeURIComponent(sym)}/sell-by`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({date: null}),
+  });
+}
+
+function ctApplySellByState(sellByDates) {
+  const map = sellByDates || {};
+  const now = new Date();
+  for (const sym of _ctWatchlist) {
+    const badge = document.getElementById('ct-dl-badge-' + sym);
+    const inp   = document.getElementById('ct-sbd-' + sym);
+    const clr   = document.getElementById('ct-sbd-clr-' + sym);
+    const dateStr = map[sym] || '';
+    if (dateStr) {
+      const daysLeft = Math.ceil((new Date(dateStr + 'T00:00:00') - now) / 86400000);
+      const isSoon = daysLeft <= 7;
+      if (badge) {
+        badge.textContent = 'DEADLINE ' + daysLeft + 'd';
+        badge.title = 'Sell by ' + dateStr;
+        badge.className = 'ct-deadline-badge' + (isSoon ? ' soon' : '');
+        badge.style.display = '';
+      }
+      if (inp) inp.value = dateStr;
+      if (clr) clr.classList.add('visible');
+    } else {
+      if (badge) { badge.style.display = 'none'; badge.textContent = ''; }
+      if (inp)   inp.value = '';
+      if (clr)   clr.classList.remove('visible');
     }
   }
 }
@@ -5366,6 +5486,8 @@ function mApply(state) {
 
   // Signals tab
   const sigEl = document.getElementById('m-signals');
+  const _mSbd = state.sell_by_dates || {};
+  const _mEo  = new Set(state.exit_only_symbols || []);
   if (sigs.length) {
     sigEl.innerHTML = sigs.map(s => {
       const comp = (s.composite || 'neutral').toLowerCase();
@@ -5373,10 +5495,15 @@ function mApply(state) {
       const label = comp === 'bullish' ? 'BUY' : comp === 'bearish' ? 'SELL' : 'HOLD';
       const conf = s.confidence != null ? Math.round(s.confidence * 100) + '%' : '—';
       const price = s.price != null ? fmt$(s.price) : '—';
+      const sbdStr = _mSbd[s.symbol] || '';
+      const dlDays = sbdStr ? Math.ceil((new Date(sbdStr+'T00:00:00') - new Date()) / 86400000) : null;
+      const dlBadge = sbdStr ? `<span class="ct-deadline-badge${dlDays<=7?' soon':''}" title="Sell by ${esc(sbdStr)}">DL ${dlDays}d</span>` : '';
+      const eoBadge = _mEo.has(s.symbol) ? `<span class="ct-exit-only-badge" style="font-size:9px">EO</span>` : '';
       return `<div class="sig-row">
         <span class="sig-sym" onclick="mTab('charts');mSetSym('${esc(s.symbol)}')">${esc(s.symbol)}</span>
         <span class="sig-price">${price}</span>
         <span class="sig-badge ${cls}">${label}</span>
+        ${dlBadge}${eoBadge}
         <span class="sig-conf">${conf}</span>
         <button class="sig-inv-btn" onclick="mQuickInv('${esc(s.symbol)}')" title="Investigate">🔍</button>
       </div>`;
@@ -5564,13 +5691,29 @@ function mTf(tf) {
 }
 
 // ── Approvals ──────────────────────────────────────────────────────────────
+function _mDecideFeedback(id, decision) {
+  document.querySelectorAll(`[onclick*="${id}"]`).forEach(btn => {
+    const wrap = btn.closest('.appr-actions, .alert-inline-btns, .appr-row');
+    if (wrap) {
+      const label = decision === 'approve' ? '✓ Approved' : '✗ Denied';
+      const cls   = decision === 'approve' ? 'color:var(--bull)' : 'color:var(--bear)';
+      wrap.innerHTML = `<span style="font-size:12px;font-weight:700;${cls}">${label}</span>`;
+    }
+  });
+}
 async function mApprove(id) {
-  await fetch('/api/approve/'+id, {method:'POST',
-    headers:window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{}});
+  _mDecideFeedback(id, 'approve');
+  try {
+    await fetch('/api/approve/'+id, {method:'POST',
+      headers:window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{}});
+  } catch(e) {}
 }
 async function mDeny(id) {
-  await fetch('/api/deny/'+id, {method:'POST',
-    headers:window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{}});
+  _mDecideFeedback(id, 'deny');
+  try {
+    await fetch('/api/deny/'+id, {method:'POST',
+      headers:window._ARGUS_TOKEN?{'X-Argus-Token':window._ARGUS_TOKEN}:{}});
+  } catch(e) {}
 }
 
 // ── Investigate from signals ────────────────────────────────────────────────

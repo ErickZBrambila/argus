@@ -137,6 +137,7 @@ class Watchlist(Base):
     symbol = Column(String(20), nullable=False, unique=True, index=True)
     order = Column(Integer, default=0)
     exit_only = Column(Boolean, default=False, nullable=False)
+    sell_by_date = Column(Date, nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -185,6 +186,8 @@ def _apply_migrations(engine) -> None:
         wl_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(watchlist)")).fetchall()}
         if "exit_only" not in wl_cols:
             conn.execute(text("ALTER TABLE watchlist ADD COLUMN exit_only BOOLEAN NOT NULL DEFAULT 0"))
+        if "sell_by_date" not in wl_cols:
+            conn.execute(text("ALTER TABLE watchlist ADD COLUMN sell_by_date DATE"))
         conn.commit()
 
 
@@ -410,3 +413,17 @@ def set_exit_only(session: Session, symbol: str, value: bool) -> None:
 def get_exit_only_symbols(session: Session) -> set[str]:
     rows = session.query(Watchlist).filter_by(exit_only=True).all()
     return {r.symbol for r in rows}
+
+
+def set_sell_by_date(
+    session: Session, symbol: str, date_val: Optional[datetime.date]
+) -> None:
+    row = session.query(Watchlist).filter_by(symbol=symbol).first()
+    if row:
+        row.sell_by_date = date_val
+
+
+def get_sell_by_dates(session: Session) -> dict[str, str]:
+    """Return {symbol: ISO date string} for all symbols with a sell_by_date set."""
+    rows = session.query(Watchlist).filter(Watchlist.sell_by_date.isnot(None)).all()
+    return {r.symbol: r.sell_by_date.isoformat() for r in rows if r.sell_by_date}
