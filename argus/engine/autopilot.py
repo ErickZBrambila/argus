@@ -1208,9 +1208,13 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 )
                 if row.starting_equity > 0:
                     acct.risk.set_session_equity(row.starting_equity)
+                # Explicitly sync kill switch with today's DB state so a stale
+                # in-memory True from the previous day is cleared on day rollover.
                 if row.kill_switch_triggered:
                     acct.risk._kill_switch = True
                     restored_ks.append(acct.label)
+                else:
+                    acct.risk._kill_switch = False
         if restored_ks:
             logger.warning(
                 "Kill switch restored for [%s] — drawdown limit was exceeded earlier today",
