@@ -598,11 +598,22 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             self._update_dashboard(trading=False)
             return
 
+        # Snapshot positions across ALL accounts before the loop so each account
+        # can avoid buying symbols another account already holds.
+        all_acct_positions: dict[str, set[str]] = {}
+        for _a in self._accounts:
+            try:
+                all_acct_positions[_a.label] = set(_a.broker.get_open_positions().keys())
+            except Exception:
+                all_acct_positions[_a.label] = set()
+
         # Collect AI decisions across all accounts; keep highest-confidence per symbol
         ai_decisions: dict[str, TradeDecision] = {}
         for acct in self._accounts:
             try:
-                acct_decisions = self._tick_account(acct, signal_map)
+                # Symbols held by any OTHER account — agentic won't mirror default and vice versa
+                other_held = set().union(*(pos for lbl, pos in all_acct_positions.items() if lbl != acct.label))
+                acct_decisions = self._tick_account(acct, signal_map, other_held)
                 for sym, dec in acct_decisions.items():
                     if sym not in ai_decisions or dec.confidence > ai_decisions[sym].confidence:
                         ai_decisions[sym] = dec
@@ -652,7 +663,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             return False
         return True
 
-    def _tick_account(self, acct: AccountContext, signal_map: dict[str, SignalResult]) -> dict[str, TradeDecision]:
+    def _tick_account(self, acct: AccountContext, signal_map: dict[str, SignalResult], other_held: set[str] | None = None) -> dict[str, TradeDecision]:
         decisions: dict[str, TradeDecision] = {}
         if acct.risk.kill_switch_active:
             return decisions
@@ -762,6 +773,9 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 if decision.action == "BUY":
                     if symbol in _exit_only:
                         logger.info("[%s][%s] BUY skipped — exit-only symbol", acct.label, symbol)
+                        continue
+                    if other_held and symbol in other_held:
+                        logger.info("[%s][%s] BUY skipped — already held by another account", acct.label, symbol)
                         continue
                     risk_check = acct.risk.approve_buy(symbol, equity, open_positions, _db_day_trades)
                     if not risk_check.allowed:
