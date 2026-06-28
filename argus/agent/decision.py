@@ -3,7 +3,7 @@
 Both models receive the same signal snapshot and vote independently.
 Consensus rules:
   - Both agree on BUY or SELL  → execute, average confidence
-  - One says HOLD, other BUY/SELL → defer to HOLD (conservative)
+  - One says HOLD, other BUY/SELL → take directional action at high risk (majority rules)
   - Claude BUY vs Gemini SELL (or vice versa) → HOLD (contradiction = high risk)
 
 If only one model is configured, it runs solo with no penalty.
@@ -197,19 +197,21 @@ def _consensus(claude: TradeDecision, gemini: TradeDecision, symbol: str) -> Tra
             consensus=True,
         )
 
-    # One HOLD, one directional → conservative HOLD
+    # One HOLD, one directional → majority rules: take the directional action
+    # at reduced confidence (high risk). Only a direct BUY↔SELL contradiction
+    # warrants a hard HOLD.
     if ca == "HOLD" or ga == "HOLD":
-        dissenter = gemini if ca == "HOLD" else claude
+        directional = claude if ga == "HOLD" else gemini
         logger.info(
-            "Ensemble: models split on %s (Claude=%s, Gemini=%s) — holding",
-            symbol, ca, ga,
+            "Ensemble: split on %s (Claude=%s, Gemini=%s) — taking directional %s at high risk",
+            symbol, ca, ga, directional.action,
         )
         return TradeDecision(
             symbol=symbol,
-            action="HOLD",
-            confidence=min(claude.confidence, gemini.confidence),
+            action=directional.action,
+            confidence=directional.confidence,
             reasoning=(
-                f"Models disagreed — holding. "
+                f"Split decision — one model held. "
                 f"[Claude] {claude.reasoning}  [Gemini] {gemini.reasoning}"
             ),
             models_used="ensemble",
