@@ -35,6 +35,7 @@ from argus.storage.models import (
     get_today_day_trades,
     add_to_db_watchlist,
     get_session,
+    get_reset_baseline,
     increment_day_trades,
     init_db,
     mark_account_kill_switch,
@@ -1190,6 +1191,15 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             entry_eq = acct.risk.session_entry_equity
             acct_pnl = eq - entry_eq
             acct_pnl_pct = (acct_pnl / entry_eq * 100) if entry_eq else 0.0
+
+            try:
+                with next(get_session()) as _sess:
+                    reset_baseline = get_reset_baseline(_sess, acct.label)
+            except Exception:
+                reset_baseline = entry_eq
+            since_reset_pnl = eq - reset_baseline if reset_baseline else 0.0
+            since_reset_pnl_pct = (since_reset_pnl / reset_baseline * 100) if reset_baseline else 0.0
+
             acct_positions = {}
             positions_raw = cached.get("positions") or acct.broker.get_open_positions()
             for sym, pos in positions_raw.items():
@@ -1209,6 +1219,9 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 "equity": eq,
                 "daily_pnl": acct_pnl,
                 "daily_pnl_pct": acct_pnl_pct,
+                "since_reset_pnl": since_reset_pnl,
+                "since_reset_pnl_pct": since_reset_pnl_pct,
+                "reset_baseline": reset_baseline,
                 "kill_switch": acct.risk.kill_switch_active,
                 "day_trades": acct.risk.day_trade_count,
                 "auto_trade": acct.auto_trade,

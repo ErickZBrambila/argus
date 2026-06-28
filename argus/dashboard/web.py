@@ -2602,9 +2602,30 @@ async function promotePosition(symbol, fromAccount, btn) {
   }
 }
 
-function renderPerformance(perf) {
+function renderPerformance(perf, accounts) {
+  // Always render account equity summary (independent of closed trades)
+  const perfContainer = document.getElementById('perf-container');
+  const acctHtml = accounts ? Object.entries(accounts).map(([label, a]) => {
+    const eq = a.equity || 0;
+    const rPnl = a.since_reset_pnl ?? null;
+    const rPct = a.since_reset_pnl_pct ?? null;
+    const rSign = (rPnl ?? 0) >= 0 ? '+' : '';
+    const rCls = (rPnl ?? 0) >= 0 ? 'var(--green)' : 'var(--red)';
+    const dPnl = a.daily_pnl || 0;
+    const dPct = a.daily_pnl_pct || 0;
+    const dSign = dPnl >= 0 ? '+' : '';
+    const dCls = dPnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const acctColor = label === 'agentic' ? '#00d4aa' : '#c084fc';
+    return `<div class="perf-stat">
+      <div class="perf-stat-label" style="color:${acctColor}">${label.toUpperCase()}</div>
+      <div class="perf-stat-value private">$${eq.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+      ${rPnl !== null ? `<div class="perf-stat-sub" style="color:${rCls}">Reset: ${rSign}$${Math.abs(rPnl).toFixed(2)} (${rSign}${(rPct||0).toFixed(2)}%)</div>` : ''}
+      <div class="perf-stat-sub" style="color:${dCls}">Today: ${dSign}$${Math.abs(dPnl).toFixed(2)} (${dSign}${dPct.toFixed(2)}%)</div>
+    </div>`;
+  }).join('') : '';
+
   if (!perf || !perf.closed_trades) {
-    document.getElementById('perf-container').innerHTML = '<div class="empty">No closed trades yet</div>';
+    perfContainer.innerHTML = `<div class="perf-grid">${acctHtml}</div><div class="empty" style="margin-top:12px">No closed trades yet</div>`;
     document.getElementById('perf-symbols').innerHTML = '<div class="empty">No data yet</div>';
     document.getElementById('perf-confidence').innerHTML = '<div class="empty">No data yet</div>';
     return;
@@ -2620,8 +2641,9 @@ function renderPerformance(perf) {
   const avgPnlColor = (perf.avg_pnl_pct || 0) >= 0 ? 'var(--green)' : 'var(--red)';
   const holdStr = perf.avg_hold_hours != null ? perf.avg_hold_hours.toFixed(1) + 'h' : '—';
 
-  document.getElementById('perf-container').innerHTML = `
+  perfContainer.innerHTML = `
     <div class="perf-grid">
+      ${acctHtml}
       <div class="perf-stat">
         <div class="perf-stat-label">Win Rate</div>
         <div class="perf-stat-value" style="color:${winColor}">${winRate}</div>
@@ -3051,6 +3073,10 @@ function renderAccounts(accounts) {
     const pnlPct = a.daily_pnl_pct || 0;
     const pnlSign = pnl >= 0 ? '+' : '';
     const pnlCls = pnlClass(pnl);
+    const resetPnl = a.since_reset_pnl ?? null;
+    const resetPnlPct = a.since_reset_pnl_pct ?? null;
+    const resetSign = (resetPnl ?? 0) >= 0 ? '+' : '';
+    const resetCls = pnlClass(resetPnl ?? 0);
     const modeLabel = a.auto_trade ? 'AUTO' : 'APPROVAL REQUIRED';
     const modeCls   = a.auto_trade ? 'acct-mode-auto' : 'acct-mode-approval';
     const pending   = a.pending_approvals || 0;
@@ -3071,9 +3097,13 @@ function renderAccounts(accounts) {
       <div class="acct-panel-title ${cls}">${label.toUpperCase()}</div>
       <div class="acct-equity ${cls} private" id="acct-equity-${label}">${'$' + equity.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</div>
       <div class="acct-row">
-        <span class="acct-row-label">Daily P&L</span>
+        <span class="acct-row-label">Today P&L</span>
         <span class="${pnlCls} private" id="acct-pnl-${label}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${pnlPct.toFixed(2)}%)</span>
       </div>
+      ${resetPnl !== null ? `<div class="acct-row">
+        <span class="acct-row-label">Since Reset</span>
+        <span class="${resetCls} private">${resetSign}$${Math.abs(resetPnl).toFixed(2)} (${resetSign}${(resetPnlPct||0).toFixed(2)}%)</span>
+      </div>` : ''}
       <div class="acct-row">
         <span class="acct-row-label">Mode</span>
 
@@ -3293,7 +3323,7 @@ function applyState(state) {
   _updateCountdown();
 
   renderTokenUsage(state.token_usage);
-  renderPerformance(state.performance);
+  renderPerformance(state.performance, state.accounts);
   renderReadiness(state.readiness_scorecard, state.ai_vote);
   renderFlashcards(state);
   if (state.alert_log) renderAlerts(state.alert_log, state.pending_approvals);

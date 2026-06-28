@@ -325,6 +325,18 @@ def get_or_create_account_daily_stats(
     return row
 
 
+def get_reset_baseline(session: Session, account_label: str) -> float:
+    """Return the starting equity from the earliest AccountDailyStats row for an account.
+    This is the post-reset baseline (e.g. $10,000) used to compute total since-reset P&L."""
+    row = (
+        session.query(AccountDailyStats)
+        .filter_by(account_label=account_label)
+        .order_by(AccountDailyStats.date.asc())
+        .first()
+    )
+    return row.starting_equity if row else 0.0
+
+
 def mark_account_kill_switch(
     session: Session, date_val: datetime.date, account_label: str
 ) -> None:
