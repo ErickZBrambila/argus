@@ -195,11 +195,11 @@ class RobinhoodBroker:
 
     def _live_equity(self) -> float:
         import robin_stocks.robinhood as rh
-        # WARNING: load_portfolio_profile() returns the default account regardless of
-        # self.account_number. In multi-account live mode both brokers will report the
-        # same equity. Fix before enabling live trading on multiple accounts.
-        profile = rh.profiles.load_portfolio_profile()
-        return float(profile.get("equity", 0))
+        acct = self.account_number or None
+        profile = rh.profiles.load_portfolio_profile(account_number=acct)
+        # Use extended-hours equity when available (after-hours positions are marked to market)
+        eq = profile.get("extended_hours_equity") or profile.get("equity") or 0
+        return float(eq)
 
     def _paper_position_value_unsafe(self) -> float:
         """Return total market value of all open positions. Must be called with _paper_lock held."""
@@ -224,13 +224,26 @@ class RobinhoodBroker:
         import robin_stocks.robinhood as rh
 
         result: dict[str, dict] = {}
-        holdings = rh.account.build_holdings()
-        for sym, data in holdings.items():
-            result[sym] = {
-                "qty": float(data.get("quantity", 0)),
-                "avg_price": float(data.get("average_buy_price", 0)),
-            }
-        crypto_holdings = rh.crypto.get_crypto_positions()
+        acct = self.account_number or None
+
+        # Use account-filtered positions so multi-account live mode returns correct data
+        positions = rh.account.get_open_stock_positions(account_number=acct) or []
+        for pos in positions:
+            instrument_url = pos.get("instrument", "")
+            qty = float(pos.get("quantity", 0))
+            if qty <= 0:
+                continue
+            avg = float(pos.get("average_buy_price", 0))
+            try:
+                sym_data = rh.stocks.get_instrument_by_url(instrument_url, info="symbol")
+                sym = (sym_data or "").strip().upper()
+            except Exception:
+                continue
+            if sym:
+                result[sym] = {"qty": qty, "avg_price": avg}
+
+        # Crypto positions are not account-scoped in the Robinhood API
+        crypto_holdings = rh.crypto.get_crypto_positions() or []
         for item in crypto_holdings:
             sym = item.get("currency", {}).get("code", "")
             qty = float(item.get("quantity", 0))
