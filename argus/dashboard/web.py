@@ -5887,6 +5887,7 @@ function _setConn(state) {
 const _M_SESS_LABELS  = {open:'MARKET OPEN',premarket:'PRE-MARKET',afterhours:'AFTER-HOURS',closed:'CLOSED'};
 const _M_SESS_CLASSES = {open:'m-sess-open',premarket:'m-sess-pre',afterhours:'m-sess-after',closed:'m-sess-closed'};
 function mUpdateSession(session) {
+  _mLastSession = session || 'closed';
   const el = document.getElementById('m-session-badge');
   if (!el) return;
   el.textContent = _M_SESS_LABELS[session] || (session||'closed').toUpperCase();
@@ -5894,6 +5895,10 @@ function mUpdateSession(session) {
 }
 
 // ── Mobile market open/close countdown ────────────────────────────────────
+// Session truth comes from the backend (via SSE state.market_session) so
+// holidays are handled correctly — never compute open/closed from local time alone.
+let _mLastSession = 'closed';
+
 function mMarketCountdown() {
   const labelEl = document.getElementById('m-mc-label');
   const valEl   = document.getElementById('m-mc-val');
@@ -5908,27 +5913,29 @@ function mMarketCountdown() {
   const dow = new Date(p.year, p.month - 1, p.day).getDay();
   const secOfDay = h * 3600 + min * 60 + s;
   const OPEN = 9 * 3600 + 30 * 60, CLOSE = 16 * 3600;
-  const isWeekday = dow >= 1 && dow <= 5;
   function fmt(secs) {
     secs = Math.max(0, secs);
     const hh = Math.floor(secs / 3600), mm = Math.floor((secs % 3600) / 60), ss = secs % 60;
     return hh > 0 ? `${hh}h ${String(mm).padStart(2,'0')}m`
                   : `${String(mm).padStart(2,'0')}m ${String(ss).padStart(2,'0')}s`;
   }
-  if (!isWeekday) {
-    const daysUntilMon = dow === 0 ? 1 : 2;
-    labelEl.textContent = 'Opens in';
-    valEl.textContent   = fmt(daysUntilMon * 86400 + OPEN - secOfDay);
-  } else if (secOfDay < OPEN) {
-    labelEl.textContent = 'Opens in';
-    valEl.textContent   = fmt(OPEN - secOfDay);
-  } else if (secOfDay < CLOSE) {
+  // Use backend session as truth — open/premarket = market is or will shortly be open
+  const isOpen = _mLastSession === 'open' || _mLastSession === 'premarket';
+  if (isOpen) {
     labelEl.textContent = 'Closes in';
-    valEl.textContent   = fmt(CLOSE - secOfDay);
+    valEl.textContent   = fmt(Math.max(0, CLOSE - secOfDay));
   } else {
-    const daysAhead = dow === 5 ? 3 : 1;
+    // Closed or afterhours — find seconds until next 9:30 ET open
     labelEl.textContent = 'Opens in';
-    valEl.textContent   = fmt(daysAhead * 86400 + OPEN - secOfDay);
+    let secsUntilOpen;
+    if (secOfDay < OPEN && dow >= 1 && dow <= 5) {
+      secsUntilOpen = OPEN - secOfDay;
+    } else {
+      // Count forward to the next weekday open
+      const daysAhead = dow === 5 ? 3 : dow === 6 ? 2 : 1;
+      secsUntilOpen = daysAhead * 86400 + OPEN - secOfDay;
+    }
+    valEl.textContent = fmt(secsUntilOpen);
   }
 }
 mMarketCountdown();
