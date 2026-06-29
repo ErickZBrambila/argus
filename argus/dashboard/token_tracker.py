@@ -26,6 +26,7 @@ _GEMINI_OUTPUT_COST = 0.60 / 1_000_000
 
 _PERSIST_PATH = pathlib.Path(__file__).parent.parent.parent / "token_usage.json"
 _TOTAL_PERSIST_PATH = pathlib.Path(__file__).parent.parent.parent / "total_token_usage.json"
+_MONTHLY_PERSIST_PATH = pathlib.Path(__file__).parent.parent.parent / "monthly_token_usage.json"
 
 
 @dataclass
@@ -41,9 +42,11 @@ class TokenTracker:
     def __init__(self) -> None:
         self._lock   = threading.Lock()
         self._day    = datetime.date.today()
+        self._month  = self._day.strftime("%Y-%m")
         self._claude = _ModelStats()
         self._gemini = _ModelStats()
-        self._total_cost_usd = 0.0
+        self._total_cost_usd   = 0.0
+        self._monthly_cost_usd = 0.0
         self._load()
 
     def _load(self) -> None:
@@ -66,10 +69,15 @@ class TokenTracker:
                         output_tokens=g.get("output_tokens", 0),
                         cost_usd=g.get("cost_usd", 0.0),
                     )
-            
+
             if _TOTAL_PERSIST_PATH.exists():
                 total_data = json.loads(_TOTAL_PERSIST_PATH.read_text())
                 self._total_cost_usd = total_data.get("total_cost_usd", 0.0)
+
+            if _MONTHLY_PERSIST_PATH.exists():
+                mdata = json.loads(_MONTHLY_PERSIST_PATH.read_text())
+                if mdata.get("month") == self._month:
+                    self._monthly_cost_usd = mdata.get("monthly_cost_usd", 0.0)
         except Exception as exc:
             logger.debug("Token tracker load failed: %s", exc)
 
@@ -94,6 +102,10 @@ class TokenTracker:
             _TOTAL_PERSIST_PATH.write_text(json.dumps({
                 "total_cost_usd": round(self._total_cost_usd, 6),
             }))
+            _MONTHLY_PERSIST_PATH.write_text(json.dumps({
+                "month": self._month,
+                "monthly_cost_usd": round(self._monthly_cost_usd, 6),
+            }))
         except Exception as exc:
             logger.debug("Token tracker save failed: %s", exc)
 
@@ -103,6 +115,10 @@ class TokenTracker:
             self._day    = today
             self._claude = _ModelStats()
             self._gemini = _ModelStats()
+            new_month = today.strftime("%Y-%m")
+            if new_month != self._month:
+                self._month = new_month
+                self._monthly_cost_usd = 0.0
 
     def record_claude(self, input_tokens: int, output_tokens: int, cache_read_tokens: int = 0) -> None:
         cost = (
@@ -118,6 +134,7 @@ class TokenTracker:
             self._claude.cache_read_tokens += cache_read_tokens
             self._claude.cost_usd          += cost
             self._total_cost_usd           += cost
+            self._monthly_cost_usd         += cost
             self._save()
 
     def record_gemini(self, input_tokens: int, output_tokens: int) -> None:
@@ -129,6 +146,7 @@ class TokenTracker:
             self._gemini.output_tokens += output_tokens
             self._gemini.cost_usd      += cost
             self._total_cost_usd       += cost
+            self._monthly_cost_usd     += cost
             self._save()
 
     def get_summary(self) -> dict:
@@ -149,9 +167,11 @@ class TokenTracker:
                     "output_tokens": self._gemini.output_tokens,
                     "cost_usd":      round(self._gemini.cost_usd, 4),
                 },
-                "total_calls":    self._claude.calls + self._gemini.calls,
-                "total_cost_usd": round(self._claude.cost_usd + self._gemini.cost_usd, 4),
+                "total_calls":       self._claude.calls + self._gemini.calls,
+                "total_cost_usd":    round(self._claude.cost_usd + self._gemini.cost_usd, 4),
                 "lifetime_cost_usd": round(self._total_cost_usd, 4),
+                "monthly_cost_usd":  round(self._monthly_cost_usd, 4),
+                "month":             self._month,
             }
 
 

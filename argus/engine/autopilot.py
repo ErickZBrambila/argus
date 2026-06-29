@@ -1276,6 +1276,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             "next_scan_at":      self._next_scan_at.isoformat() if self._next_scan_at else None,
             "token_usage":       tokens,
             "equity_goal":       self._cfg.equity_goal,
+            "monthly_api_budget": self._cfg.monthly_api_budget,
             "performance":       perf,
             "readiness_scorecard": scorecard,
             "ai_vote":           self._last_ai_vote,

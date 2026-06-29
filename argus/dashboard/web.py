@@ -2952,20 +2952,24 @@ function renderTokenUsage(usage) {
   const g = usage.gemini || {};
   const fmtN = n => (n || 0).toLocaleString();
   const fmtC = n => '$' + (n || 0).toFixed(4);
+  const fmtC2 = n => '$' + (n || 0).toFixed(2);
   const fmtAvg = n => '$' + (n || 0).toFixed(5);
 
-  // Avg cost per call
   const cAvg = c.calls ? c.cost_usd / c.calls : 0;
   const gAvg = g.calls ? g.cost_usd / g.calls : 0;
   const totalAvg = usage.total_calls ? usage.total_cost_usd / usage.total_calls : 0;
-
-  // Color thresholds: Claude thinking-off ≈ $0.0025/call; thinking-on ≈ $0.010/call
   const cAvgCls = cAvg > 0.005 ? 'red' : cAvg > 0.002 ? 'yellow' : cAvg > 0 ? 'green' : '';
-  // Gemini baseline ≈ $0.0001/call
   const gAvgCls = gAvg > 0.001 ? 'red' : gAvg > 0.0005 ? 'yellow' : gAvg > 0 ? 'green' : '';
 
   const aiStatus = (window._argusState && window._argusState.ai_status) || {};
   const aiModels = (window._argusState && window._argusState.ai_models) || {};
+  const budget   = (window._argusState && window._argusState.monthly_api_budget) || 10;
+  const monthly  = usage.monthly_cost_usd || 0;
+  const lifetime = usage.lifetime_cost_usd || 0;
+  const budgetPct = Math.min(100, (monthly / budget) * 100);
+  const budgetRemaining = Math.max(0, budget - monthly);
+  const budgetColor = budgetPct > 90 ? '#e05a5a' : budgetPct > 70 ? '#f0b429' : '#4caf82';
+
   const statusDot = (model) => {
     const s = aiStatus[model] || 'gray';
     const colors = { green: '#4caf82', yellow: '#f0b429', red: '#e05a5a', gray: '#555' };
@@ -2976,18 +2980,31 @@ function renderTokenUsage(usage) {
   const geminiModel = (aiModels.gemini || 'gemini').replace('gemini-','');
 
   grid.innerHTML = `
+    <div class="token-model" style="grid-column:1/-1;background:var(--surface2);border-radius:var(--radius);padding:12px 14px;margin-bottom:4px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+        <span style="font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Monthly Budget · ${usage.month || ''}</span>
+        <span style="font-family:var(--mono);font-size:13px">${fmtC2(monthly)} <span style="color:var(--muted)">/ ${fmtC2(budget)}</span></span>
+      </div>
+      <div style="background:var(--surface);border-radius:4px;height:8px;overflow:hidden">
+        <div style="background:${budgetColor};width:${budgetPct.toFixed(1)}%;height:100%;border-radius:4px;transition:width .4s"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:5px;font-size:11px">
+        <span style="color:${budgetColor}">${budgetPct.toFixed(1)}% used</span>
+        <span style="color:var(--muted)">${fmtC2(budgetRemaining)} remaining · lifetime ${fmtC2(lifetime)}</span>
+      </div>
+    </div>
     <div class="token-model">
       <div class="token-model-title claude">${statusDot('claude')}Claude · ${claudeModel}</div>
-      <div class="token-cost ${c.cost_usd > 0.5 ? 'red' : 'green'}">${fmtC(c.cost_usd)}</div>
+      <div class="token-cost ${c.cost_usd > 0.5 ? 'red' : 'green'}">${fmtC(c.cost_usd)} <span style="font-size:12px;font-weight:400;color:var(--muted)">today</span></div>
       <div class="token-row"><span class="token-label">Calls</span><span class="token-val">${fmtN(c.calls)}</span></div>
-      <div class="token-row"><span class="token-label">Avg/call</span><span class="token-val ${cAvgCls}" title="${cAvg > 0.005 ? 'High — thinking may be on' : cAvg > 0.002 ? 'Moderate' : 'Normal'}">${fmtAvg(cAvg)}</span></div>
+      <div class="token-row"><span class="token-label">Avg/call</span><span class="token-val ${cAvgCls}">${fmtAvg(cAvg)}</span></div>
       <div class="token-row"><span class="token-label">Input</span><span class="token-val">${fmtN(c.input_tokens)}</span></div>
       <div class="token-row"><span class="token-label">Output</span><span class="token-val">${fmtN(c.output_tokens)}</span></div>
       <div class="token-row"><span class="token-label">Cache read</span><span class="token-val">${fmtN(c.cache_read_tokens)}</span></div>
     </div>
     <div class="token-model">
       <div class="token-model-title gemini">${statusDot('gemini')}Gemini · ${geminiModel}</div>
-      <div class="token-cost ${g.cost_usd > 0.1 ? 'yellow' : 'green'}">${fmtC(g.cost_usd)}</div>
+      <div class="token-cost ${g.cost_usd > 0.1 ? 'yellow' : 'green'}">${fmtC(g.cost_usd)} <span style="font-size:12px;font-weight:400;color:var(--muted)">today</span></div>
       <div class="token-row"><span class="token-label">Calls</span><span class="token-val">${fmtN(g.calls)}</span></div>
       <div class="token-row"><span class="token-label">Avg/call</span><span class="token-val ${gAvgCls}">${fmtAvg(gAvg)}</span></div>
       <div class="token-row"><span class="token-label">Input</span><span class="token-val">${fmtN(g.input_tokens)}</span></div>

@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     # Goal tracking — target equity to lift PDT restriction
     equity_goal: float = Field(25_000.0, alias="EQUITY_GOAL")
 
+    # Monthly API spend budget in USD — shown in dashboard token section
+    monthly_api_budget: float = Field(10.0, alias="MONTHLY_API_BUDGET")
+
     # Risk parameters
     max_position_pct: float = Field(0.10, alias="MAX_POSITION_PCT")
     stop_loss_pct: float = Field(0.05, alias="STOP_LOSS_PCT")
