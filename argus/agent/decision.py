@@ -147,8 +147,14 @@ class _GeminiEngine:
             max_output_tokens=1024,
             thinking_config=_gt.ThinkingConfig(thinking_budget=0),
         )
+        self._quota_exhausted_until: float = 0.0  # epoch seconds
 
     def decide(self, symbol: str, prompt: str) -> TradeDecision:
+        import time
+        # Skip calls for the rest of the day if quota was exhausted
+        if time.time() < self._quota_exhausted_until:
+            return _error_hold(symbol, "Gemini quota exhausted — running Claude-only", "gemini")
+
         try:
             response = self._client.models.generate_content(
                 model=self._model,
@@ -175,8 +181,18 @@ class _GeminiEngine:
             _ai_status["gemini"] = "green"
             return d
         except Exception as exc:
+            err_str = str(exc)
             logger.error("Gemini decision failed for %s: %s", symbol, exc)
-            _ai_status["gemini"] = _classify_error(exc)
+            status = _classify_error(exc)
+            _ai_status["gemini"] = status
+            # On quota exhaustion (429), pause Gemini for the rest of the trading day
+            if "429" in err_str or "quota" in err_str.lower() or "resource_exhausted" in err_str.lower():
+                import time, datetime as _dt
+                now = _dt.datetime.now()
+                midnight = _dt.datetime.combine(now.date() + _dt.timedelta(days=1), _dt.time.min)
+                self._quota_exhausted_until = midnight.timestamp()
+                logger.warning("Gemini daily quota exhausted — switching to Claude-only until midnight")
+                _ai_status["gemini"] = "yellow"
             return _error_hold(symbol, f"Gemini error: {exc}", "gemini")
 
 

@@ -815,6 +815,15 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
             return
 
+        # Don't queue a duplicate if a BUY for this symbol is already pending
+        already_pending = any(
+            info.get("symbol") == symbol and info.get("action") == "BUY"
+            for info in acct.pending_approvals.values()
+        )
+        if already_pending:
+            logger.debug("[%s][%s] BUY already pending approval — skipping duplicate", acct.label, symbol)
+            return
+
         trade_id = str(uuid.uuid4())
         trade_info = {
             "trade_id": trade_id,
