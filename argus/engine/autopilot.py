@@ -152,7 +152,7 @@ class Autopilot:
                 account_number=self._cfg.default_account_number,
                 broker=_make_broker(self._cfg.default_account_number),
                 risk=_make_risk(),
-                auto_trade=False,
+                auto_trade=True,
             ))
 
         if not self._accounts:
@@ -195,8 +195,8 @@ class Autopilot:
 
         for acct in self._accounts:
             logger.info(
-                "Account [%s] %s — auto=%s",
-                acct.label, acct.account_number or "(default)", acct.auto_trade,
+                "Account [%s] %s — auto=True, large-trade approval threshold=$%.0f",
+                acct.label, acct.account_number or "(default)", self._cfg.large_trade_threshold,
             )
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
@@ -705,7 +705,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 from argus.storage.models import get_exit_only_symbols
                 _exit_only = get_exit_only_symbols(session)
                 _sell_by   = get_sell_by_dates(session)
-                _db_day_trades = count_day_trades_last_5_days(session)
+                _db_day_trades = count_day_trades_last_5_days(session, acct.label)
         except Exception as exc:
             logger.error("[%s] Could not load sell constraints: %s", acct.label, exc)
             _exit_only, _sell_by, _db_day_trades = set(), {}, 0
@@ -806,10 +806,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         sig: SignalResult,
         signal_obj: Optional[SignalResult] = None,
     ) -> None:
-        needs_approval = (
-            not acct.auto_trade
-            and _RISK_ORDER.get(decision.risk_level, 1) >= _RISK_ORDER.get(self._cfg.approval_threshold, 1)
-        )
+        needs_approval = dollar_amount > self._cfg.large_trade_threshold
 
         if not needs_approval:
             self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
@@ -846,10 +843,10 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             "queued_at": datetime.datetime.now(_UTC).isoformat(),
         }
         web_dashboard.queue_approval(trade_id, trade_info)
-        logger.info("[%s][%s] BUY queued for approval (risk=%s) id=%s", acct.label, symbol, decision.risk_level, trade_id)
+        logger.info("[%s][%s] BUY queued for approval (large trade $%.2f) id=%s", acct.label, symbol, dollar_amount, trade_id)
         self._notifier.send(
             f"[{acct.label.upper()}] Approval needed: BUY {symbol}",
-            f"{decision.risk_level.upper()} RISK — ${dollar_amount:.2f} · conf {decision.confidence:.0%}\n{decision.reasoning[:200]}\nApprove at http://{self._cfg.web_host}:{self._cfg.web_port}",
+            f"LARGE TRADE ${dollar_amount:.2f} (>{self._cfg.large_trade_threshold:.0f}) · {decision.risk_level.upper()} RISK · conf {decision.confidence:.0%}\n{decision.reasoning[:200]}\nApprove at http://{self._cfg.web_host}:{self._cfg.web_port}",
         )
 
     _APPROVAL_TTL_SECONDS = 1800  # 30 minutes
@@ -859,8 +856,6 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
     def _poll_approvals(self) -> None:
         now = datetime.datetime.now(_UTC)
         for acct in self._accounts:
-            if acct.auto_trade:
-                continue
             for trade_id in list(acct.pending_approvals):
                 info = acct.pending_approvals[trade_id]
                 sym = info.get("symbol", "")
@@ -1020,7 +1015,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 # Detect day trade: same symbol bought today on this account
                 if self._is_day_trade(acct, symbol):
                     acct.risk.record_day_trade()
-                    increment_day_trades(session)
+                    increment_day_trades(session, acct.label)
         except Exception as exc:
             logger.critical(
                 "[%s] BROKER SELL MAY HAVE FILLED BUT DB WRITE FAILED for %s: %s — check brokerage positions!",
@@ -1132,7 +1127,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             return
 
         with get_session() as session:
-            db_day_trades = count_day_trades_last_5_days(session)
+            db_day_trades = count_day_trades_last_5_days(session, to_acct.label)
         risk_check = to_acct.risk.approve_buy(symbol, to_equity, to_positions, db_day_trades)
         if not risk_check.allowed:
             logger.critical(
@@ -1276,7 +1271,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             "next_scan_at":      self._next_scan_at.isoformat() if self._next_scan_at else None,
             "token_usage":       tokens,
             "equity_goal":       self._cfg.equity_goal,
-            "monthly_api_budget": self._cfg.monthly_api_budget,
+            "monthly_api_budget":    self._cfg.monthly_api_budget,
+            "large_trade_threshold": self._cfg.large_trade_threshold,
             "performance":       perf,
             "readiness_scorecard": scorecard,
             "ai_vote":           self._last_ai_vote,
@@ -1295,7 +1291,6 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         today = datetime.date.today()
         restored_ks: list[str] = []
         with get_session() as session:
-            today_dt = get_today_day_trades(session)
             for acct in self._accounts:
                 row = get_or_create_account_daily_stats(
                     session, today, acct.label, acct.risk.session_entry_equity
@@ -1309,8 +1304,9 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     restored_ks.append(acct.label)
                 else:
                     acct.risk._kill_switch = False
-                # Seed today's in-memory day trade count from DB so restarts don't
+                # Seed today's per-account day trade count from DB so restarts don't
                 # under-count and mistakenly allow buys that would breach PDT.
+                today_dt = get_today_day_trades(session, acct.label)
                 if today_dt > acct.risk._day_trade_count:
                     acct.risk._day_trade_count = today_dt
         if restored_ks:

@@ -135,7 +135,8 @@ def register_autopilot(ap) -> None:
 
 # ── Approval queue (thread-safe: accessed by both sync main loop and async FastAPI) ──
 _approval_lock = threading.Lock()
-_pending_approvals: dict[str, dict] = {}   # trade_id → trade info
+_pending_approvals: dict[str, dict] = {}   # trade_id → trade info (awaiting user decision)
+_decided_approvals: dict[str, dict] = {}   # trade_id → {decision, info} (decided, awaiting execution)
 _approval_decisions: dict[str, str] = {}   # trade_id → "approved" | "denied"
 _APPROVAL_PERSIST_PATH = _pathlib.Path(__file__).parent.parent.parent / "approval_queue.json"
 
@@ -185,6 +186,7 @@ def get_approval_decision(trade_id: str) -> str | None:
 def clear_approval(trade_id: str) -> None:
     with _approval_lock:
         _pending_approvals.pop(trade_id, None)
+        _decided_approvals.pop(trade_id, None)
         _approval_decisions.pop(trade_id, None)
     _approval_save()
     _push_approvals_state()
@@ -192,7 +194,10 @@ def clear_approval(trade_id: str) -> None:
 
 def _push_approvals_state() -> None:
     with _approval_lock:
-        approvals = dict(_pending_approvals)
+        # Pending = awaiting user decision; decided = approved/denied, awaiting execution
+        approvals = {**_pending_approvals}
+        for tid, info in _decided_approvals.items():
+            approvals[tid] = {**info, "_decided": _approval_decisions.get(tid, "approved")}
     with _state_lock:
         _state["pending_approvals"] = approvals
         snapshot = {**_state, "alert_log": list(_alert_log)}
@@ -1060,10 +1065,14 @@ async def get_approvals() -> dict:
 @app.post("/api/approve/{trade_id}", dependencies=[Depends(_require_auth)])
 async def approve_trade(trade_id: str) -> dict:
     with _approval_lock:
-        if trade_id not in _pending_approvals:
+        if trade_id not in _pending_approvals and trade_id not in _decided_approvals:
             raise HTTPException(status_code=404, detail="Trade not found or already decided")
-        _approval_decisions[trade_id] = "approved"
+        if trade_id in _pending_approvals:
+            info = _pending_approvals.pop(trade_id)
+            _decided_approvals[trade_id] = info
+            _approval_decisions[trade_id] = "approved"
     logger.info("Trade %s approved via dashboard", trade_id)
+    _approval_save()
     _push_approvals_state()
     return {"status": "approved", "trade_id": trade_id}
 
@@ -1071,10 +1080,13 @@ async def approve_trade(trade_id: str) -> dict:
 @app.post("/api/deny/{trade_id}", dependencies=[Depends(_require_auth)])
 async def deny_trade(trade_id: str) -> dict:
     with _approval_lock:
-        if trade_id not in _pending_approvals:
+        if trade_id not in _pending_approvals and trade_id not in _decided_approvals:
             raise HTTPException(status_code=404, detail="Trade not found or already decided")
-        _approval_decisions[trade_id] = "denied"
+        if trade_id in _pending_approvals:
+            _pending_approvals.pop(trade_id)
+            _approval_decisions[trade_id] = "denied"
     logger.info("Trade %s denied via dashboard", trade_id)
+    _approval_save()
     _push_approvals_state()
     return {"status": "denied", "trade_id": trade_id}
 
@@ -1088,6 +1100,133 @@ async def clear_alerts() -> dict:
         snapshot = {**_state, "alert_log": []}
     _sse_push(json.dumps(snapshot, default=str))
     return {"status": "cleared"}
+
+
+# ── Settings (.env editor) ───────────────────────────────────────────────────
+
+_ENV_FILE_PATH = _pathlib.Path(".env")
+
+# Keys the UI is allowed to read/write — secrets are intentionally excluded.
+_SETTINGS_EDITABLE: dict[str, dict] = {
+    # Trading
+    "PAPER_TRADE":           {"type": "bool",   "label": "Paper Trade Mode",            "group": "Trading"},
+    "WATCHLIST":             {"type": "str",    "label": "Watchlist (comma-separated)", "group": "Trading"},
+    # Risk
+    "LARGE_TRADE_THRESHOLD": {"type": "float",  "label": "Large Trade Threshold ($)",   "group": "Risk", "min": 0, "step": 50},
+    "MAX_POSITION_PCT":      {"type": "float",  "label": "Max Position %",              "group": "Risk", "min": 0.01, "max": 0.25, "step": 0.01},
+    "STOP_LOSS_PCT":         {"type": "float",  "label": "Stop Loss %",                 "group": "Risk", "min": 0.01, "max": 0.25, "step": 0.01},
+    "MAX_POSITIONS":         {"type": "int",    "label": "Max Open Positions",          "group": "Risk", "min": 1, "max": 20},
+    "DAILY_DRAWDOWN_LIMIT":  {"type": "float",  "label": "Daily Drawdown Limit",        "group": "Risk", "min": -1.0, "max": -0.01, "step": 0.01},
+    # Goals
+    "EQUITY_GOAL":           {"type": "float",  "label": "Equity Goal ($)",             "group": "Goals", "min": 0, "step": 1000},
+    "MONTHLY_API_BUDGET":    {"type": "float",  "label": "Monthly API Budget ($)",      "group": "Goals", "min": 0, "step": 1},
+    # Scan intervals
+    "INTERVAL_OPEN":         {"type": "int",    "label": "Scan — Market Open (sec)",    "group": "Intervals", "min": 30},
+    "INTERVAL_PREMARKET":    {"type": "int",    "label": "Scan — Pre-market (sec)",     "group": "Intervals", "min": 30},
+    "INTERVAL_AFTERHOURS":   {"type": "int",    "label": "Scan — After-hours (sec)",    "group": "Intervals", "min": 30},
+    "INTERVAL_CLOSED":       {"type": "int",    "label": "Scan — Closed (sec)",         "group": "Intervals", "min": 30},
+    # Notifications
+    "NTFY_URL":              {"type": "str",    "label": "ntfy URL",                    "group": "Notifications"},
+    # Models
+    "CLAUDE_MODEL":          {"type": "str",    "label": "Claude Model",                "group": "Models"},
+    "GEMINI_MODEL":          {"type": "str",    "label": "Gemini Model",                "group": "Models"},
+}
+
+
+def _env_read() -> dict[str, str]:
+    """Parse .env into a key→value dict, skipping comments and blanks."""
+    result: dict[str, str] = {}
+    if not _ENV_FILE_PATH.exists():
+        return result
+    for line in _ENV_FILE_PATH.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        k, _, v = stripped.partition("=")
+        result[k.strip()] = v.strip()
+    return result
+
+
+def _env_write(updates: dict[str, str]) -> None:
+    """Update specific keys in .env, preserving comments and structure.
+    Keys that don't exist yet are appended at the end."""
+    lines = _ENV_FILE_PATH.read_text().splitlines() if _ENV_FILE_PATH.exists() else []
+    written: set[str] = set()
+    new_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            new_lines.append(line)
+            continue
+        k, _, _ = stripped.partition("=")
+        k = k.strip()
+        if k in updates:
+            new_lines.append(f"{k}={updates[k]}")
+            written.add(k)
+        else:
+            new_lines.append(line)
+    for k, v in updates.items():
+        if k not in written:
+            new_lines.append(f"{k}={v}")
+    _ENV_FILE_PATH.write_text("\n".join(new_lines) + "\n")
+
+
+@app.get("/api/settings", dependencies=[Depends(_require_auth)])
+async def api_get_settings() -> dict:
+    from argus.config import get_settings as _get_cfg
+    current = _env_read()
+    cfg = _get_cfg()
+    # Alias map: env key → config field name
+    _cfg_alias = {
+        "PAPER_TRADE": "paper_trade",
+        "WATCHLIST": "watchlist_raw",
+        "LARGE_TRADE_THRESHOLD": "large_trade_threshold",
+        "MAX_POSITION_PCT": "max_position_pct",
+        "STOP_LOSS_PCT": "stop_loss_pct",
+        "MAX_POSITIONS": "max_positions",
+        "DAILY_DRAWDOWN_LIMIT": "daily_drawdown_limit",
+        "EQUITY_GOAL": "equity_goal",
+        "MONTHLY_API_BUDGET": "monthly_api_budget",
+        "INTERVAL_OPEN": "interval_open",
+        "INTERVAL_PREMARKET": "interval_premarket",
+        "INTERVAL_AFTERHOURS": "interval_afterhours",
+        "INTERVAL_CLOSED": "interval_closed",
+        "NTFY_URL": "ntfy_url",
+        "CLAUDE_MODEL": "claude_model",
+        "GEMINI_MODEL": "gemini_model",
+    }
+    values = {}
+    for k in _SETTINGS_EDITABLE:
+        if k in current and current[k] != "":
+            values[k] = current[k]
+        else:
+            attr = _cfg_alias.get(k)
+            if attr:
+                raw = getattr(cfg, attr, "")
+                values[k] = str(raw).lower() if isinstance(raw, bool) else str(raw)
+            else:
+                values[k] = ""
+    return {"fields": _SETTINGS_EDITABLE, "values": values}
+
+
+@app.post("/api/settings", dependencies=[Depends(_require_auth)])
+async def api_post_settings(payload: dict) -> dict:
+    unknown = set(payload) - set(_SETTINGS_EDITABLE)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown keys: {', '.join(sorted(unknown))}")
+    # Validate types lightly
+    for k, v in payload.items():
+        meta = _SETTINGS_EDITABLE[k]
+        if meta["type"] == "bool" and str(v).lower() not in ("true", "false"):
+            raise HTTPException(status_code=400, detail=f"{k} must be true or false")
+        if meta["type"] in ("int", "float"):
+            try:
+                float(v)
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail=f"{k} must be a number")
+    _env_write(payload)
+    logger.info("Settings updated via dashboard: %s", list(payload.keys()))
+    return {"ok": True, "message": "Settings saved — restart Argus to apply changes."}
 
 
 # ── Backtester ───────────────────────────────────────────────────────────────
@@ -1670,6 +1809,18 @@ _HTML = """<!DOCTYPE html>
 
   /* ── Investigations tab ─────────────────────────────────────────────────── */
   #tab-investigations.active { display: flex !important; flex-direction: column; grid-template-columns: none; gap: 14px; }
+  #tab-settings.active { display: block; grid-template-columns: none; }
+  .settings-group { margin-bottom: 4px; }
+  .settings-group-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin-bottom: 10px; }
+  .settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  .settings-field { display: flex; flex-direction: column; gap: 5px; }
+  .settings-field label { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .settings-field input[type=text],
+  .settings-field input[type=number] { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px 10px; color: var(--text); font-size: 13px; font-family: var(--mono); width: 100%; box-sizing: border-box; }
+  .settings-field input:focus { outline: none; border-color: var(--accent); }
+  .settings-field .settings-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 6px 0; }
+  .settings-field .settings-toggle input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+  .settings-sep { border: none; border-top: 1px solid var(--border); margin: 18px 0 16px; }
   .inv-add-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .inv-slots { font-size: 12px; color: var(--muted); margin-left: 4px; }
   .inv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
@@ -2146,6 +2297,7 @@ _HTML = """<!DOCTYPE html>
     .tab-btn:nth-child(3)::before { mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"></path><path d="M18 17V9"></path><path d="M13 17V5"></path><path d="M8 17v-3"></path></svg>') no-repeat center; -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"></path><path d="M18 17V9"></path><path d="M13 17V5"></path><path d="M8 17v-3"></path></svg>') no-repeat center; }
     .tab-btn:nth-child(4)::before { mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>') no-repeat center; -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>') no-repeat center; }
     .tab-btn:nth-child(5)::before { mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>') no-repeat center; -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>') no-repeat center; }
+    .tab-btn:nth-child(6)::before { mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>') no-repeat center; -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>') no-repeat center; }
 
     /* Header right: drop low-priority items to save space */
     .countdown-wrap { display: none; }
@@ -2238,6 +2390,7 @@ _HTML = """<!DOCTYPE html>
     <button class="tab-btn" onclick="switchTab('charts')">Charts</button>
     <button class="tab-btn" onclick="switchTab('investigations')">Investigations</button>
     <button class="tab-btn" onclick="switchTab('alerts')" id="alerts-tab-btn">Alerts</button>
+    <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
   </nav>
   <main>
 
@@ -2545,6 +2698,24 @@ _HTML = """<!DOCTYPE html>
     </div>
   </div><!-- /tab-alerts -->
 
+  <div class="tab-pane" id="tab-settings">
+    <div class="card card-full" style="grid-column:1/-1">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <h2 class="card-title" style="margin:0">Settings</h2>
+        <span class="muted" style="font-size:12px">Edits write to .env — restart Argus to apply</span>
+      </div>
+      <div id="settings-restart-banner" style="display:none;background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.35);border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:var(--yellow)">
+        Settings saved. Restart Argus to apply changes.
+      </div>
+      <div id="settings-error-banner" style="display:none;background:rgba(231,76,60,.12);border:1px solid rgba(231,76,60,.35);border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:var(--red)"></div>
+      <div id="settings-form-body" style="display:grid;gap:20px"></div>
+      <div style="margin-top:20px;display:flex;gap:10px;align-items:center">
+        <button class="btn" onclick="settingsSave()">Save Changes</button>
+        <button class="btn btn-ghost" onclick="settingsLoad()">Reset</button>
+      </div>
+    </div>
+  </div><!-- /tab-settings -->
+
   </main>
   <p class="timestamp" id="last-update" style="padding: 0 24px 16px;">Last update: —</p>
 </div>
@@ -2578,8 +2749,99 @@ function switchTab(name) {
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
   if (name === 'charts') {
     ctInitSortable();
-    // Initialize any charts that were deferred (created while tab was hidden)
     requestAnimationFrame(ctInitChartsForVisible);
+  }
+  if (name === 'settings') settingsLoad();
+}
+
+// ── Settings tab ─────────────────────────────────────────────────────────────
+let _settingsFields = {};
+let _settingsValues = {};
+
+async function settingsLoad() {
+  try {
+    const r = await apiFetch('/api/settings');
+    const data = await r.json();
+    _settingsFields = data.fields || {};
+    _settingsValues = data.values || {};
+    settingsRender();
+  } catch(e) { console.error('Settings load failed', e); }
+}
+
+function settingsRender() {
+  const body = document.getElementById('settings-form-body');
+  if (!body) return;
+  // Group fields
+  const groups = {};
+  for (const [key, meta] of Object.entries(_settingsFields)) {
+    const g = meta.group || 'Other';
+    if (!groups[g]) groups[g] = [];
+    groups[g].push([key, meta]);
+  }
+  let html = '';
+  let first = true;
+  for (const [group, fields] of Object.entries(groups)) {
+    if (!first) html += '<hr class="settings-sep">';
+    first = false;
+    html += `<div class="settings-group"><div class="settings-group-title">${group}</div><div class="settings-grid">`;
+    for (const [key, meta] of fields) {
+      const val = _settingsValues[key] ?? '';
+      if (meta.type === 'bool') {
+        const checked = val.toLowerCase() === 'true' ? 'checked' : '';
+        html += `<div class="settings-field">
+          <label class="settings-toggle">
+            <input type="checkbox" id="sf_${key}" ${checked}>
+            <span>${meta.label}</span>
+          </label>
+        </div>`;
+      } else if (meta.type === 'int' || meta.type === 'float') {
+        const step = meta.step ?? (meta.type === 'float' ? 0.01 : 1);
+        const min  = meta.min  !== undefined ? `min="${meta.min}"` : '';
+        const max  = meta.max  !== undefined ? `max="${meta.max}"` : '';
+        html += `<div class="settings-field">
+          <label for="sf_${key}">${meta.label}</label>
+          <input type="number" id="sf_${key}" value="${val}" step="${step}" ${min} ${max}>
+        </div>`;
+      } else {
+        html += `<div class="settings-field">
+          <label for="sf_${key}">${meta.label}</label>
+          <input type="text" id="sf_${key}" value="${val}">
+        </div>`;
+      }
+    }
+    html += '</div></div>';
+  }
+  body.innerHTML = html;
+}
+
+async function settingsSave() {
+  const payload = {};
+  for (const [key, meta] of Object.entries(_settingsFields)) {
+    const el = document.getElementById('sf_' + key);
+    if (!el) continue;
+    if (meta.type === 'bool') {
+      payload[key] = el.checked ? 'true' : 'false';
+    } else {
+      payload[key] = el.value.trim();
+    }
+  }
+  const errBanner = document.getElementById('settings-error-banner');
+  const okBanner  = document.getElementById('settings-restart-banner');
+  errBanner.style.display = 'none';
+  okBanner.style.display  = 'none';
+  try {
+    const r = await apiFetch('/api/settings', {method: 'POST', body: JSON.stringify(payload)});
+    const data = await r.json();
+    if (!r.ok) {
+      errBanner.textContent = data.detail || 'Save failed';
+      errBanner.style.display = 'block';
+      return;
+    }
+    okBanner.style.display = 'block';
+    _settingsValues = payload;
+  } catch(e) {
+    errBanner.textContent = 'Network error: ' + e.message;
+    errBanner.style.display = 'block';
   }
 }
 
@@ -3077,7 +3339,7 @@ function renderGoalBar(equity, goal, cls) {
   </div>`;
 }
 
-function renderAccounts(accounts) {
+function renderAccounts(accounts, state) {
   const panels = document.getElementById('accounts-panels');
   if (!accounts || !Object.keys(accounts).length) return;
 
@@ -3094,8 +3356,9 @@ function renderAccounts(accounts) {
     const resetPnlPct = a.since_reset_pnl_pct ?? null;
     const resetSign = (resetPnl ?? 0) >= 0 ? '+' : '';
     const resetCls = pnlClass(resetPnl ?? 0);
-    const modeLabel = a.auto_trade ? 'AUTO' : 'APPROVAL REQUIRED';
-    const modeCls   = a.auto_trade ? 'acct-mode-auto' : 'acct-mode-approval';
+    const largeThresh = (state && state.large_trade_threshold) || 500;
+    const modeLabel = `AUTO · >$${largeThresh}`;
+    const modeCls   = 'acct-mode-auto';
     const pending   = a.pending_approvals || 0;
     const dayTrades = a.day_trades || 0;
 
@@ -3207,7 +3470,7 @@ function applyState(state) {
   updateAiStatus(state.ai_status);
 
   // Per-account panels
-  renderAccounts(state.accounts);
+  renderAccounts(state.accounts, state);
 
   // Combined totals (hidden elements kept for backwards compat)
   const equity = state.equity || 0;
@@ -3313,8 +3576,13 @@ function applyState(state) {
         </div>
         <div class="approval-reasoning">${escHtml(a.reasoning||'')}</div>
         <div class="approval-actions">
-          <button class="btn btn-primary" onclick="decideApproval('${id}','approve')">✓ Approve</button>
-          <button class="btn btn-danger"  onclick="decideApproval('${id}','deny')">✗ Deny</button>
+          ${a._decided
+            ? `<span style="font-size:12px;font-weight:700;${a._decided==='approved'?'color:var(--bull)':'color:var(--bear)'}">
+                ${a._decided==='approved' ? '✓ Approved — executing at next scan' : '✗ Denied'}
+               </span>`
+            : `<button class="btn btn-primary" onclick="decideApproval('${id}','approve')">✓ Approve</button>
+               <button class="btn btn-danger"  onclick="decideApproval('${id}','deny')">✗ Deny</button>`
+          }
         </div>
       </div>`;
     }).join('');
@@ -5044,10 +5312,19 @@ function renderAlerts(alertLog, pendingApprovals) {
     if (m) {
       const tid = approvalMap[`${m[1].toUpperCase()}|${m[2].toUpperCase()}`];
       if (tid) {
-        actionBtns = `<div class="alert-inline-actions">
-          <button class="alert-inline-btn approve" onclick="decideApproval('${tid}','approve')">✓ Approve</button>
-          <button class="alert-inline-btn deny" onclick="decideApproval('${tid}','deny')">✗ Deny</button>
-        </div>`;
+        const decided = (pendingApprovals[tid] || {})._decided;
+        if (decided) {
+          actionBtns = `<div class="alert-inline-actions">
+            <span style="font-size:12px;font-weight:700;${decided==='approved'?'color:var(--bull)':'color:var(--bear)'}">
+              ${decided==='approved' ? '✓ Approved — executing at next scan' : '✗ Denied'}
+            </span>
+          </div>`;
+        } else {
+          actionBtns = `<div class="alert-inline-actions">
+            <button class="alert-inline-btn approve" onclick="decideApproval('${tid}','approve')">✓ Approve</button>
+            <button class="alert-inline-btn deny" onclick="decideApproval('${tid}','deny')">✗ Deny</button>
+          </div>`;
+        }
       }
     }
     return `<div class="alert-entry ${cls}">

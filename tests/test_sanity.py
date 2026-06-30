@@ -308,29 +308,31 @@ def test_exit_only_can_be_cleared(temp_db):
 def test_count_day_trades_excludes_today(temp_db):
     """count_day_trades_last_5_days must NOT include today — today's trades live in
     RiskManager._day_trade_count to avoid double-counting in approve_buy."""
-    from argus.storage.models import count_day_trades_last_5_days, get_or_create_daily_stats
+    from argus.storage.models import count_day_trades_last_5_days, get_or_create_account_daily_stats
 
     today = datetime.date.today()
+    label = "agentic"
     # offsets: 0=today(1), 1=yesterday(1), 2(0), 3(1), 4(0) → past-only sum = 1+0+1+0 = 2
     with temp_db() as session:
         for offset, trades in enumerate([1, 1, 0, 1, 0]):
-            s = get_or_create_daily_stats(session, today - datetime.timedelta(days=offset), 10_000)
-            s.day_trades = trades
+            row = get_or_create_account_daily_stats(session, today - datetime.timedelta(days=offset), label, 10_000)
+            row.day_trades = trades
 
     with temp_db() as session:
-        total = count_day_trades_last_5_days(session)
+        total = count_day_trades_last_5_days(session, label)
 
     assert total == 2, f"Expected 2 (today excluded), got {total}"
 
 
 def test_get_today_day_trades(temp_db):
-    """get_today_day_trades returns only today's count (used to seed _day_trade_count on restart)."""
-    from argus.storage.models import get_or_create_daily_stats, get_today_day_trades
+    """get_today_day_trades returns only today's per-account count (used to seed _day_trade_count on restart)."""
+    from argus.storage.models import get_or_create_account_daily_stats, get_today_day_trades
 
     today = datetime.date.today()
+    label = "agentic"
     with temp_db() as session:
-        s = get_or_create_daily_stats(session, today, 10_000)
-        s.day_trades = 2
+        row = get_or_create_account_daily_stats(session, today, label, 10_000)
+        row.day_trades = 2
 
     with temp_db() as session:
-        assert get_today_day_trades(session) == 2
+        assert get_today_day_trades(session, label) == 2

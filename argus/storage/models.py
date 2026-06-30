@@ -117,7 +117,7 @@ class DailyStats(Base):
 
 
 class AccountDailyStats(Base):
-    """Per-account starting equity and kill switch state — survives restarts."""
+    """Per-account starting equity, kill switch state, and day trade count — survives restarts."""
     __tablename__ = "account_daily_stats"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -125,6 +125,7 @@ class AccountDailyStats(Base):
     account_label = Column(String(50), nullable=False)
     starting_equity = Column(Float, default=0.0)
     kill_switch_triggered = Column(Boolean, default=False)
+    day_trades = Column(Integer, default=0)
 
     __table_args__ = (UniqueConstraint("date", "account_label", name="uq_account_daily"),)
 
@@ -188,6 +189,10 @@ def _apply_migrations(engine) -> None:
             conn.execute(text("ALTER TABLE watchlist ADD COLUMN exit_only BOOLEAN NOT NULL DEFAULT 0"))
         if "sell_by_date" not in wl_cols:
             conn.execute(text("ALTER TABLE watchlist ADD COLUMN sell_by_date DATE"))
+        # --- account_daily_stats: add day_trades column ---
+        ads_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(account_daily_stats)")).fetchall()}
+        if "day_trades" not in ads_cols:
+            conn.execute(text("ALTER TABLE account_daily_stats ADD COLUMN day_trades INTEGER NOT NULL DEFAULT 0"))
         conn.commit()
 
 
@@ -276,31 +281,40 @@ def get_or_create_daily_stats(session: Session, date_val: datetime.date, startin
     return stats
 
 
-def increment_day_trades(session: Session) -> None:
+def increment_day_trades(session: Session, account_label: str = "main") -> None:
+    """Increment per-account day trade counter for today."""
     today = datetime.date.today()
+    row = session.query(AccountDailyStats).filter_by(date=today, account_label=account_label).first()
+    if row:
+        row.day_trades = (row.day_trades or 0) + 1
+    # Also keep the global DailyStats counter for backwards compatibility / reporting
     stats = session.query(DailyStats).filter_by(date=today).first()
     if stats:
         stats.day_trades = (stats.day_trades or 0) + 1
 
 
-def count_day_trades_last_5_days(session: Session) -> int:
-    """Sum day trades for the past 5 days, EXCLUDING today.
+def count_day_trades_last_5_days(session: Session, account_label: str = "main") -> int:
+    """Sum day trades for the past 5 business days for a specific account, EXCLUDING today.
     Today's trades are tracked in-memory via RiskManager._day_trade_count so they
     are not double-counted when approve_buy adds from_db + _day_trade_count."""
     today = datetime.date.today()
     cutoff = today - datetime.timedelta(days=5)
     result = (
-        session.query(func.sum(DailyStats.day_trades))
-        .filter(DailyStats.date >= cutoff, DailyStats.date < today)
+        session.query(func.sum(AccountDailyStats.day_trades))
+        .filter(
+            AccountDailyStats.account_label == account_label,
+            AccountDailyStats.date >= cutoff,
+            AccountDailyStats.date < today,
+        )
         .scalar()
     )
     return int(result or 0)
 
 
-def get_today_day_trades(session: Session) -> int:
-    """Return today's day trade count from DailyStats (for restart recovery)."""
+def get_today_day_trades(session: Session, account_label: str = "main") -> int:
+    """Return today's day trade count for a specific account (for restart recovery)."""
     today = datetime.date.today()
-    row = session.query(DailyStats).filter_by(date=today).first()
+    row = session.query(AccountDailyStats).filter_by(date=today, account_label=account_label).first()
     return int((row.day_trades or 0) if row else 0)
 
 
