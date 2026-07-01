@@ -173,17 +173,17 @@ class RobinhoodBroker:
             return self._live_get_price(symbol)
         except Exception:
             pass
-        # Fallback to yfinance for crypto (Robinhood auth may be unavailable)
-        if symbol in CRYPTO_SYMBOLS:
-            try:
-                import yfinance as yf
-                t = yf.Ticker(f"{symbol}-USD")
-                info = t.fast_info
-                px = float(info.last_price or info.previous_close or 0)
-                if px > 0:
-                    return px
-            except Exception:
-                pass
+        # Fallback to yfinance when Robinhood is unavailable
+        try:
+            import yfinance as yf
+            ticker = f"{symbol}-USD" if symbol in CRYPTO_SYMBOLS else symbol
+            t = yf.Ticker(ticker)
+            info = t.fast_info
+            px = float(info.last_price or info.previous_close or 0)
+            if px > 0:
+                return px
+        except Exception:
+            pass
         raise RuntimeError(f"Cannot determine price for {symbol} in paper mode")
 
     def get_portfolio_equity(self) -> float:

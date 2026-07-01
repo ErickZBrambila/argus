@@ -31,7 +31,24 @@ def _setup_logging() -> None:
     _install_log_buffer()
 
 
+def _fix_tls_cert() -> None:
+    """Pin REQUESTS_CA_BUNDLE to the certifi from this Python environment.
+
+    Prevents stale DEFAULT_CA_BUNDLE_PATH values (e.g. from a deleted old
+    venv) from breaking HTTPS connections to Robinhood.
+    """
+    try:
+        import certifi
+        cert_path = certifi.where()
+        if cert_path and os.path.exists(cert_path):
+            os.environ.setdefault("REQUESTS_CA_BUNDLE", cert_path)
+            os.environ.setdefault("SSL_CERT_FILE", cert_path)
+    except Exception:
+        pass
+
+
 def main() -> None:
+    _fix_tls_cert()
     _setup_logging()
     pilot = Autopilot()
     pilot.run()

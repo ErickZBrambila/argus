@@ -119,8 +119,9 @@ class Notifier:
             return
         try:
             safe_title = subject.replace("\r", "").replace("\n", " ")[:128]
+            safe_title = safe_title.encode("latin-1", errors="replace").decode("latin-1")
             req = urllib.request.Request(
-                self._ntfy_url, data=body.encode(),
+                self._ntfy_url, data=body.encode("utf-8"),
                 headers={
                     "Title": safe_title,
                     "Priority": "default",

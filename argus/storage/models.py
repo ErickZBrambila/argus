@@ -200,14 +200,14 @@ def init_db(url: str = "sqlite:///argus.db") -> None:
     global _engine, _SessionLocal
     connect_args: dict = {}
     if url.startswith("sqlite"):
-        connect_args = {"check_same_thread": False}
+        connect_args = {"check_same_thread": False, "timeout": 30}
         if url.startswith("sqlite:////") or url.startswith("sqlite:///"):
             db_path = url.replace("sqlite:///", "", 1).replace("sqlite:////", "/", 1)
             if db_path and not db_path.startswith(":"):
                 db_dir = os.path.dirname(os.path.abspath(db_path))
                 os.makedirs(db_dir, exist_ok=True)
 
-    _engine = create_engine(url, connect_args=connect_args, echo=False)
+    _engine = create_engine(url, connect_args=connect_args, pool_pre_ping=True, echo=False)
     Base.metadata.create_all(_engine)
     if url.startswith("sqlite"):
         _apply_migrations(_engine)
