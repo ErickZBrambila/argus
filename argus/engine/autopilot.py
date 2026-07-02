@@ -724,8 +724,14 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                         daily_pnl_pct=daily_pnl_pct,
                         max_positions=self._cfg.max_positions,
                     )
-                    self._last_evaluated_signals[symbol] = sig
-                    self._last_decisions[symbol] = decision
+                    # Don't cache flawed decisions — a model error (e.g. billing
+                    # outage) would otherwise be replayed until the signal shifts
+                    if decision.is_error or decision.partial_error:
+                        self._last_evaluated_signals.pop(symbol, None)
+                        self._last_decisions.pop(symbol, None)
+                    else:
+                        self._last_evaluated_signals[symbol] = sig
+                        self._last_decisions[symbol] = decision
 
                 if decision.is_error:
                     logger.critical(

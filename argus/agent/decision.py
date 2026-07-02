@@ -72,6 +72,7 @@ class TradeDecision:
     models_used: str = "claude"   # "claude" | "gemini" | "ensemble"
     consensus: bool = True        # False when models disagreed → HOLD
     is_error: bool = False        # True when both models failed — caller should alert
+    partial_error: bool = False   # True when one model failed — don't cache/reuse
 
 
 def classify_risk(signal_confidence: float, decision_confidence: float, consensus: bool = True) -> str:
@@ -200,6 +201,7 @@ class _GeminiEngine:
 
 def _consensus(claude: TradeDecision, gemini: TradeDecision, symbol: str) -> TradeDecision:
     ca, ga = claude.action, gemini.action
+    _partial = claude.is_error or gemini.is_error
 
     if ca == ga:
         # Full agreement
@@ -211,6 +213,7 @@ def _consensus(claude: TradeDecision, gemini: TradeDecision, symbol: str) -> Tra
             reasoning=f"[Claude] {claude.reasoning}  [Gemini] {gemini.reasoning}",
             models_used="ensemble",
             consensus=True,
+            partial_error=_partial,
         )
 
     # One HOLD, one directional → majority rules: take the directional action
@@ -232,6 +235,7 @@ def _consensus(claude: TradeDecision, gemini: TradeDecision, symbol: str) -> Tra
             ),
             models_used="ensemble",
             consensus=False,
+            partial_error=_partial,
         )
 
     # Direct contradiction (BUY vs SELL) → hard HOLD, high risk
@@ -249,6 +253,7 @@ def _consensus(claude: TradeDecision, gemini: TradeDecision, symbol: str) -> Tra
         ),
         models_used="ensemble",
         consensus=False,
+        partial_error=_partial,
     )
 
 
