@@ -3119,7 +3119,9 @@ const _SESSION_LABELS = {
   open: 'MARKET OPEN', premarket: 'PRE-MARKET',
   afterhours: 'AFTER-HOURS', closed: 'CLOSED',
 };
+let _lastSession = 'closed';
 function _updateSessionBadge(session) {
+  _lastSession = session || 'closed';
   const el = document.getElementById('session-badge');
   if (!el) return;
   el.textContent = _SESSION_LABELS[session] || session.toUpperCase();
@@ -3127,6 +3129,8 @@ function _updateSessionBadge(session) {
 }
 
 // ── Market open/close countdown ───────────────────────────────────────────────
+// Session truth comes from the backend (via state.market_session) so holidays
+// are handled correctly — never compute open/closed from local time alone.
 function _marketCountdown() {
   const labelEl = document.getElementById('mc-label');
   const valEl   = document.getElementById('mc-val');
@@ -3150,7 +3154,6 @@ function _marketCountdown() {
 
   const OPEN  = 9  * 3600 + 30 * 60;  // 9:30 AM ET
   const CLOSE = 16 * 3600;             // 4:00 PM ET
-  const isWeekday = dow >= 1 && dow <= 5;
 
   function fmt(secs) {
     secs = Math.max(0, secs);
@@ -3161,24 +3164,23 @@ function _marketCountdown() {
     return `${String(mm).padStart(2,'0')}m ${String(ss).padStart(2,'0')}s`;
   }
 
-  if (!isWeekday) {
-    // Weekend — find seconds until Monday 9:30 AM
-    const daysUntilMon = dow === 0 ? 1 : 2;
-    const secsUntilMon = daysUntilMon * 86400 + OPEN - secOfDay;
-    labelEl.textContent = 'Opens in';
-    valEl.textContent   = fmt(secsUntilMon);
-  } else if (secOfDay < OPEN) {
-    labelEl.textContent = 'Opens in';
-    valEl.textContent   = fmt(OPEN - secOfDay);
-  } else if (secOfDay < CLOSE) {
+  // Backend session is truth — open/premarket = market is or will shortly be open
+  const isOpen = _lastSession === 'open' || _lastSession === 'premarket';
+  if (isOpen) {
     labelEl.textContent = 'Closes in';
-    valEl.textContent   = fmt(CLOSE - secOfDay);
+    valEl.textContent   = fmt(Math.max(0, CLOSE - secOfDay));
   } else {
-    // After close — next open is tomorrow (or Monday if Friday)
-    const daysAhead = dow === 5 ? 3 : 1;
-    const secsUntilNext = daysAhead * 86400 + OPEN - secOfDay;
+    // Closed or afterhours — find seconds until next 9:30 ET open
     labelEl.textContent = 'Opens in';
-    valEl.textContent   = fmt(secsUntilNext);
+    let secsUntilOpen;
+    if (secOfDay < OPEN && dow >= 1 && dow <= 5) {
+      secsUntilOpen = OPEN - secOfDay;
+    } else {
+      // Count forward to the next weekday open
+      const daysAhead = dow === 5 ? 3 : dow === 6 ? 2 : 1;
+      secsUntilOpen = daysAhead * 86400 + OPEN - secOfDay;
+    }
+    valEl.textContent = fmt(secsUntilOpen);
   }
 }
 _marketCountdown();
