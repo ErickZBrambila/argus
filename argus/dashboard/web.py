@@ -10,6 +10,7 @@ import logging
 import queue as stdlib_queue
 import re
 import threading
+import uuid as uuid_pkg
 from typing import AsyncGenerator
 
 import pathlib
@@ -205,6 +206,19 @@ def _push_approvals_state() -> None:
 
 
 _approval_load()
+
+# ── Promote approvals ─────────────────────────────────────────────────────────
+_pending_promotes: dict[str, dict] = {}   # promote_id → promote info
+_promote_lock = threading.Lock()
+
+
+def _push_promotes_state() -> None:
+    with _promote_lock:
+        promotes = dict(_pending_promotes)
+    with _state_lock:
+        _state["pending_promotes"] = promotes
+        snapshot = {**_state, "alert_log": list(_alert_log)}
+    _sse_push(json.dumps(snapshot, default=str))
 
 
 # ── Financial news RSS (background poller) ────────────────────────────────────
@@ -550,7 +564,7 @@ def push_state(state: dict) -> None:
     except Exception:
         pass
     # Preserve keys that are managed outside the scan loop
-    for _k in ("watchlist", "investigations", "pending_approvals"):
+    for _k in ("watchlist", "investigations", "pending_approvals", "pending_promotes"):
         if _k not in state and _k in _state:
             state = {**state, _k: _state[_k]}
     now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
@@ -720,9 +734,54 @@ async def promote_position(symbol: str, body: dict = {}) -> dict:
     to_account   = str(body.get("to_account",   "agentic"))
     if from_account not in _KNOWN_ACCOUNTS or to_account not in _KNOWN_ACCOUNTS:
         raise HTTPException(status_code=400, detail="Invalid account label")
-    _promote_queue.put_nowait({"symbol": symbol, "from_account": from_account, "to_account": to_account})
-    logger.info("Promote requested: %s %s → %s", symbol, from_account, to_account)
-    return {"status": "queued", "symbol": symbol, "from": from_account, "to": to_account}
+    promote_id = str(uuid_pkg.uuid4())
+    entry = {
+        "promote_id": promote_id,
+        "symbol": symbol,
+        "from_account": from_account,
+        "to_account": to_account,
+        "queued_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    with _promote_lock:
+        _pending_promotes[promote_id] = entry
+    _push_alert_entry(
+        f"Promote pending: {symbol}",
+        f"{from_account.upper()} → {to_account.upper()} — approve to execute at next scan",
+    )
+    _push_promotes_state()
+    logger.info("Promote approval queued: %s %s → %s (%s)", symbol, from_account, to_account, promote_id)
+    return {"status": "pending_approval", "promote_id": promote_id, "symbol": symbol}
+
+
+@app.post("/api/promote/{promote_id}/approve", dependencies=[Depends(_require_auth)])
+async def approve_promote(promote_id: str) -> dict:
+    with _promote_lock:
+        entry = _pending_promotes.pop(promote_id, None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Promote not found or already decided")
+    _promote_queue.put_nowait({"symbol": entry["symbol"], "from_account": entry["from_account"], "to_account": entry["to_account"]})
+    _push_alert_entry(
+        f"Promote approved: {entry['symbol']}",
+        f"Executing {entry['from_account'].upper()} → {entry['to_account'].upper()} at next scan",
+    )
+    _push_promotes_state()
+    logger.info("Promote approved: %s (%s)", entry["symbol"], promote_id)
+    return {"status": "approved", "promote_id": promote_id, "symbol": entry["symbol"]}
+
+
+@app.post("/api/promote/{promote_id}/deny", dependencies=[Depends(_require_auth)])
+async def deny_promote(promote_id: str) -> dict:
+    with _promote_lock:
+        entry = _pending_promotes.pop(promote_id, None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Promote not found or already decided")
+    _push_alert_entry(
+        f"Promote denied: {entry['symbol']}",
+        f"{entry['from_account'].upper()} → {entry['to_account'].upper()} cancelled",
+    )
+    _push_promotes_state()
+    logger.info("Promote denied: %s (%s)", entry["symbol"], promote_id)
+    return {"status": "denied", "promote_id": promote_id, "symbol": entry["symbol"]}
 
 
 _YF_PERIOD_MAP = {
@@ -1794,6 +1853,7 @@ _HTML = """<!DOCTYPE html>
   .alert-entry.sell { border-left-color: var(--bear); }
   .alert-entry.kill { border-left-color: #ff8c00; }
   .alert-entry.approval { border-left-color: var(--accent); }
+  .alert-entry.promote { border-left-color: var(--purple); }
   .alert-entry.investigation { border-left-color: #a78bfa; }
   .alert-entry.error { border-left-color: var(--bear); }
   .alert-inline-actions { display: flex; gap: 8px; margin-top: 6px; }
@@ -3613,7 +3673,7 @@ function applyState(state) {
   renderPerformance(state.performance, state.accounts);
   renderReadiness(state.readiness_scorecard, state.ai_vote);
   renderFlashcards(state);
-  if (state.alert_log) renderAlerts(state.alert_log, state.pending_approvals);
+  if (state.alert_log) renderAlerts(state.alert_log, state.pending_approvals, state.pending_promotes);
   renderLogs(state.logs || []);
   // Refresh markers if chart is showing (new closed trades may have arrived)
   if (_chartSymbol && _lastCandles[_chartSymbol]) {
@@ -5284,13 +5344,14 @@ function classifyAlert(subject) {
   if (s.includes('KILL') || s.includes('DRAWDOWN')) return 'kill';
   if (s.includes('ERROR')) return 'error';
   if (s.includes('APPROVAL')) return 'approval';
+  if (s.includes('PROMOTE')) return 'promote';
   if (s.includes('INVESTIGAT') || s.includes('🟢') || s.includes('🔴')) return 'investigation';
   if (s.includes('BUY')) return 'buy';
   if (s.includes('SELL')) return 'sell';
   return '';
 }
 
-function renderAlerts(alertLog, pendingApprovals) {
+function renderAlerts(alertLog, pendingApprovals, pendingPromotes) {
   const feed = document.getElementById('alert-feed');
   if (!feed) return;
   // Badge on tab button
@@ -5305,14 +5366,20 @@ function renderAlerts(alertLog, pendingApprovals) {
   for (const [id, info] of Object.entries(pendingApprovals || {})) {
     approvalMap[`${(info.action||'BUY').toUpperCase()}|${(info.symbol||'').toUpperCase()}`] = id;
   }
+  // Build lookup: symbol -> promote_id for pending promotes
+  const promoteMap = {};
+  for (const [id, info] of Object.entries(pendingPromotes || {})) {
+    promoteMap[(info.symbol||'').toUpperCase()] = id;
+  }
   feed.innerHTML = alertLog.map(a => {
     const cls = classifyAlert(a.subject);
     const d = new Date(a.time);
     const t = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
     let actionBtns = '';
-    const m = (a.subject||'').match(/Approval needed:\s*(\w+)\s+(\w+)/i);
-    if (m) {
-      const tid = approvalMap[`${m[1].toUpperCase()}|${m[2].toUpperCase()}`];
+    const approvalMatch = (a.subject||'').match(/Approval needed:\s*(\w+)\s+(\w+)/i);
+    const promoteMatch  = (a.subject||'').match(/Promote pending:\s*([A-Z0-9.]+)/i);
+    if (approvalMatch) {
+      const tid = approvalMap[`${approvalMatch[1].toUpperCase()}|${approvalMatch[2].toUpperCase()}`];
       if (tid) {
         const decided = (pendingApprovals[tid] || {})._decided;
         if (decided) {
@@ -5328,6 +5395,18 @@ function renderAlerts(alertLog, pendingApprovals) {
           </div>`;
         }
       }
+    } else if (promoteMatch) {
+      const pid = promoteMap[promoteMatch[1].toUpperCase()];
+      if (pid) {
+        actionBtns = `<div class="alert-inline-actions">
+          <button class="alert-inline-btn approve" onclick="decidePromote('${pid}','approve')">✓ Approve</button>
+          <button class="alert-inline-btn deny" onclick="decidePromote('${pid}','deny')">✗ Deny</button>
+        </div>`;
+      } else if ((a.subject||'').toLowerCase().includes('approved')) {
+        actionBtns = `<div class="alert-inline-actions"><span style="font-size:12px;font-weight:700;color:var(--bull)">✓ Approved — executing at next scan</span></div>`;
+      } else if ((a.subject||'').toLowerCase().includes('denied')) {
+        actionBtns = `<div class="alert-inline-actions"><span style="font-size:12px;font-weight:700;color:var(--bear)">✗ Denied</span></div>`;
+      }
     }
     return `<div class="alert-entry ${cls}">
       <span class="alert-time">${t}</span>
@@ -5338,6 +5417,14 @@ function renderAlerts(alertLog, pendingApprovals) {
       </div>
     </div>`;
   }).join('');
+}
+
+async function decidePromote(promoteId, decision) {
+  try {
+    await apiFetch(`/api/promote/${promoteId}/${decision}`, {method: 'POST'});
+  } catch(e) {
+    alert('Action failed: ' + e.message);
+  }
 }
 
 async function clearAlertLog() {
