@@ -934,6 +934,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
             trade_id = result.order_id
             stop_price = acct.risk.stop_loss_price(result.price)
+            if result.paper:
+                acct.broker.set_paper_stop_loss(symbol, stop_price)
             with get_session() as session:
                 upsert_position(session, symbol, result.quantity, result.price, stop_price, acct.label)
                 session.add(Trade(

@@ -147,7 +147,11 @@ class RobinhoodBroker:
             data = json.loads(self._paper_state_path.read_text())
             self._paper_equity    = float(data.get("equity", 10_000.0))
             self._paper_positions = {
-                sym: {"qty": float(p["qty"]), "avg_price": float(p["avg_price"])}
+                sym: {
+                    "qty": float(p["qty"]),
+                    "avg_price": float(p["avg_price"]),
+                    "stop_loss": float(p["stop_loss"]) if p.get("stop_loss") is not None else None,
+                }
                 for sym, p in data.get("positions", {}).items()
             }
             logger.info("[PAPER] Restored state: equity=$%.2f, %d position(s)",
@@ -161,12 +165,23 @@ class RobinhoodBroker:
             self._paper_state_path.write_text(json.dumps({
                 "equity":    round(self._paper_equity, 6),
                 "positions": {
-                    sym: {"qty": round(p["qty"], 8), "avg_price": round(p["avg_price"], 6)}
+                    sym: {
+                        "qty": round(p["qty"], 8),
+                        "avg_price": round(p["avg_price"], 6),
+                        "stop_loss": round(p["stop_loss"], 6) if p.get("stop_loss") is not None else None,
+                    }
                     for sym, p in self._paper_positions.items()
                 },
             }))
         except Exception as exc:
             logger.debug("[PAPER] Could not save paper state: %s", exc)
+
+    def set_paper_stop_loss(self, symbol: str, stop_price: float) -> None:
+        """Set the stop-loss price on an open paper position and persist it."""
+        with self._paper_lock:
+            if symbol in self._paper_positions:
+                self._paper_positions[symbol]["stop_loss"] = stop_price
+                self._paper_save()
 
     def _paper_get_price(self, symbol: str) -> float:
         try:
@@ -423,9 +438,9 @@ class RobinhoodBroker:
                 old = self._paper_positions[symbol]
                 new_qty = old["qty"] + qty
                 new_avg = (old["qty"] * old["avg_price"] + qty * price) / new_qty
-                self._paper_positions[symbol] = {"qty": new_qty, "avg_price": new_avg}
+                self._paper_positions[symbol] = {"qty": new_qty, "avg_price": new_avg, "stop_loss": old.get("stop_loss")}
             else:
-                self._paper_positions[symbol] = {"qty": qty, "avg_price": price}
+                self._paper_positions[symbol] = {"qty": qty, "avg_price": price, "stop_loss": None}
 
             self._paper_equity -= cost
             self._paper_save()
