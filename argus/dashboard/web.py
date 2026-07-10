@@ -803,13 +803,21 @@ def _yf_chart_fallback(symbol: str, existing: list, span: str = "3month") -> lis
     try:
         import yfinance as yf
         import pandas as pd
+        import datetime as _dt
         try:
             from argus.broker.robinhood import CRYPTO_SYMBOLS as _CS
         except Exception:
             _CS: set = set()
         yf_sym = f"{symbol}-USD" if symbol in _CS else symbol
-        period = _YF_PERIOD_MAP.get(span, "3mo")
-        df = yf.download(yf_sym, period=period, interval="1d", auto_adjust=True, progress=False)
+        # Use explicit start/end instead of period — yfinance's period= can lag
+        # 1-2 days behind. end=today+1 forces inclusion of today's partial candle.
+        _span_days = {
+            "day": 7, "week": 35, "month": 35, "3month": 95,
+            "year": 370, "3year": 1100, "5year": 1830,
+        }
+        start_date = _dt.date.today() - _dt.timedelta(days=_span_days.get(span, 95))
+        end_date   = _dt.date.today() + _dt.timedelta(days=1)
+        df = yf.download(yf_sym, start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
         if df.empty:
             return existing
         # Flatten MultiIndex columns produced by some yfinance versions
@@ -851,21 +859,31 @@ def _yf_chart_fallback(symbol: str, existing: list, span: str = "3month") -> lis
             except Exception:
                 pass
 
-        # Patch today's candle with real-time price while market is open
+        # Ensure today's candle exists and has a live close price
         if candles:
-            import datetime as _dt
             today_ts = int(_dt.datetime.combine(_dt.date.today(), _dt.time.min).timestamp())
             last = candles[-1]
+            try:
+                live = float(yf.Ticker(yf_sym).fast_info.last_price or 0)
+            except Exception:
+                live = 0.0
             if last["time"] == today_ts:
-                try:
-                    live = float(yf.Ticker(yf_sym).fast_info.last_price or 0)
-                    if live > 0:
-                        last["close"] = live
-                        last["high"]  = max(last["high"], live)
-                        last["low"]   = min(last["low"],  live)
-                        logger.info("Patched %s today candle close → %.2f (live)", symbol, live)
-                except Exception:
-                    pass
+                # Candle exists — patch close with live price
+                if live > 0:
+                    last["close"] = live
+                    last["high"]  = max(last["high"], live)
+                    last["low"]   = min(last["low"],  live)
+                    logger.info("Patched %s today candle close → %.2f (live)", symbol, live)
+            elif last["time"] < today_ts and live > 0:
+                # Today's candle missing entirely — append from live price
+                prev_close = last["close"]
+                candles.append({
+                    "time": today_ts,
+                    "open": prev_close, "high": max(prev_close, live),
+                    "low": min(prev_close, live), "close": live,
+                    "volume": 0, "sma_20": None, "ema_50": None, "rsi": None,
+                })
+                logger.info("Appended %s today candle @ %.2f (live)", symbol, live)
 
         logger.info("yfinance for %s/%s: %d candles", symbol, span, len(candles))
         return candles if len(candles) > len(existing) else existing

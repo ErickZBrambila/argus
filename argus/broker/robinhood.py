@@ -370,13 +370,16 @@ class RobinhoodBroker:
         """Fetch crypto OHLCV from Yahoo Finance — no Robinhood auth needed."""
         try:
             import yfinance as yf
-            _period = {
-                'day': '5d', 'week': '1mo', 'month': '1mo',
-                '3month': '3mo', 'year': '1y', '5year': '5y',
-            }.get(span, '3mo')
+            import datetime as _dt
+            _span_days = {
+                'day': 7, 'week': 35, 'month': 35, '3month': 95,
+                'year': 370, '5year': 1830,
+            }
+            start_date = _dt.date.today() - _dt.timedelta(days=_span_days.get(span, 95))
+            end_date   = _dt.date.today() + _dt.timedelta(days=1)
             df = yf.download(
                 _YF_CRYPTO.get(symbol, f"{symbol}-USD"),
-                period=_period, interval='1d',
+                start=start_date, end=end_date, interval='1d',
                 progress=False, auto_adjust=True,
             )
             if df.empty:
