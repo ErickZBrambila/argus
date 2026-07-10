@@ -4006,7 +4006,7 @@ const _CHART_OPTS = {
   crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   rightPriceScale: { borderColor: '#2a2f3e' },
   timeScale: { borderColor: '#2a2f3e', timeVisible: true, tickMarkFormatter: _fmtChartTime },
-  handleScroll: true, handleScale: false,
+  handleScroll: false, handleScale: false,
   localization: { timeFormatter: _fmtChartTime },
 };
 
@@ -4620,7 +4620,7 @@ function ctInitChart(sym) {
     layout: { ..._CHART_OPTS.layout },
     rightPriceScale: { borderColor: '#2a2f3e', visible: true },
     timeScale: { borderColor: '#2a2f3e', timeVisible: false },
-    handleScroll: false, handleScale: true,
+    handleScroll: false, handleScale: false,
   });
   const candle = chart.addCandlestickSeries({
     upColor: '#00D4AA', downColor: '#f85149',
@@ -6180,7 +6180,7 @@ function mLoadChart(sym) {
           crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
           rightPriceScale: { borderColor:'#30363d' },
           timeScale: { borderColor:'#30363d', timeVisible:true },
-          handleScroll: true, handleScale: false,
+          handleScroll: false, handleScale: false,
         });
         _mSeries = _mChart.addCandlestickSeries({
           upColor:'#3fb950', downColor:'#f85149',
