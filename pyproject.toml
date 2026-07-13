@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "argus"
-version = "0.5.3"
+version = "0.5.5"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.40.0",
@@ -41,6 +41,7 @@ dev = ["pytest", "pytest-mock", "pytest-asyncio"]
 argus         = "argus.main:main"
 argus-web     = "argus.dashboard.web:main"
 argus-setup   = "argus.setup_secrets:main"
+argus-setup-gui = "argus.setup_wizard:main"
 argus-service = "argus.install_service:main"
 
 [tool.setuptools.packages.find]
