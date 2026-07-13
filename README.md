@@ -151,6 +151,30 @@ Secrets (passwords, API keys) are stored in your OS keychain — never in `.env`
 
 ---
 
+## API costs — you will be billed
+
+Argus calls Claude and Gemini on every scan tick. **These are paid APIs billed to your account** — not free.
+
+| Service | What you pay | Where to set a budget |
+|---------|-------------|----------------------|
+| **Claude (Anthropic)** | ~$0.50–$2.00 per trading day | [console.anthropic.com/settings/limits](https://console.anthropic.com/settings/limits) |
+| **Gemini (Google)** | ~$0.50–$2.00 per month | [aistudio.google.com](https://aistudio.google.com) |
+
+**Monthly estimate for a typical setup:**
+- 5-symbol watchlist, 90s scan interval → ~**$10–$20/month** (Claude) + <$1 (Gemini)
+- 15-symbol watchlist → ~**$30–$60/month** (Claude)
+
+Cost scales with watchlist size and how active the market is. During quiet sessions Claude does fewer calls (signal debouncing skips the LLM if nothing changed). During busy earnings seasons it calls more often.
+
+**How to control costs:**
+1. Set a monthly budget during setup — Argus shows a warning in the dashboard when you're approaching it
+2. Keep your watchlist focused — every extra symbol adds ~5–10% more Claude spend
+3. Gemini Flash is nearly free — always worth enabling for the second opinion
+
+**Argus tracks your spend live:** the "Token Usage Today" card in the dashboard shows exact call counts, token totals, and USD cost updated in real time.
+
+---
+
 ## Notifications
 
 Argus can push trade alerts to your phone via [ntfy.sh](https://ntfy.sh) (free, no account required):

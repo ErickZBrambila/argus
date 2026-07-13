@@ -96,6 +96,7 @@ async def do_setup(request: Request) -> JSONResponse:
         "DAILY_DRAWDOWN_LIMIT": str(round(float(data.get("daily_drawdown_limit", -0.05)), 2)),
         "MIN_CONFIDENCE": str(round(float(data.get("min_confidence", 0.65)), 2)),
         "MAX_POSITION_LOSS_USD": str(round(float(data.get("max_position_loss_usd", 75.0)), 2)),
+        "MONTHLY_API_BUDGET": str(round(float(data.get("monthly_api_budget", 20.0)), 2)),
         "INTERVAL_OPEN": "90",
         "INTERVAL_PREMARKET": "180",
         "INTERVAL_AFTERHOURS": "180",
@@ -195,6 +196,13 @@ _WIZARD_HTML = """<!DOCTYPE html>
   .done-screen { text-align: center; padding: 2rem 0; }
   .done-screen .icon { font-size: 3rem; }
   .done-screen h2 { margin: 1rem 0 .5rem; font-size: 1.3rem; }
+  .cost-box { background: #1c1a0d; border: 1px solid #6e5e00; border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 1.5rem; }
+  .cost-box .cost-title { font-size: .8rem; font-weight: 700; color: #e3c100; letter-spacing: .05em; margin-bottom: .6rem; }
+  .cost-row { display: flex; justify-content: space-between; align-items: baseline; font-size: .82rem; margin: .3rem 0; }
+  .cost-row .label { color: var(--muted); }
+  .cost-row .amount { font-family: monospace; color: var(--text); }
+  .cost-row .amount.high { color: #e3c100; }
+  .cost-note { font-size: .75rem; color: var(--muted); margin-top: .6rem; line-height: 1.4; }
   .done-screen p { color: var(--muted); font-size: .9rem; line-height: 1.6; }
   .done-screen code { background: var(--bg); padding: .2rem .5rem; border-radius: 4px; font-family: monospace; color: var(--cyan); }
   kbd { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: .15rem .4rem; font-family: monospace; font-size: .82rem; }
@@ -227,6 +235,29 @@ _WIZARD_HTML = """<!DOCTYPE html>
         Gemini is optional but enables a second AI vote for higher-confidence trades.
       </p>
 
+      <div class="cost-box">
+        <div class="cost-title">💰 API COSTS — YOU WILL BE BILLED BY ANTHROPIC &amp; GOOGLE</div>
+        <div class="cost-row"><span class="label">Claude (Anthropic) — per trading day</span><span class="amount high">~$0.50 – $2.00 / day</span></div>
+        <div class="cost-row"><span class="label">Claude — per month (market days only)</span><span class="amount high">~$10 – $40 / month</span></div>
+        <div class="cost-row"><span class="label">Gemini (Google) — per month</span><span class="amount">~$0.50 – $2 / month</span></div>
+        <div class="cost-note">
+          Cost scales with watchlist size and scan frequency. A 5-symbol watchlist scanning every 90s costs roughly <strong>$0.50/day</strong> in Claude tokens. A 20-symbol list at the same interval costs closer to <strong>$2/day</strong>.<br><br>
+          Argus shows your live API spend in the dashboard. Set a monthly budget below — Argus will warn you when you're close.
+        </div>
+      </div>
+
+      <label>Anthropic API key <span class="req">*</span> — <a href="https://console.anthropic.com" target="_blank" style="color:var(--cyan);font-size:.8rem">console.anthropic.com</a></label>
+      <input type="text" id="ant_key" placeholder="sk-ant-..." autocomplete="off">
+
+      <label>Google Gemini API key <small style="color:var(--muted)">(optional — enables Claude + Gemini ensemble) — <a href="https://aistudio.google.com" target="_blank" style="color:var(--cyan)">aistudio.google.com</a></small></label>
+      <input type="text" id="gem_key" placeholder="AIza..." autocomplete="off">
+
+      <label>Monthly API budget (USD) — Argus alerts you when spending approaches this</label>
+      <div class="range-row">
+        <input type="range" id="monthly_budget" min="5" max="100" value="20" step="5">
+        <span class="range-val" id="monthly_budget_val">$20 / mo</span>
+      </div>
+
       <label>Robinhood email <span class="req">*</span></label>
       <input type="email" id="rh_user" placeholder="you@example.com" autocomplete="off">
 
@@ -235,12 +266,6 @@ _WIZARD_HTML = """<!DOCTYPE html>
 
       <label>Robinhood MFA secret <small style="color:var(--muted)">(optional — base32 string from authenticator setup)</small></label>
       <input type="text" id="rh_mfa" placeholder="JBSWY3DPEHPK3PXP..." autocomplete="off">
-
-      <label>Anthropic API key <span class="req">*</span></label>
-      <input type="text" id="ant_key" placeholder="sk-ant-..." autocomplete="off">
-
-      <label>Google Gemini API key <small style="color:var(--muted)">(optional — enables Claude + Gemini ensemble)</small></label>
-      <input type="text" id="gem_key" placeholder="AIza..." autocomplete="off">
     </div>
 
     <!-- Step 1: Accounts -->
@@ -378,10 +403,11 @@ POPULAR.forEach(sym => {
 
 // Range labels
 const ranges = [
-  ['max_pos_pct', v => v + '%'],
-  ['stop_loss',   v => v + '%'],
-  ['max_loss_usd',v => '$' + v],
-  ['min_conf',    v => v + '%'],
+  ['max_pos_pct',     v => v + '%'],
+  ['stop_loss',       v => v + '%'],
+  ['max_loss_usd',    v => '$' + v],
+  ['min_conf',        v => v + '%'],
+  ['monthly_budget',  v => '$' + v + ' / mo'],
 ];
 ranges.forEach(([id, fmt]) => {
   const el = document.getElementById(id);
@@ -407,6 +433,7 @@ fetch('/api/prefill').then(r => r.json()).then(d => {
   if (d.MAX_POSITION_LOSS_USD) { const v = parseInt(d.MAX_POSITION_LOSS_USD); document.getElementById('max_loss_usd').value = v; document.getElementById('max_loss_usd_val').textContent = '$' + v; }
   if (d.MIN_CONFIDENCE) { const v = Math.round(parseFloat(d.MIN_CONFIDENCE)*100); document.getElementById('min_conf').value = v; document.getElementById('min_conf_val').textContent = v + '%'; }
   if (d.MAX_POSITIONS) document.getElementById('max_positions').value = d.MAX_POSITIONS;
+  if (d.MONTHLY_API_BUDGET) { const v = parseInt(parseFloat(d.MONTHLY_API_BUDGET)); document.getElementById('monthly_budget').value = v; document.getElementById('monthly_budget_val').textContent = '$' + v + ' / mo'; }
 });
 
 function showErr(msg) {
@@ -467,6 +494,7 @@ async function finish() {
     max_position_loss_usd: parseInt(document.getElementById('max_loss_usd').value),
     max_positions: parseInt(document.getElementById('max_positions').value),
     min_confidence: parseInt(document.getElementById('min_conf').value) / 100,
+    monthly_api_budget: parseInt(document.getElementById('monthly_budget').value),
   };
 
   const btn = document.getElementById('btnNext');
