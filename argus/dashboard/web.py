@@ -2904,6 +2904,9 @@ function switchTab(name) {
   if (name === 'charts') {
     ctInitSortable();
     requestAnimationFrame(ctInitChartsForVisible);
+    // If chart load was deferred (tab was display:none during SSE init), load now.
+    // Must run after the browser recalculates layout from the display:none→grid change,
+    // so wrap in double-RAF: first frame applies the style, second has real clientWidth.
   }
   if (name === 'settings') settingsLoad();
 }
@@ -4135,11 +4138,15 @@ function initChart() {
   _rsiSeries.createPriceLine({ price: 30, color: '#3fb950', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '30' });
 
   // Sync RSI with Main Chart
+  // LightweightCharts can emit { from: null, to: null } on first load — guard both cases
+  let _syncingRange = false;
   _chart.timeScale().subscribeVisibleTimeRangeChange(range => {
-    _rsiChart.timeScale().setVisibleRange(range);
+    if (_syncingRange || !range || range.from == null || range.to == null) return;
+    try { _syncingRange = true; _rsiChart.timeScale().setVisibleRange(range); } catch(_) {} finally { _syncingRange = false; }
   });
   _rsiChart.timeScale().subscribeVisibleTimeRangeChange(range => {
-    _chart.timeScale().setVisibleRange(range);
+    if (_syncingRange || !range || range.from == null || range.to == null) return;
+    try { _syncingRange = true; _chart.timeScale().setVisibleRange(range); } catch(_) {} finally { _syncingRange = false; }
   });
   _chart.subscribeCrosshairMove(param => {
     if (param.time) _rsiChart.setCrosshairPosition(param.point.x, param.time, _rsiSeries);
@@ -4258,7 +4265,7 @@ async function loadChart(symbol) {
     }
 
     placeTradeMarkers(symbol, candles);
-    _chart.timeScale().fitContent();
+    requestAnimationFrame(() => _chart.timeScale().fitContent());
   } catch(e) { console.error('Chart error', e); }
 }
 
