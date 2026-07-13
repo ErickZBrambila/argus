@@ -205,7 +205,8 @@ class Autopilot:
     def run(self) -> None:
         self._running = True
         signal.signal(signal.SIGINT, self._shutdown)
-        signal.signal(signal.SIGTERM, self._shutdown)
+        if hasattr(signal, "SIGTERM"):  # not available on Windows
+            signal.signal(signal.SIGTERM, self._shutdown)
 
         # 1. Load watchlist from DB (persistent) or .env (fallback)
         with get_session() as session:

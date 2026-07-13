@@ -129,7 +129,10 @@ class FlashcardStore:
                 for card in self._cards.values():
                     f.write(json.dumps(card.as_dict()) + "\n")
             _os.replace(tmp_path, self._path)  # atomic on same filesystem
-            _os.chmod(self._path, _stat.S_IRUSR | _stat.S_IWUSR)
+            try:
+                _os.chmod(self._path, _stat.S_IRUSR | _stat.S_IWUSR)
+            except (NotImplementedError, AttributeError):
+                pass  # Windows: chmod is a no-op, file is still written correctly
         except Exception as exc:
             logger.warning("Could not save flashcards: %s", exc)
             if tmp_path:

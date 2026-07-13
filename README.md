@@ -35,11 +35,21 @@ Argus is a personal AI trading agent that runs on your computer and watches your
 
 ### 2. Install
 
+**macOS / Linux:**
 ```bash
 git clone https://github.com/ErickZBrambila/argus.git
 cd argus
 python3.11 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+source .venv/bin/activate
+pip install -e .
+```
+
+**Windows** (run in PowerShell or Windows Terminal — not old cmd.exe):
+```powershell
+git clone https://github.com/ErickZBrambila/argus.git
+cd argus
+py -3.11 -m venv .venv
+.venv\Scripts\activate
 pip install -e .
 ```
 
@@ -251,6 +261,17 @@ argus/
 ├── pyproject.toml
 └── CHANGELOG.md
 ```
+
+---
+
+## Windows compatibility
+
+Argus runs on Windows with no extra steps beyond the install commands above. A few things to know:
+
+- Use **Windows Terminal** (not old cmd.exe) — Rich colors and Unicode render correctly there
+- The `argus-tmux` / `argus-bg` shell aliases listed in the technical docs are macOS/Linux only — on Windows just run `argus` in a terminal window
+- Secrets are stored in **Windows Credential Manager** (same as macOS Keychain — automatic, nothing to configure)
+- Stop Argus with `Ctrl+C` — `SIGTERM` isn't available on Windows but `Ctrl+C` works fine
 
 ---
 

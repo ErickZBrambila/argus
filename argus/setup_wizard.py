@@ -46,7 +46,10 @@ def _write_env(fields: dict[str, str]) -> None:
     for k, v in fields.items():
         lines.append(f"{k}={v}\n")
     _ENV_FILE.write_text("".join(lines))
-    _ENV_FILE.chmod(0o600)
+    try:
+        _ENV_FILE.chmod(0o600)  # no-op on Windows, fine
+    except NotImplementedError:
+        pass
 
 
 # ── routes ─────────────────────────────────────────────────────────────────────
