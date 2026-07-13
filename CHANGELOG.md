@@ -4,7 +4,37 @@ All notable changes to Argus are documented here.
 Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`
 - **MAJOR** — breaking changes to config, API, or data formats
 - **MINOR** — new features, backwards-compatible
-PATCH — bug fixes, documentation, refactors
+- **PATCH** — bug fixes, documentation, refactors
+
+---
+
+## [0.5.5] — 2026-07-13
+
+### Added — Market Discovery & MCP Bridge
+
+- **Expanded native screener** (`broker/robinhood.py`) — `get_screener_symbols()` now pulls Robinhood's 100 Most Popular (`rh.markets.get_top_100`), top 20 overall movers (`rh.markets.get_top_movers`), and upcoming-earnings tag stocks (`rh.markets.get_all_stocks_from_market_tag`). These are merged with the existing S&P 500 mover scan. Combined, the daily screener universe grows from ~10 to ~100 symbols before deduplication.
+- **MCP Bridge API** (`dashboard/web.py`) — Three new endpoints bridge Claude Code's Robinhood MCP tool access into Argus:
+  - `POST /api/inject-candidates` — accepts `[{symbol, reason, category, ttl_hours}]`; merges into the in-memory candidate queue; authenticated.
+  - `GET /api/mcp-candidates` — returns all non-expired queued candidates; unauthenticated.
+  - `DELETE /api/mcp-candidates` — clears the queue; authenticated.
+- **TTL-aware candidate queue** — each injected candidate carries a `ttl_hours` value (default 8h). `get_mcp_candidates()` prunes expired entries on every read. Earnings catalysts typically get 48–96h; popular/movers get 24h.
+- **Autopilot MCP integration** (`engine/autopilot.py`) — `_tick_session()` now calls `web_dashboard.get_mcp_candidates()` on every scan cycle and merges the live queue into the signal computation pool alongside the watchlist and daily screener. Logged when MCP symbols enter the universe.
+
+### Added — Risk Guardrails
+
+- **`MIN_CONFIDENCE`** (config) — minimum ensemble confidence (default `0.65`) to execute a BUY. Decisions below this threshold are held regardless of signal direction.
+- **`MAX_POSITION_LOSS_USD`** (config) — hard dollar loss cap per position (default `$75`). Triggers stop-loss immediately if unrealized loss reaches this amount, regardless of `STOP_LOSS_PCT`. Prevents gap-down events from exceeding a fixed dollar risk.
+
+### Fixed
+
+- **Stop-loss persistence on paper positions** — `stop_loss` field now stored and restored through `_paper_save`/`_paper_load` cycle; new paper positions initialized with the computed stop price.
+- **Charts showing data 2 days behind** — switched yfinance calls from `period=` to explicit `start`/`end` date ranges; `_yf_chart_fallback()` appends today's candle if missing.
+
+### Changed
+
+- Agentic account bypasses large-trade approval gate — all BUY actions on the agentic account auto-execute regardless of dollar amount.
+- Dashboard Alerts tab now shows Promote actions with inline Approve/Deny buttons.
+- All chart instances have `handleScroll` and `handleScale` set to `false` — zoom/pan disabled.
 
 ---
 

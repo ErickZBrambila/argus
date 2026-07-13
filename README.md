@@ -2,7 +2,7 @@
 
 ![Argus](argus/dashboard/static/banner.png)
 
-![version](https://img.shields.io/badge/version-v0.5.3-blue)
+![version](https://img.shields.io/badge/version-v0.5.5-blue)
 
 ## 1. What is Argus?
 
@@ -15,6 +15,8 @@ Argus is an automated AI trading agent for Robinhood that uses a **Claude + Gemi
 ```mermaid
 graph TD
     RH["Robinhood API\n(robin_stocks)"]
+    MCP["Robinhood MCP Tools\n(Claude bridge)"]
+    SCR["Screener Discovery\n(top-100, movers,\nearnings tag)"]
     SE["Signal Engine\n(pandas_ta indicators)"]
     DE["Decision Engine\n(Claude + Gemini ensemble)"]
     TT["Token Tracker\n(daily cost monitor)"]
@@ -29,7 +31,10 @@ graph TD
     LB["Log Buffer\n(in-memory ring, 500 entries)"]
     DB["SQLite DB\n(argus.db)"]
 
+    MCP -->|"POST /api/inject-candidates"| WEB
+    SCR -->|"daily refresh at open"| WEB
     RH -->|"price/history"| SE
+    WEB -->|"mcp_candidates + screener"| SE
     MS -->|"session label"| INT
     INT -->|"interval seconds"| WEB
     SE -->|"SignalResult"| DE
@@ -51,7 +56,7 @@ graph TD
     LB -->|"last 12 entries"| TERM
 ```
 
-The main loop (`Autopilot` in `argus.engine.autopilot`) runs on an adaptive interval that changes with the NYSE market session (logic in `argus.engine.session`). On each tick it detects the current session, computes signals **in parallel** across all watchlist symbols (`ThreadPoolExecutor`, up to 8 workers), then runs `_tick_account` independently for each configured account.
+The main loop (`Autopilot` in `argus.engine.autopilot`) runs on an adaptive interval that changes with the NYSE market session (logic in `argus.engine.session`). On each tick it detects the current session, computes signals **in parallel** across all watchlist symbols **plus any screener/MCP candidates** (`ThreadPoolExecutor`, up to 8 workers), then runs `_tick_account` independently for each configured account.
 
 ---
 
@@ -244,6 +249,8 @@ Non-secret settings live in `.env` (copy from `.env.example`). Secrets use the O
 | `STOP_LOSS_PCT` | `0.05` | Hard stop-loss trigger; position closed if price drops this fraction from entry. |
 | `MAX_POSITIONS` | `5` | Max concurrent open positions per account. |
 | `DAILY_DRAWDOWN_LIMIT` | `-0.05` | Kill switch threshold; stops all trading if session equity drops this fraction (must be negative). |
+| `MIN_CONFIDENCE` | `0.65` | Minimum ensemble confidence (0–1) to execute a BUY. Decisions below this are held regardless of signal direction. |
+| `MAX_POSITION_LOSS_USD` | `75.0` | Hard dollar cap per position. If unrealized loss reaches this amount, the position is stopped regardless of `STOP_LOSS_PCT`. Prevents gap-down disasters. |
 
 ### Watchlist
 
@@ -594,7 +601,59 @@ Full step-by-step migration checklist: [`docs/mac-mini-setup.md`](docs/mac-mini-
 
 ---
 
-## 17. Directory Structure
+## 17. MCP Bridge — Market Discovery
+
+Argus watches more than just its static watchlist. Market discovery runs via two parallel mechanisms:
+
+### Native Screener (automatic, runs every market open)
+
+`broker/robinhood.py → get_screener_symbols()` pulls from Robinhood's live API on each daily session start:
+
+| Source | Count | Category |
+|--------|-------|----------|
+| Robinhood 100 Most Popular | top 40 | `popular` |
+| Robinhood top 20 daily movers | top 20 | `mover` |
+| S&P 500 top movers (up + down) | top 5 each | `mover` |
+| Upcoming earnings tag | top 30 | `earnings` |
+| Per-symbol earnings check for movers | all movers | upgrades to `earnings` |
+
+Discovered symbols are added to the scan universe for the session but not persisted to the watchlist. They expire when Argus restarts.
+
+### Claude MCP Bridge (on-demand, Claude-curated)
+
+Claude Code (the AI running this project) has direct access to the Robinhood MCP server tools, which expose richer intelligence than `robin_stocks` alone — notably the full earnings calendar, fundamentals, and community watchlists. The bridge connects this to Argus via a REST API:
+
+**Inject candidates** (authenticated):
+```bash
+curl -X POST http://127.0.0.1:8000/api/inject-candidates \
+  -H "X-Argus-Token: $DASHBOARD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "candidates": [
+      {"symbol": "NFLX", "reason": "Earnings July 16 PM, near 52-wk low", "category": "earnings", "ttl_hours": 96},
+      {"symbol": "PLTR", "reason": "Robinhood 100 Most Popular, AI momentum", "category": "popular", "ttl_hours": 24}
+    ]
+  }'
+```
+
+**Check the queue** (unauthenticated):
+```bash
+curl http://127.0.0.1:8000/api/mcp-candidates
+```
+
+**Clear the queue** (authenticated):
+```bash
+curl -X DELETE http://127.0.0.1:8000/api/mcp-candidates \
+  -H "X-Argus-Token: $DASHBOARD_TOKEN"
+```
+
+**TTL behaviour:** Each candidate carries a `ttl_hours` value (default 8). Expired entries are pruned automatically on every read — no manual cleanup needed. Typical values: 24h for movers/popular, 48–96h for earnings catalysts (so the position has time to build into the event).
+
+**What the autopilot does with them:** On each scan tick, `web_dashboard.get_mcp_candidates()` returns unexpired candidates. These are added to the signal computation pool (same `ThreadPoolExecutor` as the watchlist), and if technical signals + AI ensemble agree, they trade exactly like watchlist symbols — same confidence gate, same risk checks, same stop-loss.
+
+---
+
+## 18. Directory Structure  
 
 ```
 argus/
