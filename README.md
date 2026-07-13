@@ -254,6 +254,14 @@ argus/
 
 ---
 
+## Technical documentation
+
+Architecture diagrams, full configuration reference, API endpoints, AI ensemble internals, flashcard schema, Docker deployment, and MCP bridge docs live in:
+
+**[docs/technical.md](docs/technical.md)**
+
+---
+
 ## ⚠️ Important disclaimers
 
 - **Not financial advice.** This is a personal tool, not a licensed investment service.
