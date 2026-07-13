@@ -133,6 +133,7 @@ class Autopilot:
                 stop_loss_pct=self._cfg.stop_loss_pct,
                 max_positions=self._cfg.max_positions,
                 daily_drawdown_limit=self._cfg.daily_drawdown_limit,
+                max_position_loss_usd=self._cfg.max_position_loss_usd,
             )
 
         self._accounts: list[AccountContext] = []
@@ -691,7 +692,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         for sym, pos in list(open_positions.items()):
             try:
                 current_price = acct.broker.get_price(sym)
-                if acct.risk.should_stop_loss(sym, pos["avg_price"], current_price):
+                if acct.risk.should_stop_loss(sym, pos["avg_price"], current_price, pos.get("qty", 0)):
                     self._execute_sell(acct, sym, pos["qty"], reason="stop-loss")
                     open_positions.pop(sym, None)
             except Exception as exc:
@@ -784,6 +785,12 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     if other_held and symbol in other_held:
                         logger.info("[%s][%s] BUY skipped — already held by another account", acct.label, symbol)
                         continue
+                    if decision.confidence < self._cfg.min_confidence:
+                        logger.info(
+                            "[%s][%s] BUY blocked — confidence %.0f%% below minimum %.0f%%",
+                            acct.label, symbol, decision.confidence * 100, self._cfg.min_confidence * 100,
+                        )
+                        continue
                     risk_check = acct.risk.approve_buy(symbol, equity, open_positions, _db_day_trades)
                     if not risk_check.allowed:
                         logger.info("[%s][%s] BUY blocked: %s", acct.label, symbol, risk_check.reason)
@@ -812,6 +819,11 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         sig: SignalResult,
         signal_obj: Optional[SignalResult] = None,
     ) -> None:
+        # Agentic account is fully autonomous — never gate on trade size
+        if acct.label == "agentic":
+            self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
+            return
+
         needs_approval = dollar_amount > self._cfg.large_trade_threshold
 
         if not needs_approval:

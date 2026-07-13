@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     stop_loss_pct: float = Field(0.05, alias="STOP_LOSS_PCT")
     max_positions: int = Field(5, alias="MAX_POSITIONS")
     daily_drawdown_limit: float = Field(-0.05, alias="DAILY_DRAWDOWN_LIMIT")
+    # Minimum AI confidence to execute a trade (0–1). Decisions below this are held.
+    min_confidence: float = Field(0.65, alias="MIN_CONFIDENCE")
+    # Hard cap on dollar loss per position — position sold immediately if loss exceeds this
+    max_position_loss_usd: float = Field(75.0, alias="MAX_POSITION_LOSS_USD")
 
     # Model overrides
     claude_model: str = Field("claude-sonnet-4-6", alias="CLAUDE_MODEL")

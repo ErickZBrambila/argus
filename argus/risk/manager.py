@@ -28,12 +28,14 @@ class RiskManager:
         max_positions: int = 5,
         daily_drawdown_limit: float = -0.05,
         pdt_aware: bool = True,
+        max_position_loss_usd: float = 75.0,
     ) -> None:
         self.max_position_pct = max_position_pct
         self.stop_loss_pct = stop_loss_pct
         self.max_positions = max_positions
         self.daily_drawdown_limit = daily_drawdown_limit
         self.pdt_aware = pdt_aware
+        self.max_position_loss_usd = max_position_loss_usd
 
         self._kill_switch: bool = False
         self._day_trade_count: int = 0
@@ -115,16 +117,28 @@ class RiskManager:
 
     # ── Stop-loss check ──────────────────────────────────────────────────────
 
-    def should_stop_loss(self, symbol: str, entry_price: float, current_price: float) -> bool:
+    def should_stop_loss(self, symbol: str, entry_price: float, current_price: float,
+                         position_qty: float = 0.0) -> bool:
         if entry_price <= 0:
             return False
         drop = (current_price - entry_price) / entry_price
+        dollar_loss = abs(drop * entry_price * position_qty) if position_qty > 0 else 0.0
+
         if drop <= -self.stop_loss_pct:
             logger.warning(
                 "Stop-loss triggered for %s: entry=%.4f current=%.4f drop=%.2f%%",
                 symbol, entry_price, current_price, drop * 100,
             )
             return True
+
+        # Hard dollar loss cap — catches gap-downs that blow past the % stop
+        if self.max_position_loss_usd > 0 and dollar_loss >= self.max_position_loss_usd:
+            logger.warning(
+                "Max-loss cap triggered for %s: entry=%.4f current=%.4f loss=$%.2f (cap=$%.2f)",
+                symbol, entry_price, current_price, dollar_loss, self.max_position_loss_usd,
+            )
+            return True
+
         return False
 
     # ── PDT tracking ─────────────────────────────────────────────────────────
