@@ -269,9 +269,9 @@ class RobinhoodBroker:
         return result
 
     def get_screener_symbols(self) -> list[dict]:
-        """Return daily movers + upcoming earnings symbols as screener candidates.
+        """Return daily movers + upcoming earnings + 100 most popular as screener candidates.
 
-        Each entry: {"symbol": str, "reason": str, "category": "mover"|"earnings"}
+        Each entry: {"symbol": str, "reason": str, "category": "mover"|"earnings"|"popular"}
         Requires a live authenticated session; returns [] on paper or if unauthenticated.
         """
         if self.paper or not self._logged_in:
@@ -295,20 +295,70 @@ class RobinhoodBroker:
                             "category": "mover",
                         })
         except Exception as exc:
-            logger.debug("Screener movers fetch failed: %s", exc)
+            logger.debug("Screener SP500 movers failed: %s", exc)
+
+        try:
+            import robin_stocks.robinhood as rh
+
+            # Top 20 overall movers on Robinhood
+            top_movers = rh.markets.get_top_movers(info="symbol") or []
+            for sym in top_movers[:20]:
+                sym = (sym or "").strip().upper()
+                if sym and _SYMBOL_RE.fullmatch(sym) and sym not in seen:
+                    seen.add(sym)
+                    result.append({
+                        "symbol": sym,
+                        "reason": "Robinhood top mover today",
+                        "category": "mover",
+                    })
+        except Exception as exc:
+            logger.debug("Screener top movers failed: %s", exc)
+
+        try:
+            import robin_stocks.robinhood as rh
+
+            # Robinhood's 100 most popular stocks (community sentiment)
+            popular = rh.markets.get_top_100(info="symbol") or []
+            for sym in popular[:40]:
+                sym = (sym or "").strip().upper()
+                if sym and _SYMBOL_RE.fullmatch(sym) and sym not in seen:
+                    seen.add(sym)
+                    result.append({
+                        "symbol": sym,
+                        "reason": "Robinhood 100 most popular",
+                        "category": "popular",
+                    })
+        except Exception as exc:
+            logger.debug("Screener top-100 popular failed: %s", exc)
+
+        try:
+            import robin_stocks.robinhood as rh
+
+            # Upcoming earnings catalyst stocks
+            earnings_syms = rh.markets.get_all_stocks_from_market_tag(
+                "upcoming-earnings", info="symbol"
+            ) or []
+            for sym in earnings_syms[:30]:
+                sym = (sym or "").strip().upper()
+                if sym and _SYMBOL_RE.fullmatch(sym) and sym not in seen:
+                    seen.add(sym)
+                    result.append({
+                        "symbol": sym,
+                        "reason": "Upcoming earnings catalyst",
+                        "category": "earnings",
+                    })
+        except Exception as exc:
+            logger.debug("Screener upcoming-earnings tag failed: %s", exc)
 
         try:
             import robin_stocks.robinhood as rh
             import datetime as _dt
 
-            # Stocks with earnings in the next 7 days
-            upcoming = rh.stocks.get_earnings(None, info=None) if False else []
-            # get_earnings requires a symbol; use top_100 watchlist as universe instead
-            top = rh.markets.get_top_movers(info="symbol") or []
+            # Per-symbol earnings check for movers already in result
             today = _dt.date.today()
-            for sym in top[:20]:
-                sym = (sym or "").strip().upper()
-                if not sym or not _SYMBOL_RE.fullmatch(sym) or sym in seen:
+            for item in list(result):
+                sym = item["symbol"]
+                if item["category"] == "earnings":
                     continue
                 try:
                     earnings = rh.stocks.get_earnings(sym, info=None) or []
@@ -320,18 +370,15 @@ class RobinhoodBroker:
                         edate = _dt.date.fromisoformat(date_str)
                         days_out = (edate - today).days
                         if 0 <= days_out <= 7:
-                            seen.add(sym)
-                            result.append({
-                                "symbol": sym,
-                                "reason": f"Earnings in {days_out}d ({date_str})",
-                                "category": "earnings",
-                            })
+                            item["reason"] += f" + earnings in {days_out}d"
+                            item["category"] = "earnings"
                             break
                 except Exception:
                     pass
         except Exception as exc:
-            logger.debug("Screener earnings fetch failed: %s", exc)
+            logger.debug("Screener per-symbol earnings check failed: %s", exc)
 
+        logger.info("Screener discovered %d candidates", len(result))
         return result
 
     def get_historical_prices(self, symbol: str, span: str = "month", interval: str = "day") -> list[dict]:

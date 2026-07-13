@@ -543,10 +543,17 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             self._refresh_screener()
             self._screener_last_date = today
 
-        # Scan watchlist + screener symbols (screener symbols are not persisted)
+        # Scan watchlist + screener + MCP-injected candidates
+        watchlist_set = set(watchlist)
         screener_syms = [c["symbol"] for c in self._screener_candidates
-                         if c["symbol"] not in set(watchlist)]
-        all_syms = list(watchlist) + screener_syms
+                         if c["symbol"] not in watchlist_set]
+        mcp_cands = web_dashboard.get_mcp_candidates()
+        mcp_syms = [c["symbol"] for c in mcp_cands
+                    if c["symbol"] not in watchlist_set and c["symbol"] not in set(screener_syms)]
+        all_syms = list(watchlist) + screener_syms + mcp_syms
+        if mcp_syms:
+            logger.info("MCP bridge: adding %d injected candidates to scan universe: %s",
+                        len(mcp_syms), mcp_syms[:10])
         if not all_syms:
             return
 
@@ -564,14 +571,21 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         if not self._position_sync_done and signal_map:
             self._sync_positions_to_watchlist()
 
-        # Build signals list — watchlist first, then screener candidates
-        screener_sym_set = {c["symbol"] for c in self._screener_candidates}
+        # Build signals list — watchlist first, then screener, then MCP candidates
+        mcp_sym_set = {c["symbol"] for c in mcp_cands}
         for sym in watchlist:
             if sym in signal_map:
                 signals.append(signal_map[sym].to_dict())
         for candidate in self._screener_candidates:
             sym = candidate["symbol"]
-            if sym in signal_map and sym not in set(watchlist):
+            if sym in signal_map and sym not in watchlist_set:
+                d = signal_map[sym].to_dict()
+                d["screener_reason"] = candidate["reason"]
+                d["screener_category"] = candidate["category"]
+                signals.append(d)
+        for candidate in mcp_cands:
+            sym = candidate["symbol"]
+            if sym in signal_map and sym not in watchlist_set and sym not in {c["symbol"] for c in self._screener_candidates}:
                 d = signal_map[sym].to_dict()
                 d["screener_reason"] = candidate["reason"]
                 d["screener_category"] = candidate["category"]

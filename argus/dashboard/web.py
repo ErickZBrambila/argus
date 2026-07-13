@@ -323,6 +323,49 @@ def add_to_runtime_watchlist(symbol: str) -> None:
             _runtime_watchlist.append(symbol)
 
 
+# ── MCP-injected discovery candidates ────────────────────────────────────────
+# External bridge (Claude MCP → Argus): Claude calls MCP tools and POSTs symbols here.
+# Autopilot reads these each tick and adds them to the scan universe.
+import datetime as _dt_mod
+
+_mcp_candidates: list[dict] = []
+_mcp_candidates_lock = threading.Lock()
+
+
+def inject_mcp_candidates(candidates: list[dict]) -> None:
+    """Merge new MCP-discovered candidates, replacing entries for the same symbol."""
+    with _mcp_candidates_lock:
+        existing = {c["symbol"]: c for c in _mcp_candidates}
+        for c in candidates:
+            sym = c.get("symbol", "").strip().upper()
+            if sym:
+                existing[sym] = {
+                    "symbol": sym,
+                    "reason": c.get("reason", "MCP discovery"),
+                    "category": c.get("category", "mcp"),
+                    "injected_at": _dt_mod.datetime.utcnow().isoformat(),
+                    "ttl_hours": float(c.get("ttl_hours", 8)),
+                }
+        _mcp_candidates[:] = list(existing.values())
+
+
+def get_mcp_candidates() -> list[dict]:
+    """Return non-expired MCP candidates."""
+    now = _dt_mod.datetime.utcnow()
+    with _mcp_candidates_lock:
+        valid = []
+        for c in _mcp_candidates:
+            try:
+                injected = _dt_mod.datetime.fromisoformat(c["injected_at"])
+                age_hours = (now - injected).total_seconds() / 3600
+                if age_hours <= c.get("ttl_hours", 8):
+                    valid.append(c)
+            except Exception:
+                valid.append(c)
+        _mcp_candidates[:] = valid
+        return list(valid)
+
+
 # ── Investigations (up to 3 AI deep-dives) ───────────────────────────────────
 _MAX_INVESTIGATIONS = 3
 _investigations: dict[str, dict] = {}
@@ -1027,6 +1070,39 @@ async def get_flashcards() -> dict:
     # Best to retrieve from state if pushed by main loop
     scorecard = _state.get("readiness_scorecard", {})
     return {"flashcards": cards, "summary": summary, "scorecard": scorecard}
+
+
+@app.get("/api/mcp-candidates")
+async def get_mcp_candidates_api() -> dict:
+    return {"candidates": get_mcp_candidates()}
+
+
+@app.post("/api/inject-candidates", dependencies=[Depends(_require_auth)])
+async def inject_candidates_api(body: dict) -> dict:
+    """Accept MCP-discovered symbols and inject them into the scan universe.
+
+    Body: {"candidates": [{"symbol": "NFLX", "reason": "Earnings tomorrow", "category": "earnings", "ttl_hours": 8}]}
+    """
+    raw = body.get("candidates") or []
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail="'candidates' must be a list")
+    valid = []
+    for item in raw:
+        sym = (item.get("symbol") or "").strip().upper()
+        if sym and _SYMBOL_RE.match(sym):
+            valid.append(item)
+    inject_mcp_candidates(valid)
+    all_cands = get_mcp_candidates()
+    logger.info("MCP bridge: injected %d candidates, total queue=%d", len(valid), len(all_cands))
+    return {"injected": len(valid), "total_queued": len(all_cands)}
+
+
+@app.delete("/api/mcp-candidates", dependencies=[Depends(_require_auth)])
+async def clear_mcp_candidates_api() -> dict:
+    with _mcp_candidates_lock:
+        count = len(_mcp_candidates)
+        _mcp_candidates.clear()
+    return {"cleared": count}
 
 
 @app.get("/api/watchlist")
