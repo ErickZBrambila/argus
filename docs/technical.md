@@ -12,7 +12,26 @@ Argus is an automated AI trading agent for Robinhood that uses a **Claude + Gemi
 
 ---
 
-## 2. Architecture Overview
+## 2. Python Version Compatibility
+
+Argus requires **Python 3.12** (3.12.x recommended). Other versions are not supported:
+
+| Version | Status | Reason |
+|---------|--------|--------|
+| **3.12.x** | ✅ Supported | All dependencies have binary wheels; fully tested |
+| 3.11 | ❌ Not supported | `pandas-ta 0.4.71b0` and `numpy 2.x` both require `>=3.12` |
+| 3.13 | ⚠️ Untested | May work, but not tested — use 3.12 for reliability |
+| 3.14 | ❌ Not supported | `pandas-ta` has no binary wheels for 3.14 yet |
+
+The `pyproject.toml` enforces this with `requires-python = ">=3.12,<3.14"`.
+
+Install and run commands use `python3.12` / `py -3.12` explicitly — see the [README quickstart](../README.md#2-install).
+
+The Docker image uses `python:3.12-slim` to match.
+
+---
+
+## 3. Architecture Overview
 
 ```mermaid
 graph TD
@@ -62,7 +81,7 @@ The main loop (`Autopilot` in `argus.engine.autopilot`) runs on an adaptive inte
 
 ---
 
-## 3. Trade Decision Flow
+## 4. Trade Decision Flow
 
 ```mermaid
 sequenceDiagram
@@ -107,7 +126,7 @@ At the end of each tick the loop sleeps in 1-second increments so that the count
 
 ---
 
-## 4. Ensemble AI Logic
+## 5. Ensemble AI Logic
 
 Both models receive an identical prompt containing: symbol, current price, RSI, MACD, Bollinger Bands, SMA-20, EMA-50, portfolio equity, open position count, daily P&L, and whether the symbol is already held. They run in parallel via `ThreadPoolExecutor(max_workers=2)` with a 30-second timeout per model.
 
@@ -132,7 +151,7 @@ The combined reasoning string (prefixed `[Claude]` / `[Gemini]`) is stored in th
 
 ---
 
-## 5. Risk Classification
+## 6. Risk Classification
 
 After ensemble consensus, `classify_risk()` maps signal and decision confidence into a risk tier:
 
@@ -158,7 +177,7 @@ On the **Default account**, trades with risk >= `APPROVAL_THRESHOLD` (default: `
 
 ---
 
-## 6. Account Setup
+## 7. Account Setup
 
 Argus manages two accounts simultaneously. Each account has its own `RobinhoodBroker` instance, its own `RiskManager` (separate drawdown/PDT tracking), and its own pending approvals dict. A single-account fallback is available if neither account number is set.
 
@@ -183,7 +202,7 @@ Signals and price data are computed once per tick using a shared broker instance
 
 ---
 
-## 7. Adaptive Scan Intervals
+## 8. Adaptive Scan Intervals
 
 Argus detects the current NYSE market session and applies a different scan interval for each phase. Intervals are set in `.env` and can be overridden for the current session via the web dashboard Controls card.
 
@@ -201,7 +220,7 @@ Argus detects the current NYSE market session and applies a different scan inter
 
 ---
 
-## 8. Token Usage Monitor
+## 9. Token Usage Monitor
 
 Every Claude and Gemini API call records its token counts through `argus/dashboard/token_tracker.py`, a thread-safe singleton that resets at midnight.
 
@@ -224,7 +243,7 @@ The tracker resets automatically when the date changes. There is no persistent s
 
 ---
 
-## 9. Configuration Reference
+## 10. Configuration Reference
 
 Non-secret settings live in `.env` (copy from `.env.example`). Secrets use the OS keychain (see §10).
 
@@ -294,7 +313,7 @@ Non-secret settings live in `.env` (copy from `.env.example`). Secrets use the O
 
 ---
 
-## 10. Secrets & Keychain
+## 11. Secrets & Keychain
 
 Secrets are never stored in `.env` or committed to source control. Argus uses the OS keychain (macOS Keychain, Windows Credential Manager, or Linux Secret Service via `keyring`). On startup, `config.py` loads secrets through `_KeychainSource` before falling through to `.env`.
 
@@ -322,7 +341,7 @@ argus-setup --clear   # remove all Argus secrets from keychain
 
 ---
 
-## 11. Branding Assets
+## 12. Branding Assets
 
 Static files are served by FastAPI at `/static` and live in `argus/dashboard/static/`.
 
@@ -339,7 +358,7 @@ The dashboard header renders the icon inline with the "ARGUS" wordmark using `mi
 
 ---
 
-## 12. CLI Commands
+## 13. CLI Commands
 
 These shell functions are defined in `~/.zshrc` and require `ARGUS_DIR` to point to the project root.
 
@@ -358,7 +377,7 @@ These shell functions are defined in `~/.zshrc` and require `ARGUS_DIR` to point
 
 ---
 
-## 13. Web Dashboard
+## 14. Web Dashboard
 
 The dashboard is a single-page app served by FastAPI at `http://127.0.0.1:8000`. State is pushed from the main loop to the browser via **Server-Sent Events** (`/events`) on every tick, so all panels update live without client-side polling. On first connect the browser receives a snapshot of the latest state immediately.
 
@@ -450,7 +469,7 @@ Use this to tune `classify_risk()` thresholds and understand whether high-confid
 
 ---
 
-## 14. Flashcard Learning System
+## 15. Flashcard Learning System
 
 Every executed trade (buy or sell) produces a flashcard. Cards are stored in `argus_flashcards.jsonl` (one JSON object per line) in the project root. The `FlashcardStore` loads all cards into memory at startup and flushes to disk atomically on every write: it writes to a temp file in the same directory, then `os.replace()`s it into place, so a crash mid-write can never produce a corrupt file. The file is `chmod 0600` after each flush.
 
@@ -499,7 +518,7 @@ Look for patterns in: which `bb_position` + `signal_composite` combinations win 
 
 ---
 
-## 15. Paper Mode vs Live
+## 16. Paper Mode vs Live
 
 ### Paper Mode (`PAPER_TRADE=true`)
 
@@ -546,7 +565,7 @@ Before setting `PAPER_TRADE=false`, verify all of the following in paper mode:
 
 ---
 
-## 16. Docker Deployment
+## 17. Docker Deployment
 
 Argus ships with a `Dockerfile` and `docker-compose.yml` for running on any machine (Mac Mini, Linux server) without managing a Python environment.
 
@@ -603,7 +622,7 @@ Full step-by-step migration checklist: [`mac-mini-setup.md`](mac-mini-setup.md)
 
 ---
 
-## 17. MCP Bridge — Market Discovery
+## 18. MCP Bridge — Market Discovery
 
 Argus watches more than just its static watchlist. Market discovery runs via two parallel mechanisms:
 
@@ -655,13 +674,13 @@ curl -X DELETE http://127.0.0.1:8000/api/mcp-candidates \
 
 ---
 
-## 18. Directory Structure  
+## 19. Directory Structure  
 
 ```
 argus/
 ├── .env                          # Non-secret config (copy from .env.example)
 ├── .env.example                  # Template with all supported variables
-├── Dockerfile                    # python:3.11-slim; source in /app; data at /data
+├── Dockerfile                    # python:3.12-slim; source in /app; data at /data
 ├── docker-compose.yml            # Service definition; secrets from host env; named volume
 ├── .dockerignore                 # Excludes .venv, .env, db, logs from image
 ├── pyproject.toml                # Package definition and dependencies
