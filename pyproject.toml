@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "argus"
 version = "0.5.5"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "anthropic>=0.40.0",
     "google-genai>=1.0.0",
@@ -13,7 +13,7 @@ dependencies = [
     "yfinance>=0.2.0",
     "pandas>=2.0.0",
     "pandas-ta",
-    "numpy>=1.26.0",
+    "numpy>=2.0.0",
     "sqlalchemy>=2.0.0",
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",

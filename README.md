@@ -3,7 +3,7 @@
 ![Argus](argus/dashboard/static/banner.png)
 
 ![version](https://img.shields.io/badge/version-v0.5.5-blue)
-![python](https://img.shields.io/badge/python-3.11%2B-blue)
+![python](https://img.shields.io/badge/python-3.12-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 Argus is a personal AI trading agent that runs on your computer and watches your Robinhood account 24/7. It uses **Claude + Gemini** to decide when to buy and sell, enforces automatic stop-losses, and shows everything in a live web dashboard.
@@ -28,7 +28,7 @@ Argus is a personal AI trading agent that runs on your computer and watches your
 
 ### 1. Prerequisites
 
-- Python 3.11 or newer
+- Python **3.12** (3.12.x recommended — 3.11 and 3.14 are not supported, see note below)
 - A Robinhood account
 - An [Anthropic API key](https://console.anthropic.com) (Claude) — required
 - A [Google Gemini API key](https://aistudio.google.com) — optional, enables the two-model ensemble
@@ -39,7 +39,7 @@ Argus is a personal AI trading agent that runs on your computer and watches your
 ```bash
 git clone https://github.com/ErickZBrambila/argus.git
 cd argus
-python3.11 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
@@ -48,10 +48,12 @@ pip install -e .
 ```powershell
 git clone https://github.com/ErickZBrambila/argus.git
 cd argus
-py -3.11 -m venv .venv
+py -3.12 -m venv .venv
 .venv\Scripts\activate
 pip install -e .
 ```
+
+> **Python version note:** Argus requires Python **3.12**. Python 3.11 is not supported because `pandas-ta` and `numpy` now require 3.12+. Python 3.14 is not yet supported because `pandas-ta` does not have binary wheels for it. Python 3.13 may work but has not been tested.
 
 ### 3. Run the setup wizard
 
