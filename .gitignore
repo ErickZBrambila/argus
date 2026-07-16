@@ -22,5 +22,6 @@ equity_history.json
 paper_state*.json
 argus_flashcards.jsonl
 argus.db
+.argus.pid
 alert_history.json
 approval_queue.json
