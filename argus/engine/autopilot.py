@@ -511,8 +511,30 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 self._screener_candidates = candidates
                 syms = [c["symbol"] for c in candidates]
                 logger.info("Screener updated: %d candidates %s", len(candidates), syms)
+
+            # Unusual options flow — scan combined watchlist + screener universe
+            from argus.screener.market_intelligence import get_unusual_options_flow, get_insider_buys
+            watchlist = web_dashboard.get_watchlist() or self._cfg.watchlist
+            scan_universe = list({*watchlist, *(c["symbol"] for c in self._screener_candidates)})
+            flow = get_unusual_options_flow(scan_universe)
+            existing = {c["symbol"] for c in self._screener_candidates}
+            new_flow = [c for c in flow if c["symbol"] not in existing]
+            if new_flow:
+                self._screener_candidates.extend(new_flow)
+                logger.info("Options flow: %d new unusual signals %s",
+                            len(new_flow), [c["symbol"] for c in new_flow])
+
+            # Insider buys — SEC EDGAR Form 4 purchases
+            insider = get_insider_buys()
+            existing = {c["symbol"] for c in self._screener_candidates}
+            new_insider = [c for c in insider if c["symbol"] not in existing]
+            if new_insider:
+                self._screener_candidates.extend(new_insider)
+                logger.info("Insider buys: %d new signals %s",
+                            len(new_insider), [c["symbol"] for c in new_insider])
+
         except Exception as exc:
-            logger.debug("Screener refresh failed: %s", exc)
+            logger.warning("Screener refresh failed: %s", exc)
 
     def set_scan_interval(self, seconds: Optional[int]) -> None:
         self._scan_interval_override = seconds
