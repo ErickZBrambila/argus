@@ -4,7 +4,7 @@
 
 Architecture, configuration reference, API docs, and internals for contributors and advanced users.
 
-![version](https://img.shields.io/badge/version-v0.5.5-blue)
+![version](https://img.shields.io/badge/version-v0.6.0-blue)
 
 ## 1. What is Argus?
 
@@ -38,6 +38,8 @@ graph TD
     RH["Robinhood API\n(robin_stocks)"]
     MCP["Robinhood MCP Tools\n(Claude bridge)"]
     SCR["Screener Discovery\n(top-100, movers,\nearnings tag)"]
+    OPT["Options Flow\n(yfinance — unusual\ncall volume)"]
+    INS["Insider Buying\n(SEC EDGAR Form 4\npurchases)"]
     SE["Signal Engine\n(pandas_ta indicators)"]
     DE["Decision Engine\n(Claude + Gemini ensemble)"]
     TT["Token Tracker\n(daily cost monitor)"]
@@ -54,8 +56,10 @@ graph TD
 
     MCP -->|"POST /api/inject-candidates"| WEB
     SCR -->|"daily refresh at open"| WEB
+    OPT -->|"daily refresh at open"| WEB
+    INS -->|"daily refresh at open"| WEB
     RH -->|"price/history"| SE
-    WEB -->|"mcp_candidates + screener"| SE
+    WEB -->|"mcp_candidates + screener\n+ options_flow + insider"| SE
     MS -->|"session label"| INT
     INT -->|"interval seconds"| WEB
     SE -->|"SignalResult"| DE
@@ -77,7 +81,9 @@ graph TD
     LB -->|"last 12 entries"| TERM
 ```
 
-The main loop (`Autopilot` in `argus.engine.autopilot`) runs on an adaptive interval that changes with the NYSE market session (logic in `argus.engine.session`). On each tick it detects the current session, computes signals **in parallel** across all watchlist symbols **plus any screener/MCP candidates** (`ThreadPoolExecutor`, up to 8 workers), then runs `_tick_account` independently for each configured account.
+The main loop (`Autopilot` in `argus.engine.autopilot`) runs on an adaptive interval that changes with the NYSE market session (logic in `argus.engine.session`). On each tick it detects the current session, computes signals **in parallel** across all watchlist symbols **plus any screener/MCP/options-flow/insider candidates** (`ThreadPoolExecutor`, up to 8 workers), then runs `_tick_account` independently for each configured account.
+
+Once per day at market open, `_refresh_screener()` runs four discovery passes in sequence: the Robinhood native screener (movers, popular, earnings), unusual options flow, SEC EDGAR insider buys, and any pending MCP-injected candidates. Results are deduplicated and merged into a single candidate pool.
 
 ---
 
@@ -622,7 +628,57 @@ Full step-by-step migration checklist: [`mac-mini-setup.md`](mac-mini-setup.md)
 
 ---
 
-## 18. MCP Bridge — Market Discovery
+## 18. Market Intelligence Screeners
+
+`argus/screener/market_intelligence.py` provides two additional discovery feeds that run once per day at market open alongside the native Robinhood screener. Both are integrated in `Autopilot._refresh_screener()` and deduplicated before being added to the signal universe. The AI ensemble still makes the final BUY/SELL/HOLD decision.
+
+### 18a. Unusual Options Flow
+
+Scans the combined watchlist + daily screener universe via **yfinance options chains**. For each symbol, it pulls the nearest expiry and computes:
+
+| Metric | Threshold | Signal |
+|--------|-----------|--------|
+| Call volume / Call open interest | > 30% | Unusual — 30%+ of all open calls traded today |
+| Call volume / Put volume | > 2.5× | Bullish skew — calls outpace puts by 2.5:1 |
+
+Both the `call_vol ≥ 500` minimum and either threshold above must be met for a symbol to be flagged. The scan runs with `ThreadPoolExecutor(max_workers=8)` and a 12-second timeout per symbol. Symbols are added to the screener candidate pool with `category="options_flow"`.
+
+**Why this matters:** Large institutional orders often show up as unusual options activity 1–3 days before the underlying moves. The call/OI ratio is particularly reliable because most retail traders do not turn over 30%+ of all open interest in a single session.
+
+### 18b. SEC EDGAR Insider Buying
+
+Fetches recent **Form 4 filings** (insider transaction reports) from the SEC EDGAR full-text search API and filters for open-market purchases only.
+
+**Pipeline:**
+
+```
+1. EDGAR EFTS API  →  all Form 4 filings in the last 3 days
+   GET https://efts.sec.gov/LATEST/search-index
+       ?forms=4&dateRange=custom&startdt=...&enddt=...
+
+2. For each filing:
+   a. Parse _source.ciks[] to identify insider CIK vs issuer CIK
+      (insider CIK matches the accession number prefix)
+   b. Look up issuer ticker: SEC company tickers JSON
+      https://www.sec.gov/files/company_tickers.json  (cached in memory)
+   c. Resolve primary XML filename: data.sec.gov/submissions/CIK{insider}.json
+      (LRU-cached per CIK — multiple filings from the same insider share one fetch)
+   d. Download Form 4 XML from Archives/edgar/data/{cik}/{acc}/{doc}.xml
+   e. Confirm <transactionCode>P</transactionCode>  (purchase, not grant/award/sale)
+
+3. Aggregate by issuer ticker — count distinct insiders per symbol
+4. Sort by count descending — multiple insiders buying = stronger signal
+```
+
+Rate limiting: a module-level `threading.Lock` enforces a minimum 0.12 s gap between all EDGAR requests (≈8 req/s, within EDGAR's 10 req/s policy). Parallel XML fetches use `ThreadPoolExecutor(max_workers=5)`.
+
+Symbols are added with `category="insider"` and a reason string like `"SEC Form 4: 2 insiders purchased shares (last 3d)"`.
+
+**Why this works:** Insider selling is noisy (diversification, tax planning), but insider buying is almost always conviction. Executives and directors buy their own stock when they believe it is undervalued. Clustering (multiple insiders buying in the same week) is among the strongest publicly-available signals in equities research.
+
+---
+
+## 19. MCP Bridge — Market Discovery
 
 Argus watches more than just its static watchlist. Market discovery runs via two parallel mechanisms:
 
@@ -674,12 +730,13 @@ curl -X DELETE http://127.0.0.1:8000/api/mcp-candidates \
 
 ---
 
-## 19. Directory Structure  
+## 20. Directory Structure  
 
 ```
 argus/
 ├── .env                          # Non-secret config (copy from .env.example)
 ├── .env.example                  # Template with all supported variables
+├── start.sh                      # Standard start/stop/restart/status script
 ├── Dockerfile                    # python:3.12-slim; source in /app; data at /data
 ├── docker-compose.yml            # Service definition; secrets from host env; named volume
 ├── .dockerignore                 # Excludes .venv, .env, db, logs from image
@@ -690,10 +747,11 @@ argus/
 ├── argus_flashcards.jsonl        # Trade decision flashcards (created at runtime)
 │
 ├── docs/
+│   ├── technical.md              # This document — architecture, config, API reference
 │   └── mac-mini-setup.md         # Step-by-step Mac Mini + Docker migration checklist
 │
 └── argus/                        # Main package
-    ├── __init__.py               # Package version (__version__ = "0.5.5")
+    ├── __init__.py               # Package version (__version__ = "0.6.0")
     ├── main.py                   # Main entry point; CLI wrapper
     ├── config.py                 # Pydantic settings; keychain source; priority chain
     ├── secrets.py                # OS keychain read/write via keyring
@@ -709,6 +767,10 @@ argus/
     │
     ├── broker/
     │   └── robinhood.py          # RobinhoodBroker; paper simulation; live order execution
+    │
+    ├── screener/
+    │   ├── __init__.py           # Package init
+    │   └── market_intelligence.py  # Unusual options flow (yfinance) + SEC EDGAR insider buying
     │
     ├── strategy/
     │   └── indicators.py         # SignalEngine; Strategy Pattern; pandas_ta indicators

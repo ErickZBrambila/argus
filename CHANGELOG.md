@@ -8,6 +8,32 @@ Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH
 
 ---
 
+## [0.6.0] — 2026-07-16
+
+### Added — Market Intelligence Screeners
+
+- **Unusual options flow** (`argus/screener/market_intelligence.py`) — scans the combined watchlist + daily screener universe every morning at market open via yfinance options chains. Flags any symbol where call volume ≥ 500 AND (call/OI ratio > 30% OR call/put volume ratio > 2.5×). Runs in parallel via `ThreadPoolExecutor(8)` with a 12-second per-symbol timeout. Catches institutional and smart-money footprints before they show up in price.
+- **SEC EDGAR insider buying** (`argus/screener/market_intelligence.py`) — fetches recent Form 4 filings from the SEC EDGAR EFTS API daily. Resolves the issuer ticker from the EDGAR submissions JSON (LRU-cached per insider CIK), downloads the raw Form 4 XML, and confirms `transactionCode=P` (open-market purchase — grants and awards are excluded). Symbols with multiple insiders buying the same week rank higher. Rate-limited at 0.12s/request to respect EDGAR's 10 req/s cap.
+- **`argus/screener/` package** — new module housing both intelligence feeds; cleanly separated from the broker layer.
+
+Both feeds run inside `Autopilot._refresh_screener()` and are deduplicated against existing screener candidates before being added to the scan universe. The AI ensemble (Claude + Gemini) still makes the final BUY/SELL/HOLD call — the intelligence feeds only expand candidate discovery.
+
+### Added — Operations
+
+- **`start.sh`** — standard start/stop/restart/status script. Tracks the process PID in `.argus.pid`, logs to `logs/argus.log`, guards against double-starts, and prints the dashboard URL on start. Usage: `./start.sh [start|stop|restart|status]`.
+
+### Fixed
+
+- **Chart blank on first load** (`dashboard/web.py`) — LightweightCharts v4 fires `subscribeVisibleTimeRangeChange` with a null range before chart data is set. Both the main↔RSI sync callbacks were calling `setVisibleRange(null)`, throwing `Error: Value is null` and silently aborting `loadChart`. Fixed with a `_syncingRange` flag (prevents ping-pong) and null guards on both callbacks. Charts now render correctly on first page load without requiring a symbol switch.
+
+### Changed
+
+- **Python version pinned to 3.12** (`pyproject.toml`) — `requires-python = ">=3.12,<3.14"`. Python 3.11 is unsupported (`pandas-ta` and `numpy 2.x` require 3.12+); Python 3.14 is unsupported (no `pandas-ta` wheels yet). See [Python compatibility table](docs/technical.md#2-python-version-compatibility).
+- **`numpy` pinned to `>=2.0.0`** — aligns with the `pandas-ta` requirement.
+- **Runtime files added to `.gitignore`** — `monthly_token_usage.json`, `total_token_usage.json`, `.argus.pid`.
+
+---
+
 ## [0.5.5] — 2026-07-13
 
 ### Added — Market Discovery & MCP Bridge

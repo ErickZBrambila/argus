@@ -2,7 +2,7 @@
 
 ![Argus](argus/dashboard/static/banner.png)
 
-![version](https://img.shields.io/badge/version-v0.5.5-blue)
+![version](https://img.shields.io/badge/version-v0.6.0-blue)
 ![python](https://img.shields.io/badge/python-3.12-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
