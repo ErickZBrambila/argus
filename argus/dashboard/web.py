@@ -241,8 +241,8 @@ def _news_fetch_loop() -> None:
         for url in _NEWS_FEEDS:
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "Argus/0.5.3 (+financial-dashboard)"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    root = ET.fromstring(resp.read(512 * 1024))  # 512 KB cap
+                with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310 — hardcoded HTTPS URLs
+                    root = ET.fromstring(resp.read(512 * 1024))  # nosec B314 — ET doesn't expand external entities; 512 KB cap prevents DoS
                 items = []
                 for item in root.findall(".//item")[:15]:
                     title = (item.findtext("title") or "").strip()

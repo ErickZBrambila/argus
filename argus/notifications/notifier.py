@@ -102,11 +102,13 @@ class Notifier:
                     "color": 0x00b4d8,
                 }],
             }).encode()
+            if not self._discord_webhook.startswith("https://"):
+                raise ValueError("Discord webhook must use HTTPS")
             req = urllib.request.Request(
                 self._discord_webhook, data=payload,
                 headers={"Content-Type": "application/json"},
             )
-            urllib.request.urlopen(req, timeout=10)
+            urllib.request.urlopen(req, timeout=10)  # nosec B310 — HTTPS enforced above
             logger.info("Discord notification sent")
         except Exception as exc:
             logger.warning("Discord notification failed: %s", exc)
@@ -119,6 +121,8 @@ class Notifier:
         try:
             safe_title = subject.replace("\r", "").replace("\n", " ")[:128]
             safe_title = safe_title.encode("latin-1", errors="replace").decode("latin-1")
+            if not self._ntfy_url.startswith("https://"):
+                raise ValueError("ntfy URL must use HTTPS")
             req = urllib.request.Request(
                 self._ntfy_url, data=body.encode("utf-8"),
                 headers={
@@ -127,7 +131,7 @@ class Notifier:
                     "Tags": "chart_with_upwards_trend",
                 },
             )
-            urllib.request.urlopen(req, timeout=10)
+            urllib.request.urlopen(req, timeout=10)  # nosec B310 — HTTPS enforced above
             logger.info("ntfy notification sent")
         except Exception as exc:
             logger.warning("ntfy notification failed: %s", exc)
