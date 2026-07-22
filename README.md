@@ -79,6 +79,8 @@ argus
 
 Then open **http://localhost:8000** in your browser.
 
+> **Need more detail?** Full architecture diagrams, configuration reference, API docs, and internals are in **[docs/technical.md](docs/technical.md)**.
+
 ---
 
 ## Finding your Robinhood account number

@@ -8,10 +8,7 @@ OS keychain.  Shuts down automatically when setup completes.
 
 from __future__ import annotations
 
-import os
 import pathlib
-import subprocess
-import sys
 import threading
 import webbrowser
 from typing import Any
@@ -114,7 +111,8 @@ async def do_setup(request: Request) -> JSONResponse:
 
     # Shut down wizard after a short delay so the response reaches the browser
     def _stop():
-        import time; time.sleep(1.5)
+        import time
+        time.sleep(1.5)
         _shutdown_event.set()
     threading.Thread(target=_stop, daemon=True).start()
 
@@ -529,7 +527,8 @@ def main() -> None:
     print(f"\n  Argus Setup Wizard → http://localhost:{port}\n")
 
     def _open_browser():
-        import time; time.sleep(1.2)
+        import time
+        time.sleep(1.2)
         webbrowser.open(f"http://localhost:{port}")
     threading.Thread(target=_open_browser, daemon=True).start()
 

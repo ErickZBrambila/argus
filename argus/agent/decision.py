@@ -85,7 +85,7 @@ def classify_risk(signal_confidence: float, decision_confidence: float, consensu
     return "high"
 
 
-from argus.config import get_settings
+from argus.config import get_settings  # noqa: E402
 
 def get_model_info() -> dict:
     settings = get_settings()
@@ -188,7 +188,8 @@ class _GeminiEngine:
             _ai_status["gemini"] = status
             # On quota exhaustion (429), pause Gemini for the rest of the trading day
             if "429" in err_str or "quota" in err_str.lower() or "resource_exhausted" in err_str.lower():
-                import time, datetime as _dt
+                import time
+                import datetime as _dt
                 now = _dt.datetime.now()
                 midnight = _dt.datetime.combine(now.date() + _dt.timedelta(days=1), _dt.time.min)
                 self._quota_exhausted_until = midnight.timestamp()
@@ -334,7 +335,7 @@ Respond ONLY with valid JSON:
                 )
                 try:
                     votes["claude"] = json.loads(msg.content[0].text)
-                except:
+                except Exception:
                     pass
 
             if self._gemini:
@@ -350,7 +351,7 @@ Respond ONLY with valid JSON:
                 )
                 try:
                     votes["gemini"] = json.loads(resp.text.strip().replace("```json","").replace("```",""))
-                except:
+                except Exception:
                     pass
 
             votes["agreed"] = (votes["claude"].get("vote") == "YES" and votes["gemini"].get("vote") == "YES")

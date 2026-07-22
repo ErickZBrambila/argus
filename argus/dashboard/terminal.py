@@ -89,7 +89,6 @@ class TerminalDashboard:
         next_scan = s.get("next_scan_at")
         if next_scan:
             try:
-                import pytz
                 nxt = datetime.datetime.fromisoformat(next_scan)
                 secs = max(0, int((nxt - datetime.datetime.now(datetime.timezone.utc)).total_seconds()))
                 m, sec = divmod(secs, 60)
@@ -274,7 +273,7 @@ def _build_account_panel(label: str, acct: dict, color: str) -> Panel:
     inner.add_row(Text("Trades", style="dim italic"))
     inner.add_row(tr_table)
     inner.add_row(Text(""))
-    inner.add_row(Text(f"$25K Goal", style="dim"))
+    inner.add_row(Text("$25K Goal", style="dim"))
     inner.add_row(_build_goal_bar(equity, goal, color))
 
     title = f"[bold {color}]{label.upper()}[/bold {color}]"

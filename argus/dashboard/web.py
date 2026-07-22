@@ -42,9 +42,9 @@ _search_fn = None          # callable(query: str) -> list[{symbol, name}]
 _autopilot = None         # Autopilot instance for runtime control
 
 # Equity curve — ring buffer of {time, value} points for the session
-import collections as _collections
-import pathlib as _pathlib
-_equity_history: collections.deque = _collections.deque(maxlen=480)  # ~8h at 60s interval
+import collections as _collections  # noqa: E402
+import pathlib as _pathlib  # noqa: E402
+_equity_history: _collections.deque = _collections.deque(maxlen=480)  # ~8h at 60s interval
 _equity_history_by_account: dict = {}  # label → deque(maxlen=480)
 _EQUITY_PERSIST_PATH = _pathlib.Path(__file__).parent.parent.parent / "equity_history.json"
 
@@ -326,7 +326,7 @@ def add_to_runtime_watchlist(symbol: str) -> None:
 # ── MCP-injected discovery candidates ────────────────────────────────────────
 # External bridge (Claude MCP → Argus): Claude calls MCP tools and POSTs symbols here.
 # Autopilot reads these each tick and adds them to the scan universe.
-import datetime as _dt_mod
+import datetime as _dt_mod  # noqa: E402
 
 _mcp_candidates: list[dict] = []
 _mcp_candidates_lock = threading.Lock()
@@ -478,7 +478,7 @@ _STATIC_DIR = pathlib.Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 # ── Security headers middleware ───────────────────────────────────────────────
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 
 class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):

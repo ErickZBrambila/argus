@@ -11,7 +11,7 @@ import json
 import logging
 import pathlib
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
