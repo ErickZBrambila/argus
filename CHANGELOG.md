@@ -8,6 +8,26 @@ Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH
 
 ---
 
+## [0.6.1] — 2026-07-22
+
+### Added — Public release & CI/CD pipeline
+
+- **GitHub Actions: CI** (`.github/workflows/ci.yml`) — runs `ruff` lint, `bandit` security scan, and `pytest` on every push and pull request targeting `main`. Python 3.12 matrix.
+- **GitHub Actions: CodeQL** (`.github/workflows/codeql.yml`) — Python static security analysis via GitHub's CodeQL engine (taint analysis, SQL injection, path traversal). Runs on push/PR and weekly on a Monday cron so dependency-introduced issues are caught even without code changes.
+- **GitHub Actions: Claude Code Review** (`.github/workflows/claude-review.yml`) — every PR is automatically reviewed by Claude (`anthropic/claude-code-action@beta`), focused on trading safety (unintended real-money orders, stop-loss bypass), credential exposure, EDGAR/yfinance correctness, and correctness bugs. Posts inline PR comments.
+- **Dependabot** (`.github/dependabot.yml`) — weekly PRs for pip package CVE fixes and minor/patch bumps; also updates GitHub Actions pinned versions. `anthropic` and `robin-stocks` major bumps excluded (require manual review).
+- **`SECURITY.md`** — vulnerability disclosure policy: email-first reporting, 48h response SLA, scope definition (highest priority: unintended trades, credential exposure, dashboard auth bypass), and summary of Argus security design (keychain-only secrets, paper mode by default, no cached MFA sessions).
+- **README badges** — CI status and CodeQL status badges added next to the version badge.
+- **README Contributing section** — documents the automated PR quality gates and references `SECURITY.md` for vulnerability reports.
+- **`docs/technical.md` §20** — new "CI/CD Pipeline" section documenting all three workflows, local pre-PR commands, CodeQL scope, Claude review focus areas, Dependabot configuration, and recommended branch protection settings.
+
+### Changed
+
+- Directory structure (§21 in technical docs) updated to reflect `.github/` layout and `SECURITY.md`.
+- Version badges across README and technical docs updated to v0.6.1.
+
+---
+
 ## [0.6.0] — 2026-07-16
 
 ### Added — Market Intelligence Screeners

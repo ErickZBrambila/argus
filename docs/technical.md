@@ -4,7 +4,7 @@
 
 Architecture, configuration reference, API docs, and internals for contributors and advanced users.
 
-![version](https://img.shields.io/badge/version-v0.6.0-blue)
+![version](https://img.shields.io/badge/version-v0.6.1-blue)
 
 ## 1. What is Argus?
 
@@ -730,7 +730,68 @@ curl -X DELETE http://127.0.0.1:8000/api/mcp-candidates \
 
 ---
 
-## 20. Directory Structure  
+## 20. CI/CD Pipeline
+
+Every push to `main` and every pull request runs the full automated quality and security suite defined in `.github/workflows/`.
+
+### Workflows
+
+| Workflow | File | Trigger | What it checks |
+|----------|------|---------|----------------|
+| **CI** | `ci.yml` | push / PR | ruff lint, bandit security scan, pytest |
+| **CodeQL** | `codeql.yml` | push / PR / weekly Monday | Deep Python static analysis (taint, injection, path traversal) |
+| **Claude Code Review** | `claude-review.yml` | PR open / sync | AI review: trading safety, credential exposure, correctness bugs |
+
+### CI — lint and test
+
+Uses `ruff` for fast style + correctness checks and `bandit` for Python-specific security patterns (hardcoded secrets, shell injection, insecure hashing). Test suite runs with `pytest`. Tests are currently sparse — CI marks the pytest step `continue-on-error` so they don't block PRs, but they will fail loudly in the log.
+
+Run locally before opening a PR:
+```bash
+pip install ruff bandit
+ruff check argus/
+bandit -r argus/ -ll --exclude argus/dashboard/static
+pytest tests/ -v
+```
+
+### CodeQL
+
+GitHub's CodeQL analyzes the Python AST and data-flow graph for SAST issues — SQL injection, path traversal, taint from external inputs into sensitive sinks, and more. Runs as a GitHub-hosted runner and posts findings to the **Security → Code scanning** tab. Also runs on a weekly cron (every Monday 8 AM UTC) to catch issues introduced by dependency updates even if no code changed.
+
+### Claude Code Review
+
+Every PR is automatically reviewed by Claude via `anthropic/claude-code-action@beta`. The review is focused on Argus-specific risk:
+
+- **Trading safety** — anything that could trigger an unintended real-money order, bypass `PAPER_TRADE`, skip the stop-loss sweep, or ignore the kill switch
+- **Credential exposure** — API keys, Robinhood credentials, or TOTP secrets accidentally referenced in logs or HTTP responses
+- **EDGAR/yfinance correctness** — rate limit compliance, correct field parsing, XML edge cases
+- **Correctness bugs** — race conditions in the thread pool, None handling, off-by-one in position sizing
+
+Claude posts findings as inline PR comments. Requires `ANTHROPIC_API_KEY` stored as a repository secret.
+
+### Dependabot
+
+`dependabot.yml` opens PRs every Monday for:
+- `pip` package updates (CVE fixes, minor/patch bumps)
+- GitHub Actions version updates
+
+`anthropic` and `robin-stocks` major-version bumps are excluded from auto-PRs — those are breaking changes requiring manual review.
+
+### Branch protection (configure in GitHub Settings → Branches)
+
+Required for `main`:
+- **Require pull request before merging**
+- **Require status checks:** `lint-and-test`, `Analyze (Python)`
+- **Dismiss stale reviews** when new commits are pushed
+- **Do not allow bypassing** the above settings
+
+### Security disclosure
+
+See [SECURITY.md](../SECURITY.md) for the vulnerability disclosure policy. GitHub secret scanning is enabled automatically on public repositories and emails the owner within minutes if a key is accidentally committed.
+
+---
+
+## 21. Directory Structure
 
 ```
 argus/
@@ -742,16 +803,24 @@ argus/
 ├── .dockerignore                 # Excludes .venv, .env, db, logs from image
 ├── pyproject.toml                # Package definition and dependencies
 ├── CHANGELOG.md                  # Version history
+├── SECURITY.md                   # Vulnerability disclosure policy and security design notes
 ├── argus.db                      # SQLite trade history (created at runtime)
 ├── argus.log                     # Rolling log file (created at runtime)
 ├── argus_flashcards.jsonl        # Trade decision flashcards (created at runtime)
+│
+├── .github/
+│   ├── dependabot.yml            # Weekly pip + Actions dependency update PRs
+│   └── workflows/
+│       ├── ci.yml                # ruff lint + bandit security scan + pytest
+│       ├── codeql.yml            # GitHub CodeQL Python static analysis
+│       └── claude-review.yml     # Automated PR review via claude-code-action@beta
 │
 ├── docs/
 │   ├── technical.md              # This document — architecture, config, API reference
 │   └── mac-mini-setup.md         # Step-by-step Mac Mini + Docker migration checklist
 │
 └── argus/                        # Main package
-    ├── __init__.py               # Package version (__version__ = "0.6.0")
+    ├── __init__.py               # Package version (__version__ = "0.6.1")
     ├── main.py                   # Main entry point; CLI wrapper
     ├── config.py                 # Pydantic settings; keychain source; priority chain
     ├── secrets.py                # OS keychain read/write via keyring
