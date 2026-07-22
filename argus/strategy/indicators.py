@@ -154,7 +154,6 @@ class SignalEngine:
             if df is None or len(df) < 2:
                 return raw
 
-            import pandas_ta as ta
             # Add indicators
             df.ta.rsi(length=14, append=True)
             df.ta.sma(length=20, append=True)
@@ -224,7 +223,7 @@ class SignalEngine:
             return None
 
         try:
-            import pandas_ta as ta
+            import pandas_ta as ta  # noqa: F401
         except ImportError:
             logger.error("pandas_ta not installed; run: pip install pandas-ta")
             return None

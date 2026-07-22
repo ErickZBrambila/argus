@@ -66,7 +66,7 @@ class BacktestEngine:
             raise ValueError(f"{symbol}: insufficient clean data")
 
         try:
-            import pandas_ta as ta
+            import pandas_ta as ta  # noqa: F401
         except ImportError:
             raise RuntimeError("pandas_ta not installed")
 

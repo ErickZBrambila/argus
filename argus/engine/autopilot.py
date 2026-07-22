@@ -7,7 +7,6 @@ import datetime
 import logging
 import os
 import signal
-import sys
 import threading
 import time
 import uuid
@@ -22,7 +21,6 @@ from argus.dashboard import web as web_dashboard
 from argus.notifications.notifier import Notifier
 from argus.risk.manager import RiskManager
 from argus.storage.models import (
-    AccountDailyStats,
     DailyStats,
     Signal,
     Trade,
@@ -266,7 +264,8 @@ class Autopilot:
         if _anthropic_key:
             def _make_investigate_fn(anthropic_key: str, gemini_key: str):
                 import anthropic as _ant
-                import json as _json, re as _re
+                import json as _json
+                import re as _re
                 import concurrent.futures as _cf
 
                 _claude_client = _ant.Anthropic(api_key=anthropic_key, timeout=45.0)
@@ -595,7 +594,6 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             self._sync_positions_to_watchlist()
 
         # Build signals list — watchlist first, then screener, then MCP candidates
-        mcp_sym_set = {c["symbol"] for c in mcp_cands}
         for sym in watchlist:
             if sym in signal_map:
                 signals.append(signal_map[sym].to_dict())

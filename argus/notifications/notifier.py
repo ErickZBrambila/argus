@@ -8,7 +8,6 @@ import smtplib
 import subprocess
 import urllib.request
 from email.mime.text import MIMEText
-from typing import Optional
 
 from pydantic import SecretStr
 
