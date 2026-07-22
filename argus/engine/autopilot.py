@@ -826,6 +826,20 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                             acct.label, symbol, decision.confidence * 100, self._cfg.min_confidence * 100,
                         )
                         continue
+                    # RSI gate: skip neutral-zone entries (RSI 45-55 has 29% WR vs 53% at 55-70)
+                    if sig.rsi is not None and sig.rsi < 52:
+                        logger.info(
+                            "[%s][%s] BUY blocked — RSI %.1f below momentum threshold (52)",
+                            acct.label, symbol, sig.rsi,
+                        )
+                        continue
+                    # High-risk gate: don't auto-execute high-risk trades on the agentic account
+                    if acct.label == "agentic" and decision.risk_level == "high":
+                        logger.info(
+                            "[%s][%s] BUY blocked — high-risk trade skipped on agentic (auto) account",
+                            acct.label, symbol,
+                        )
+                        continue
                     risk_check = acct.risk.approve_buy(symbol, equity, open_positions, _db_day_trades)
                     if not risk_check.allowed:
                         logger.info("[%s][%s] BUY blocked: %s", acct.label, symbol, risk_check.reason)
@@ -834,6 +848,21 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     open_positions = acct.broker.get_open_positions()
 
                 elif decision.action == "SELL" and symbol in open_positions:
+                    # Minimum hold: don't let AI sell within 48h of entry (stop-loss still fires)
+                    card = self._flashcards.get_open_card_for_symbol(symbol, acct.label)
+                    if card and card.timestamp:
+                        try:
+                            entry_dt = datetime.datetime.fromisoformat(card.timestamp)
+                            hold_hours = (datetime.datetime.now(_UTC) - entry_dt).total_seconds() / 3600
+                            if hold_hours < 48:
+                                logger.info(
+                                    "[%s][%s] SELL blocked — held %.1fh, minimum 48h (stop-loss still active)",
+                                    acct.label, symbol, hold_hours,
+                                )
+                                decisions[symbol] = decision
+                                continue
+                        except Exception:
+                            pass
                     self._execute_sell(acct, symbol, open_positions[symbol]["qty"], reason=decision.reasoning)
                     open_positions.pop(symbol, None)
 

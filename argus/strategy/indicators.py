@@ -236,9 +236,9 @@ class SignalEngine:
         df.ta.macd(fast=12, slow=26, signal=9, append=True)
         macd_col, macd_sig_col, macd_hist_col = "MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9"
 
-        # Bollinger Bands (20, 2)
+        # Bollinger Bands (20, 2) — pandas_ta appends std twice in the column name
         df.ta.bbands(length=20, std=2, append=True)
-        bb_lower_col, bb_mid_col, bb_upper_col = "BBL_20_2.0", "BBM_20_2.0", "BBU_20_2.0"
+        bb_lower_col, bb_mid_col, bb_upper_col = "BBL_20_2.0_2.0", "BBM_20_2.0_2.0", "BBU_20_2.0_2.0"
 
         # SMA 20, EMA 50
         df.ta.sma(length=20, append=True)

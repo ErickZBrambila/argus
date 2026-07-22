@@ -212,6 +212,17 @@ class FlashcardStore:
         logger.info("Flashcard closed: %s %s | P&L %.2f%%", card.symbol, outcome, card.pnl_pct)
         return card
 
+    def get_open_card_for_symbol(self, symbol: str, account: str) -> Optional["Flashcard"]:
+        """Return the most recent open flashcard for a symbol+account, or None."""
+        with self._lock:
+            candidates = [
+                c for c in self._cards.values()
+                if c.symbol == symbol and c.account == account and c.exit_price is None
+            ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda c: c.timestamp)
+
     def get_all(self) -> list[Flashcard]:
         with self._lock:
             return list(self._cards.values())
