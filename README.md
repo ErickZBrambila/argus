@@ -2,9 +2,11 @@
 
 ![Argus](argus/dashboard/static/banner.png)
 
-![version](https://img.shields.io/badge/version-v0.6.0-blue)
+![version](https://img.shields.io/badge/version-v0.6.1-blue)
 ![python](https://img.shields.io/badge/python-3.12-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
+![CI](https://github.com/ErickZBrambila/argus/actions/workflows/ci.yml/badge.svg)
+![CodeQL](https://github.com/ErickZBrambila/argus/actions/workflows/codeql.yml/badge.svg)
 
 Argus is a personal AI trading agent that runs on your computer and watches your Robinhood account 24/7. It uses **Claude + Gemini** to decide when to buy and sell, enforces automatic stop-losses, and shows everything in a live web dashboard.
 
@@ -274,6 +276,24 @@ Argus runs on Windows with no extra steps beyond the install commands above. A f
 - The `argus-tmux` / `argus-bg` shell aliases listed in the technical docs are macOS/Linux only — on Windows just run `argus` in a terminal window
 - Secrets are stored in **Windows Credential Manager** (same as macOS Keychain — automatic, nothing to configure)
 - Stop Argus with `Ctrl+C` — `SIGTERM` isn't available on Windows but `Ctrl+C` works fine
+
+---
+
+## Contributing
+
+Pull requests are welcome. Every PR automatically gets:
+
+- **CI** — ruff lint + bandit security scan + pytest on Python 3.12
+- **CodeQL** — static security analysis (runs on push and weekly)
+- **Claude Code Review** — AI review focused on trading safety, credential exposure, and logic correctness
+- **Dependabot** — weekly dependency security updates
+
+Before opening a PR:
+1. Run `pip install -e ".[dev]" && pytest tests/` locally
+2. Run `ruff check argus/` — fix any lint errors
+3. If your change touches real-money trade execution, stop-loss logic, or credential handling, note it explicitly in the PR description
+
+To report a **security vulnerability**, see [SECURITY.md](SECURITY.md) — please don't open a public issue.
 
 ---
 
