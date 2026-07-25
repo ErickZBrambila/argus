@@ -386,7 +386,7 @@ const POPULAR = [
 const DEFAULT_WL = new Set(['AAPL','TSLA','NVDA','BTC','ETH']);
 
 let current = 0;
-const NUM_STEPS = 4;
+const NUM_STEPS = 5;
 let selectedChips = new Set(DEFAULT_WL);
 
 // Build chip grid
