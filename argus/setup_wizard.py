@@ -420,7 +420,7 @@ ranges.forEach(([id, fmt]) => {
 fetch('/api/prefill').then(r => r.json()).then(d => {
   if (d.ROBINHOOD_USERNAME) document.getElementById('rh_user').value = d.ROBINHOOD_USERNAME;
   if (d.AGENTIC_ACCOUNT_NUMBER) document.getElementById('acct_ag').value = d.AGENTIC_ACCOUNT_NUMBER;
-  if (d.DEFAULT_ACCOUNT_NUMBER) document.getElementById('acct_def').value = d.AGENTIC_ACCOUNT_NUMBER;
+  if (d.DEFAULT_ACCOUNT_NUMBER) document.getElementById('acct_def').value = d.DEFAULT_ACCOUNT_NUMBER;
   if (d.NTFY_URL) document.getElementById('ntfy').value = d.NTFY_URL;
   if (d.PAPER_TRADE) document.getElementById('paper_mode').checked = d.PAPER_TRADE === 'true';
   if (d.WATCHLIST) {
@@ -457,7 +457,7 @@ function validate(step) {
 
 function go(dir) {
   if (dir === 1 && !validate(current)) return;
-  if (current + dir >= NUM_STEPS) { finish(); return; }
+  if (current + dir >= NUM_STEPS - 1) { finish(); return; }
   current = Math.max(0, Math.min(NUM_STEPS - 1, current + dir));
   render();
 }
