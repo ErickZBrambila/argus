@@ -8,6 +8,43 @@ Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH
 
 ---
 
+## [0.7.0] — 2026-08-10
+
+### Added — Pre-Trade Guard System
+
+Four new engine modules run before every BUY or SELL is executed, each with a thread-safe daily (or per-minute) cache so they never add more than one Robinhood API call per symbol per day.
+
+- **`argus/engine/earnings_guard.py` — EarningsGuard**
+  Blocks BUY orders when an earnings report is within 5 calendar days (`_EARNINGS_BLOCK_DAYS`). Fetches upcoming earnings via `robin_stocks.get_earnings()`, caches per symbol per day. Crypto symbols always pass (no earnings exist). Wired into `_tick_account()` after the high-risk gate, before `approve_buy()`.
+
+- **`argus/engine/fundamentals_cache.py` — FundamentalsCache**
+  Fetches P/E ratio, P/B ratio, market cap, 52-week range position (0–100% of range), and QoQ EPS trend from Robinhood once per symbol per day. Injects a compact `Fundamentals:` text block into every Claude + Gemini decision prompt between the technical indicators and portfolio context sections. Crypto symbols return an empty block. The AI models are now valuation-aware on every decision.
+
+- **`argus/engine/tax_lot_checker.py` — TaxLotChecker**
+  Defers voluntary AI-initiated SELL orders when the position is within 14 days (`_DEFER_DAYS`) of converting from a short-term to long-term capital gain. Uses the position's `created_at` date from `robin_stocks.get_open_stock_positions()` as a proxy for acquisition date. Stop-loss sells are unaffected — only discretionary AI sells are held. Crypto is exempt.
+
+- **`argus/engine/price_book_guard.py` — PriceBookGuard**
+  Blocks BUY orders when the Level 2 bid/ask spread exceeds 0.5% (`_MAX_SPREAD_PCT`). Fetches the order book via `robin_stocks.get_pricebook_by_symbol()` and caches the result for 60 seconds (`_CACHE_SECONDS`). A wide spread indicates low liquidity or a fast-moving market where slippage would erase the signal edge. Falls back to allowing the trade if the API call fails.
+
+### Added — Fundamentals in AI Prompt
+
+- **`DecisionEngine.decide()`** accepts a new `fundamentals_block: str = ""` parameter and passes it to `_build_prompt()`.
+- **`_build_prompt()`** inserts the fundamentals block between the technical indicators section and portfolio context. When no fundamentals are available (crypto, API failure), the section is omitted entirely.
+- Autopilot calls `self._fundamentals.to_prompt_block(symbol)` on every decision — the cache ensures each symbol hits the API at most once per day.
+
+### Added — Realized P&L Dashboard
+
+- **`GET /api/realized-pnl`** — new authenticated endpoint that fetches YTD dividends, sell proceeds, and a ranked list of closed positions (up to 20) from Robinhood account history.
+- **Performance tab** — new "Realized P&L (YTD)" card with a **Load** button. On click, fetches the endpoint and renders dividend total, sell proceeds total, and a per-symbol proceeds table. Marked `private` class so the hide-values toggle blurs dollar amounts.
+
+### Changed
+
+- `Autopilot.__init__()` instantiates all four guards: `EarningsGuard`, `FundamentalsCache`, `TaxLotChecker`, `PriceBookGuard`.
+- BUY guard chain order in `_tick_account()`: exit-only → other-account hold → confidence threshold → RSI gate → high-risk gate → **earnings guard** → **price book guard** → `approve_buy()`.
+- SELL gate order: minimum 48h hold → **tax lot defer** → execute.
+
+---
+
 ## [0.6.1] — 2026-07-22
 
 ### Added — Public release & CI/CD pipeline

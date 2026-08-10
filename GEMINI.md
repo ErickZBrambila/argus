@@ -21,6 +21,10 @@ Argus is an automated AI trading agent for Robinhood that uses a **Claude + Gemi
 - `argus/main.py`: CLI entry point.
 - `argus/engine/autopilot.py`: The core orchestration loop and account management.
 - `argus/engine/session.py`: NYSE market session detection and adaptive interval logic.
+- `argus/engine/earnings_guard.py`: Blocks BUY within 5 days of an earnings report; daily per-symbol cache.
+- `argus/engine/fundamentals_cache.py`: Injects PE, P/B, 52-week range, and EPS trend into AI prompts; daily cache.
+- `argus/engine/tax_lot_checker.py`: Defers voluntary SELL when a lot is within 14 days of long-term threshold; daily cache.
+- `argus/engine/price_book_guard.py`: Blocks BUY when bid/ask spread > 0.5%; 60-second cache.
 - `argus/agent/decision.py`: The ensemble decision engine and automated **Go-Live Audit**.
 - `argus/broker/robinhood.py`: Integration with Robinhood (Live & Paper modes).
 - `argus/strategy/indicators.py`: Technical signal computation using pluggable strategies.
@@ -37,7 +41,16 @@ Argus tracks statistical performance (Sample Size, Profit Factor, Calibration) a
 ### 2. Advanced Charting
 The dashboard features `lightweight-charts` with synced RSI sub-panes, Volume histograms, SMA-20/EMA-50 overlays, and a timeframe picker (1D, 1W, 1M, 3M, 1Y). It automatically "patches" today's data using live price feeds if the broker history is delayed.
 
-### 3. Efficiency & Resilience
+### 3. Pre-Trade Guard System
+Four modules run before every BUY or SELL, each with a thread-safe cache:
+- **EarningsGuard** — blocks BUY within 5 days of earnings (daily cache per symbol).
+- **FundamentalsCache** — injects PE, P/B, 52-week range, EPS trend into AI prompts (daily cache).
+- **TaxLotChecker** — defers voluntary SELL when within 14 days of long-term tax threshold (daily cache).
+- **PriceBookGuard** — blocks BUY when bid/ask spread > 0.5% (60-second cache).
+
+All guards fail open — if the Robinhood API call fails, the trade is allowed. Stop-loss is always exempt from the tax lot defer gate.
+
+### 4. Efficiency & Resilience
 - **Signal Debouncing**: Skips expensive LLM calls if technical signals haven't shifted significantly.
 - **Historical Caching**: Caches OHLCV data in SQLite to reduce API latency.
 - **Kill Switch**: Automatically halts buying if a -5% daily drawdown is reached.
