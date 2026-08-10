@@ -1410,6 +1410,75 @@ async def run_backtest(payload: dict) -> dict:
         raise HTTPException(status_code=500, detail="Backtest failed")
 
 
+# ── Realized P&L ─────────────────────────────────────────────────────────────
+
+@app.get("/api/realized-pnl", dependencies=[Depends(_require_auth)])
+async def get_realized_pnl() -> dict:
+    """Return YTD realized gains/losses from Robinhood account history."""
+    def _fetch() -> dict:
+        try:
+            import robin_stocks.robinhood as rh
+            # get_stock_historicals doesn't give P&L; use account's stock_order_history
+            # aggregated via Robinhood's profitability endpoint
+            data = rh.account.get_total_dividends() or {}
+            dividends_total = 0.0
+            try:
+                dividends_total = float(data) if isinstance(data, (str, float, int)) else 0.0
+            except (ValueError, TypeError):
+                pass
+
+            # Portfolio history gives net account return (realized + unrealized combined)
+            history = rh.account.get_portfolio_history(span="year", bounds="regular") or {}
+            equity_items = history.get("equity_historicals", []) or []
+
+            # Gather closed positions P&L from order history
+            orders = rh.orders.get_all_stock_orders() or []
+            realized: list[dict] = []
+            sold: dict[str, list] = {}
+            for o in orders:
+                if o.get("state") != "filled":
+                    continue
+                side = o.get("side", "")
+                sym = ""
+                try:
+                    inst = rh.stocks.get_instrument_by_url(o.get("instrument", "")) or {}
+                    sym = inst.get("symbol", "")
+                except Exception:
+                    pass
+                if not sym:
+                    continue
+                if side == "sell":
+                    avg_price = float(o.get("average_price") or 0)
+                    qty = float(o.get("quantity") or 0)
+                    sold.setdefault(sym, []).append({"price": avg_price, "qty": qty, "date": o.get("last_transaction_at", "")})
+
+            total_realized = sum(
+                sum(lot["price"] * lot["qty"] for lot in lots)
+                for lots in sold.values()
+            )
+
+            return {
+                "dividends_ytd": round(dividends_total, 2),
+                "sell_proceeds_ytd": round(total_realized, 2),
+                "symbols_sold": [
+                    {
+                        "symbol": sym,
+                        "total_proceeds": round(sum(l["price"] * l["qty"] for l in lots), 2),
+                        "lots": len(lots),
+                    }
+                    for sym, lots in sorted(sold.items(), key=lambda x: -sum(l["price"] * l["qty"] for l in x[1]))
+                ][:20],
+                "equity_history_length": len(equity_items),
+            }
+        except Exception as exc:
+            logger.warning("Realized P&L fetch failed: %s", exc)
+            return {"error": str(exc)}
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _fetch)
+    return result
+
+
 # ── SSE stream ────────────────────────────────────────────────────────────────
 
 @app.get("/events", dependencies=[Depends(_require_auth)])
@@ -2763,6 +2832,15 @@ _HTML = """<!DOCTYPE html>
       <div id="perf-confidence"><div class="empty">No data yet</div></div>
     </div>
 
+    <!-- Realized P&L (Robinhood account history) -->
+    <div class="card card-full">
+      <div class="card-title" style="display:flex;align-items:center;gap:12px">
+        Realized P&amp;L (YTD)
+        <button class="btn btn-sm" onclick="loadRealizedPnl()" id="realized-pnl-btn">Load</button>
+      </div>
+      <div id="realized-pnl-container"><div class="empty">Click Load to fetch from Robinhood account history.</div></div>
+    </div>
+
   </div><!-- /tab-performance -->
 
   <div class="tab-pane" id="tab-charts">
@@ -3122,6 +3200,43 @@ function renderPerformance(perf, accounts) {
     </div>`;
   }).join('') || '<div class="empty">No data</div>';
   document.getElementById('perf-confidence').innerHTML = confRows;
+}
+
+async function loadRealizedPnl() {
+  const btn = document.getElementById('realized-pnl-btn');
+  const container = document.getElementById('realized-pnl-container');
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  container.innerHTML = '<div class="empty">Fetching from Robinhood…</div>';
+  try {
+    const data = await apiFetch('/api/realized-pnl');
+    if (data.error) {
+      container.innerHTML = `<div class="empty" style="color:var(--red)">Error: ${data.error}</div>`;
+      return;
+    }
+    const divHtml = data.dividends_ytd != null
+      ? `<div class="perf-stat"><div class="perf-stat-label">Dividends YTD</div><div class="perf-stat-value private" style="color:var(--green)">$${data.dividends_ytd.toFixed(2)}</div></div>`
+      : '';
+    const procHtml = data.sell_proceeds_ytd != null
+      ? `<div class="perf-stat"><div class="perf-stat-label">Sell Proceeds YTD</div><div class="perf-stat-value private">$${data.sell_proceeds_ytd.toLocaleString('en-US',{minimumFractionDigits:2})}</div></div>`
+      : '';
+    const symRows = (data.symbols_sold || []).map(s =>
+      `<div class="perf-row">
+        <span style="font-family:var(--mono);font-weight:600">${s.symbol}</span>
+        <span style="color:var(--muted)">${s.lots} lot${s.lots !== 1 ? 's' : ''}</span>
+        <span class="private">$${s.total_proceeds.toLocaleString('en-US',{minimumFractionDigits:2})} proceeds</span>
+      </div>`
+    ).join('') || '<div class="empty">No closed positions found</div>';
+    container.innerHTML = `
+      <div class="perf-grid" style="margin-bottom:14px">${divHtml}${procHtml}</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Top Closed Positions</div>
+      ${symRows}`;
+  } catch(e) {
+    container.innerHTML = `<div class="empty" style="color:var(--red)">Failed: ${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Refresh';
+  }
 }
 
 function renderReadiness(scorecard, aiVote) {

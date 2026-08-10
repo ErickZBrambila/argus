@@ -42,6 +42,10 @@ from argus.storage.models import (
 from argus.learning.flashcards import FlashcardStore
 from argus.strategy.indicators import SignalEngine, SignalResult
 from argus.engine.session import get_market_session, is_market_hours
+from argus.engine.earnings_guard import EarningsGuard
+from argus.engine.fundamentals_cache import FundamentalsCache
+from argus.engine.tax_lot_checker import TaxLotChecker
+from argus.engine.price_book_guard import PriceBookGuard
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +188,10 @@ class Autopilot:
             else TerminalDashboard()
         )
         self._flashcards = FlashcardStore()
+        self._earnings_guard = EarningsGuard()
+        self._fundamentals = FundamentalsCache()
+        self._tax_lots = TaxLotChecker()
+        self._price_book = PriceBookGuard()
         self._recent_trades: collections.deque = collections.deque(maxlen=200)
         self._latest_signals: list[dict] = []
         self._first_signal_sent: set[str] = set()  # priority symbols that already fired first-signal alert
@@ -759,6 +767,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                         open_positions=open_positions,
                         daily_pnl_pct=daily_pnl_pct,
                         max_positions=self._cfg.max_positions,
+                        fundamentals_block=self._fundamentals.to_prompt_block(symbol),
                     )
                     # Don't cache flawed decisions — a model error (e.g. billing
                     # outage) would otherwise be replayed until the signal shifts
@@ -840,6 +849,16 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                             acct.label, symbol,
                         )
                         continue
+                    # Earnings guard: block BUY within 5 days of earnings report
+                    _earn_blocked, _earn_reason = self._earnings_guard.should_block_buy(symbol)
+                    if _earn_blocked:
+                        logger.info("[%s][%s] BUY blocked — %s", acct.label, symbol, _earn_reason)
+                        continue
+                    # Price book guard: skip BUY when bid/ask spread is too wide
+                    _book_blocked, _book_reason = self._price_book.should_block_buy(symbol)
+                    if _book_blocked:
+                        logger.info("[%s][%s] BUY blocked — %s", acct.label, symbol, _book_reason)
+                        continue
                     risk_check = acct.risk.approve_buy(symbol, equity, open_positions, _db_day_trades)
                     if not risk_check.allowed:
                         logger.info("[%s][%s] BUY blocked: %s", acct.label, symbol, risk_check.reason)
@@ -863,6 +882,12 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                                 continue
                         except Exception:
                             pass
+                    # Tax lot gate: defer voluntary sells when lot is nearly long-term
+                    _tax_defer, _tax_reason = self._tax_lots.should_defer_sell(symbol)
+                    if _tax_defer:
+                        logger.info("[%s][%s] SELL deferred — %s", acct.label, symbol, _tax_reason)
+                        decisions[symbol] = decision
+                        continue
                     self._execute_sell(acct, symbol, open_positions[symbol]["qty"], reason=decision.reasoning)
                     open_positions.pop(symbol, None)
 

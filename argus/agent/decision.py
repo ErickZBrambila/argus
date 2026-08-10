@@ -280,8 +280,9 @@ class DecisionEngine:
         open_positions: dict,
         daily_pnl_pct: float = 0.0,
         max_positions: int = 5,
+        fundamentals_block: str = "",
     ) -> TradeDecision:
-        prompt = _build_prompt(signal, portfolio_equity, open_positions, daily_pnl_pct, max_positions)
+        prompt = _build_prompt(signal, portfolio_equity, open_positions, daily_pnl_pct, max_positions, fundamentals_block)
         try:
             if self._gemini:
                 import concurrent.futures
@@ -369,6 +370,7 @@ def _build_prompt(
     open_positions: dict,
     daily_pnl_pct: float,
     max_positions: int = 5,
+    fundamentals_block: str = "",
 ) -> str:
     holding = signal.symbol in open_positions
     pos_info = ""
@@ -388,6 +390,7 @@ def _build_prompt(
     sma_str = f"{signal.sma_20:.2f}" if signal.sma_20 is not None else "N/A"
     ema_str = f"{signal.ema_50:.2f}" if signal.ema_50 is not None else "N/A"
 
+    fundamentals_section = f"\n{fundamentals_block}\n" if fundamentals_block else ""
     return f"""Symbol: {signal.symbol}
 Current price: ${signal.price:.4f}
 Composite signal: {signal.composite} (confidence {signal.confidence:.0%})
@@ -398,7 +401,7 @@ Technical indicators:
   Bollinger Bands: {bb_str}
   SMA-20: {sma_str}
   EMA-50: {ema_str}
-
+{fundamentals_section}
 Portfolio context:
   Equity: ${portfolio_equity:,.2f}
   Open positions: {len(open_positions)} / {max_positions} max
