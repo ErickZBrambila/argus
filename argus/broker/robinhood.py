@@ -36,6 +36,10 @@ def _validated_symbol(symbol: str) -> str:
 _VALID_SPANS = frozenset({"day", "week", "month", "3month", "year", "5year"})
 _VALID_INTERVALS = frozenset({"5minute", "10minute", "hour", "day", "week"})
 
+# robin_stocks uses a single global session. Only the first RobinhoodBroker
+# in a process should call rh.login() — subsequent instances reuse the session.
+_rh_session_active: bool = False
+
 
 @dataclass
 class OrderResult:
@@ -93,6 +97,14 @@ class RobinhoodBroker:
     # ── Auth ────────────────────────────────────────────────────────────────
 
     def _login(self) -> None:
+        global _rh_session_active
+        # robin_stocks has a single global session — only login once per process.
+        # Repeated rh.login() calls within the same 30s TOTP window hit the same
+        # MFA code, causing Robinhood to reject the repeated authentication.
+        if _rh_session_active:
+            self._logged_in = True
+            logger.info("Robinhood session reused (already logged in)")
+            return
         try:
             import robin_stocks.robinhood as rh
 
@@ -108,17 +120,20 @@ class RobinhoodBroker:
                 store_session=False,       # never persist tokens to disk
             )
             self._logged_in = True
+            _rh_session_active = True
             logger.info("Robinhood login successful")
         except Exception as exc:
             logger.error("Robinhood login failed: %s", exc)
             raise
 
     def logout(self) -> None:
+        global _rh_session_active
         if self._logged_in:
             try:
                 import robin_stocks.robinhood as rh
                 rh.logout()
                 self._logged_in = False
+                _rh_session_active = False
             except Exception as exc:
                 logger.warning("Logout error: %s", exc)
 
