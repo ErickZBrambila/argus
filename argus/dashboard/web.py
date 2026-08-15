@@ -3631,7 +3631,7 @@ function renderAccounts(accounts, state) {
     if (!ce || ce.total_usd <= 0) return '';
     const posRows = (ce.positions || []).map(p =>
       `<div class="crypto-pos-row">
-        <span class="crypto-pos-sym">${esc(p.symbol)}</span>
+        <span class="crypto-pos-sym">${escHtml(p.symbol)}</span>
         <span class="muted">${p.qty.toFixed(4)} × ${fmtDollar(p.price)}</span>
         <span class="crypto-pos-val private">${fmtDollar(p.value)}</span>
       </div>`
