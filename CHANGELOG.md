@@ -11,7 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH
 ## [0.7.1] — 2026-08-15
 
 ### Fixed
-- **Live-mode login**: Robinhood username was `@outlook.com` in `.env` — corrected to `@yahoo.com`
+- **Live-mode login**: Incorrect Robinhood username in `.env` caused all login attempts to fail — verify `ROBINHOOD_USERNAME` matches the email on your Robinhood account exactly
 - **Login detection**: `robin_stocks` does not set `ACCESS_TOKEN` after the device-approval challenge flow; now verifies the session `Authorization` header instead, which is the actual signal that auth succeeded
 
 ### Added
