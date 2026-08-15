@@ -2203,6 +2203,13 @@ _HTML = """<!DOCTYPE html>
     color: var(--muted);
   }
   .acct-total-bar strong { color: var(--text); }
+  /* ── Crypto panel ───────────────────────────────────────────────────────── */
+  .acct-panel.crypto { border-color: rgba(247,147,26,.35); }
+  .acct-panel-title.crypto { color: #f7931a; }
+  .acct-equity.crypto { color: #f7931a; }
+  .crypto-pos-row { display:flex; justify-content:space-between; align-items:center; padding:3px 0; font-size:12px; }
+  .crypto-pos-sym { font-weight:600; color:var(--text); min-width:40px; }
+  .crypto-pos-val { color:var(--text); font-variant-numeric:tabular-nums; }
 
   /* ── Approval queue ─────────────────────────────────────────────────────── */
   .approval-card { border-color: rgba(210,153,34,.4); background: rgba(210,153,34,.03); }
@@ -3619,6 +3626,24 @@ function renderAccounts(accounts, state) {
 
   const COLOR = { agentic: '#00d4aa', default: '#c084fc' };
 
+  const cryptoPanel = (() => {
+    const ce = state.crypto_equity;
+    if (!ce || ce.total_usd <= 0) return '';
+    const posRows = (ce.positions || []).map(p =>
+      `<div class="crypto-pos-row">
+        <span class="crypto-pos-sym">${esc(p.symbol)}</span>
+        <span class="muted">${p.qty.toFixed(4)} × ${fmtDollar(p.price)}</span>
+        <span class="crypto-pos-val private">${fmtDollar(p.value)}</span>
+      </div>`
+    ).join('');
+    return `<div class="acct-panel crypto">
+      <div class="acct-panel-title crypto">CRYPTO</div>
+      <div class="acct-equity crypto private">${fmtDollar(ce.total_usd)}</div>
+      <div class="acct-row"><span class="acct-row-label">Holdings</span><span>${(ce.positions||[]).length} coin${(ce.positions||[]).length !== 1 ? 's' : ''}</span></div>
+      <div class="acct-positions-mini">${posRows || '<div style="color:var(--muted);font-size:12px;padding:4px 0">No crypto positions</div>'}</div>
+    </div>`;
+  })();
+
   panels.innerHTML = Object.entries(accounts).map(([label, a]) => {
     const cls = label === 'agentic' ? 'agentic' : 'default';
     const equity = a.equity || 0;
@@ -3674,7 +3699,7 @@ function renderAccounts(accounts, state) {
       <div class="acct-positions-mini">${posRows}</div>
       ${renderGoalBar(equity, _equityGoal, cls)}
     </div>`;
-  }).join('');
+  }).join('') + cryptoPanel;
 }
 
 function updateAiStatus(ai) {
@@ -3755,7 +3780,12 @@ function applyState(state) {
   const totalBar = document.getElementById('acct-total-bar');
   if (state.accounts && Object.keys(state.accounts).length > 1) {
     totalBar.style.display = 'flex';
-    document.getElementById('stat-equity').innerHTML = fmtDollar(equity);
+    const cryptoTotal = (state.crypto_equity && state.crypto_equity.total_usd) || 0;
+    const grandTotal = equity + cryptoTotal;
+    document.getElementById('stat-equity').innerHTML =
+      cryptoTotal > 0
+        ? `${fmtDollar(grandTotal)} <span style="color:var(--muted);font-size:11px">(stocks ${fmtDollar(equity)} + crypto ${fmtDollar(cryptoTotal)})</span>`
+        : fmtDollar(equity);
     const pnlEl = document.getElementById('stat-pnl');
     pnlEl.innerHTML = fmtPnl(pnl, pnlPct);
     pnlEl.className = pnlClass(pnl);

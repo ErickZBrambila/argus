@@ -234,6 +234,39 @@ class RobinhoodBroker:
                 return self._paper_equity + self._paper_position_value_unsafe()
         return self._live_equity()
 
+    def get_crypto_equity(self) -> dict:
+        """Return USD value of all crypto holdings plus a per-coin breakdown.
+
+        Crypto is not account-scoped in Robinhood — call this once per process,
+        not once per account, to avoid double-counting.
+
+        Returns: {"total_usd": float, "positions": [{"symbol", "qty", "price", "value"}]}
+        """
+        if not self._logged_in:
+            return {"total_usd": 0.0, "positions": []}
+        try:
+            import robin_stocks.robinhood as rh
+            holdings = rh.crypto.get_crypto_positions() or []
+            breakdown = []
+            total = 0.0
+            for item in holdings:
+                sym = item.get("currency", {}).get("code", "")
+                qty = float(item.get("quantity", 0))
+                if not sym or qty < 1e-8:
+                    continue
+                try:
+                    price = self._live_get_price(sym)
+                except Exception:
+                    cost = float(item.get("cost_bases", [{}])[0].get("direct_cost_basis", 0))
+                    price = cost / qty if qty else 0.0
+                value = price * qty
+                total += value
+                breakdown.append({"symbol": sym, "qty": qty, "price": price, "value": value})
+            return {"total_usd": round(total, 2), "positions": breakdown}
+        except Exception as exc:
+            logger.warning("Could not fetch crypto equity: %s", exc)
+            return {"total_usd": 0.0, "positions": []}
+
     def _live_equity(self) -> float:
         import robin_stocks.robinhood as rh
         acct = self.account_number or None

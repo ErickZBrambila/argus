@@ -1348,6 +1348,16 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 "equity_goal": self._cfg.equity_goal,
             }
 
+        # Crypto equity — fetch once from first live broker (not account-scoped)
+        crypto_equity: dict = {"total_usd": 0.0, "positions": []}
+        for _acct in self._accounts:
+            if _acct.broker._logged_in and not _acct.broker.paper:
+                try:
+                    crypto_equity = _acct.broker.get_crypto_equity()
+                except Exception as _ce:
+                    logger.debug("Could not fetch crypto equity: %s", _ce)
+                break
+
         from argus.dashboard.token_tracker import get_summary as _token_summary
         tokens = _token_summary()
         lifetime_cost = tokens.get("lifetime_cost_usd", 0.0)
@@ -1391,6 +1401,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             "ai_vote":           self._last_ai_vote,
             "ai_status":         _get_ai_status(),
             "ai_models":         _get_model_info(),
+            "crypto_equity":     crypto_equity,
             "watchlist":         web_dashboard.get_watchlist(),
             "screener":          self._screener_candidates,
         }
