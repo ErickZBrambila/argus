@@ -119,13 +119,16 @@ class RobinhoodBroker:
                 mfa_code=mfa_code,
                 store_session=False,       # never persist tokens to disk
             )
-            # rh.login() sometimes fails silently (prints a message, returns None,
-            # but doesn't set ACCESS_TOKEN). Verify the session is actually active.
+            # rh.login() can fail silently (prints a message, returns None) especially
+            # during the device-approval challenge flow. Verify the session is live by
+            # checking the Authorization header on the shared session object.
             from robin_stocks.robinhood import globals as _rh_globals
-            if not getattr(_rh_globals, "ACCESS_TOKEN", None):
+            _session = getattr(_rh_globals, "SESSION", None)
+            _auth = (_session.headers.get("Authorization") if _session else None)
+            if not _auth:
                 raise RuntimeError(
-                    "rh.login() returned without error but ACCESS_TOKEN is not set — "
-                    "likely a Robinhood auth rejection (wrong credentials or MFA throttle)"
+                    "rh.login() completed but session has no Authorization header — "
+                    "likely a Robinhood auth rejection (wrong credentials or device approval pending)"
                 )
             self._logged_in = True
             _rh_session_active = True
