@@ -8,6 +8,17 @@ Versioning follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH
 
 ---
 
+## [0.7.1] — 2026-08-15
+
+### Fixed
+- **Live-mode login**: Robinhood username was `@outlook.com` in `.env` — corrected to `@yahoo.com`
+- **Login detection**: `robin_stocks` does not set `ACCESS_TOKEN` after the device-approval challenge flow; now verifies the session `Authorization` header instead, which is the actual signal that auth succeeded
+
+### Added
+- **Crypto equity panel**: Dashboard now shows a dedicated orange CRYPTO card alongside the account panels, with per-coin breakdown (symbol, quantity × price, USD value). The "Combined" total bar now reads `stocks $X + crypto $Y` so the total matches what Robinhood displays. Powered by a new `get_crypto_equity()` method on `RobinhoodBroker` that fetches positions once per process to avoid double-counting.
+
+---
+
 ## [0.7.0] — 2026-08-10
 
 ### Added — Pre-Trade Guard System
