@@ -119,6 +119,14 @@ class RobinhoodBroker:
                 mfa_code=mfa_code,
                 store_session=False,       # never persist tokens to disk
             )
+            # rh.login() sometimes fails silently (prints a message, returns None,
+            # but doesn't set ACCESS_TOKEN). Verify the session is actually active.
+            from robin_stocks.robinhood import globals as _rh_globals
+            if not getattr(_rh_globals, "ACCESS_TOKEN", None):
+                raise RuntimeError(
+                    "rh.login() returned without error but ACCESS_TOKEN is not set — "
+                    "likely a Robinhood auth rejection (wrong credentials or MFA throttle)"
+                )
             self._logged_in = True
             _rh_session_active = True
             logger.info("Robinhood login successful")

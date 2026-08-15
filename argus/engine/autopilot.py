@@ -1314,7 +1314,11 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             since_reset_pnl_pct = (since_reset_pnl / reset_baseline * 100) if reset_baseline else 0.0
 
             acct_positions = {}
-            positions_raw = cached.get("positions") or acct.broker.get_open_positions()
+            try:
+                positions_raw = cached.get("positions") or acct.broker.get_open_positions()
+            except Exception as _pos_err:
+                logger.warning("[%s] Could not fetch positions for dashboard: %s", acct.label, _pos_err)
+                positions_raw = {}
             for sym, pos in positions_raw.items():
                 try:
                     cur = acct.broker.get_price(sym)
