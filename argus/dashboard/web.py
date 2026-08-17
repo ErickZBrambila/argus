@@ -2158,6 +2158,7 @@ _HTML = """<!DOCTYPE html>
 
   .acct-mode { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: var(--radius-sm); font-size: 10.5px; font-weight: 700; letter-spacing: 0.3px; }
   .acct-mode-auto     { background: rgba(0,212,170,.12); color: var(--accent); border: 1px solid rgba(0,212,170,.25); }
+  .acct-mode-manual   { background: rgba(210,153,34,.12); color: var(--yellow); border: 1px solid rgba(210,153,34,.25); }
   .acct-mode-approval { background: rgba(210,153,34,.12); color: var(--yellow); border: 1px solid rgba(210,153,34,.25); }
 
   /* Goal progress bar */
@@ -3656,8 +3657,9 @@ function renderAccounts(accounts, state) {
     const resetSign = (resetPnl ?? 0) >= 0 ? '+' : '';
     const resetCls = pnlClass(resetPnl ?? 0);
     const largeThresh = (state && state.large_trade_threshold) || 500;
-    const modeLabel = `AUTO · >$${largeThresh}`;
-    const modeCls   = 'acct-mode-auto';
+    const isDefaultAcct = label === 'default';
+    const modeLabel = isDefaultAcct ? 'MANUAL · ALL' : 'AUTO · 100%';
+    const modeCls   = isDefaultAcct ? 'acct-mode-manual' : 'acct-mode-auto';
     const pending   = a.pending_approvals || 0;
     const dayTrades = a.day_trades || 0;
 
@@ -6628,10 +6630,37 @@ window.addEventListener('resize', () => {
 </html>"""
 
 
+_ACCOUNT_MODE_PATCH = """<script>
+(function() {
+  function _patchRenderAccounts() {
+    if (typeof window.renderAccounts !== 'function') { setTimeout(_patchRenderAccounts, 100); return; }
+    var _orig = window.renderAccounts;
+    window.renderAccounts = function(accounts, state) {
+      var result = _orig.call(this, accounts, state);
+      document.querySelectorAll('.acct-panel').forEach(function(panel) {
+        var title = panel.querySelector('.acct-panel-title');
+        if (!title) return;
+        if (title.textContent.trim().toLowerCase() !== 'default') return;
+        var badge = panel.querySelector('.acct-mode');
+        if (!badge) return;
+        badge.textContent = 'MANUAL · ALL';
+        badge.classList.remove('acct-mode-auto');
+        badge.classList.add('acct-mode-manual');
+        badge.style.cssText = 'background:rgba(210,153,34,.12);color:#f0b429;border:1px solid rgba(210,153,34,.25)';
+      });
+      return result;
+    };
+  }
+  _patchRenderAccounts();
+})();
+</script>"""
+
+
 @app.get("/", response_class=HTMLResponse, dependencies=[Depends(_require_auth)])
 async def index() -> str:
     token_script = f"<script>window._ARGUS_TOKEN={json.dumps(_dashboard_token)};</script>"
-    return _HTML.replace("</head>", token_script + "\n</head>", 1)
+    html = _HTML.replace("</head>", token_script + "\n</head>", 1)
+    return html.replace("</body>", _ACCOUNT_MODE_PATCH + "\n</body>", 1)
 
 
 @app.get("/m", response_class=HTMLResponse, dependencies=[Depends(_require_auth)])

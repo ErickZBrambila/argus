@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from argus.agent.decision import DecisionEngine, TradeDecision, get_ai_status as _get_ai_status, get_model_info as _get_model_info
-from argus.broker.robinhood import RobinhoodBroker
+from argus.broker.robinhood import CRYPTO_SYMBOLS, RobinhoodBroker
 from argus.config import get_settings
 from argus.dashboard.terminal import NullTerminalDashboard, TerminalDashboard
 from argus.dashboard import web as web_dashboard
@@ -908,16 +908,14 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         sig: SignalResult,
         signal_obj: Optional[SignalResult] = None,
     ) -> None:
-        # Agentic account is fully autonomous — never gate on trade size
+        # Agentic account is fully autonomous — no approval gates.
         if acct.label == "agentic":
             self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
             return
 
-        needs_approval = dollar_amount > self._cfg.large_trade_threshold
-
-        if not needs_approval:
-            self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
-            return
+        # Default account: all trades require human approval.
+        is_crypto = symbol in CRYPTO_SYMBOLS
+        needs_approval = True
 
         # Don't queue a duplicate if a BUY for this symbol is already pending
         already_pending = any(
@@ -950,10 +948,11 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             "queued_at": datetime.datetime.now(_UTC).isoformat(),
         }
         web_dashboard.queue_approval(trade_id, trade_info)
-        logger.info("[%s][%s] BUY queued for approval (large trade $%.2f) id=%s", acct.label, symbol, dollar_amount, trade_id)
+        reason_tag = "CRYPTO" if is_crypto else ("DEFAULT ACCT" if acct.label == "default" else f"LARGE TRADE >${self._cfg.large_trade_threshold:.0f}")
+        logger.info("[%s][%s] BUY queued for approval (%s $%.2f) id=%s", acct.label, symbol, reason_tag, dollar_amount, trade_id)
         self._notifier.send(
             f"[{acct.label.upper()}] Approval needed: BUY {symbol}",
-            f"LARGE TRADE ${dollar_amount:.2f} (>{self._cfg.large_trade_threshold:.0f}) · {decision.risk_level.upper()} RISK · conf {decision.confidence:.0%}\n{decision.reasoning[:200]}\nApprove at http://{self._cfg.web_host}:{self._cfg.web_port}",
+            f"{reason_tag} ${dollar_amount:.2f} · {decision.risk_level.upper()} RISK · conf {decision.confidence:.0%}\n{decision.reasoning[:200]}\nApprove at http://{self._cfg.web_host}:{self._cfg.web_port}",
         )
 
     _APPROVAL_TTL_SECONDS = 1800  # 30 minutes
@@ -1027,16 +1026,23 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         signal: Optional[SignalResult] = None,
         decision: Optional[TradeDecision] = None,
     ) -> None:
+        # ── Step 1: broker order ─────────────────────────────────────────────
         try:
             result = acct.broker.buy(symbol, dollar_amount)
-            if not result.filled:
-                logger.warning("[%s][%s] Buy order not filled", acct.label, symbol)
-                return
+        except Exception as exc:
+            logger.error("[%s] Buy broker call failed for %s: %s", acct.label, symbol, exc)
+            return
 
-            trade_id = result.order_id
-            stop_price = acct.risk.stop_loss_price(result.price)
-            if result.paper:
-                acct.broker.set_paper_stop_loss(symbol, stop_price)
+        if not result.filled:
+            logger.warning("[%s][%s] Buy order not filled", acct.label, symbol)
+            return
+
+        # ── Step 2: DB write (order confirmed filled) ────────────────────────
+        trade_id = result.order_id
+        stop_price = acct.risk.stop_loss_price(result.price)
+        if result.paper:
+            acct.broker.set_paper_stop_loss(symbol, stop_price)
+        try:
             with get_session() as session:
                 upsert_position(session, symbol, result.quantity, result.price, stop_price, acct.label)
                 session.add(Trade(
@@ -1050,41 +1056,42 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     reasoning=reasoning[:4000],
                 ))
                 self._increment_trade_count(session)
-
-            if signal is not None and decision is not None:
-                self._flashcards.record_trade(
-                    trade_id=trade_id,
-                    symbol=symbol,
-                    action="BUY",
-                    account=acct.label,
-                    signal=signal,
-                    decision=decision,
-                    entry_price=result.price,
-                    dollar_amount=dollar_amount,
-                )
-
-            self._recent_trades.appendleft({
-                "time": datetime.datetime.now(_UTC).strftime("%H:%M:%S"),
-                "symbol": symbol,
-                "side": "buy",
-                "quantity": result.quantity,
-                "price": result.price,
-                "account": acct.label,
-            })
-            self._notifier.send(
-                f"[{acct.label.upper()}] BUY {symbol}",
-                f"Bought {result.quantity:.4f} {symbol} @ ${result.price:.4f} (${result.quantity * result.price:.2f})",
-            )
         except Exception as exc:
             logger.critical(
-                "[%s] BROKER BUY MAY HAVE FILLED BUT DB WRITE FAILED for %s: %s — check brokerage positions!",
+                "[%s] BROKER BUY FILLED BUT DB WRITE FAILED for %s: %s — check brokerage positions!",
                 acct.label, symbol, exc,
             )
             self._notifier.send(
                 f"[{acct.label.upper()}] CRITICAL: Buy DB write failed — {symbol}",
-                f"Broker order may have filled but local records were not saved. "
+                f"Broker order FILLED but local records were not saved. "
                 f"Check your brokerage account for {symbol} position. Error: {str(exc)[:200]}",
             )
+            return
+
+        if signal is not None and decision is not None:
+            self._flashcards.record_trade(
+                trade_id=trade_id,
+                symbol=symbol,
+                action="BUY",
+                account=acct.label,
+                signal=signal,
+                decision=decision,
+                entry_price=result.price,
+                dollar_amount=dollar_amount,
+            )
+
+        self._recent_trades.appendleft({
+            "time": datetime.datetime.now(_UTC).strftime("%H:%M:%S"),
+            "symbol": symbol,
+            "side": "buy",
+            "quantity": result.quantity,
+            "price": result.price,
+            "account": acct.label,
+        })
+        self._notifier.send(
+            f"[{acct.label.upper()}] BUY {symbol}",
+            f"Bought {result.quantity:.4f} {symbol} @ ${result.price:.4f} (${result.quantity * result.price:.2f})",
+        )
 
     def _execute_sell(self, acct: AccountContext, symbol: str, quantity: float, reason: str = "") -> bool:
         """Returns True if the sell was successfully filled."""

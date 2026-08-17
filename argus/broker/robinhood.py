@@ -598,6 +598,10 @@ class RobinhoodBroker:
                     if is_crypto
                     else rh.orders.get_stock_order_info(order_id)
                 )
+                if order is None:
+                    logger.warning("Poll order %s returned None — will retry", order_id)
+                    time.sleep(2)
+                    continue
                 state = order.get("state", "")
                 if state in self._FILL_STATES or state in self._CANCEL_STATES:
                     return order
@@ -618,6 +622,9 @@ class RobinhoodBroker:
                 order = rh.orders.order_buy_fractional_by_quantity(
                     symbol, qty, account_number=self.account_number or None
                 )
+
+            if order is None:
+                raise RuntimeError(f"Broker returned None for BUY {symbol} — order was not submitted")
 
             order_id = order.get("id", str(uuid.uuid4()))
             if order.get("state") not in self._FILL_STATES:
@@ -640,6 +647,9 @@ class RobinhoodBroker:
                 order = rh.orders.order_sell_fractional_by_quantity(
                     symbol, qty, account_number=self.account_number or None
                 )
+
+            if order is None:
+                raise RuntimeError(f"Broker returned None for SELL {symbol} — order was not submitted")
 
             order_id = order.get("id", str(uuid.uuid4()))
             if order.get("state") not in self._FILL_STATES:
