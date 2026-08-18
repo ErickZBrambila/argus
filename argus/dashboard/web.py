@@ -3520,7 +3520,7 @@ function renderTokenUsage(usage) {
     const labels = { green: 'OK', yellow: 'Billing/quota', red: 'Auth error', gray: 'Not yet called' };
     return `<span style="color:${colors[s]};margin-right:5px" title="${labels[s]}">●</span>`;
   };
-  const claudeModel = (aiModels.claude || 'claude').replace('claude-','').replace(/-\d+$/,'');
+  const claudeModel = (aiModels.claude || 'claude').replace('claude-','').replace(/-\\d+$/,'');
   const geminiModel = (aiModels.gemini || 'gemini').replace('gemini-','');
 
   grid.innerHTML = `
@@ -3738,7 +3738,7 @@ function triggerFlashes(state, prev) {
       const p = state.positions[sym];
       const pp = prev.positions[sym];
       if (!pp) return;
-      const safeSym = sym.replace(/\s*\[.*?\]/,'').replace(/[^A-Z0-9]/g, '_');
+      const safeSym = sym.replace(/\\s*\\[.*?\\]/,'').replace(/[^A-Z0-9]/g, '_');
       if (p.current_price !== pp.current_price) {
         const el = document.getElementById(`pos-price-${safeSym}`);
         if (el) {
@@ -3804,7 +3804,7 @@ function applyState(state) {
     posBody.innerHTML = posKeys.map(sym => {
       const p = pos[sym];
       const pct = p.unrealized_pnl_pct || 0;
-      const rawSym = sym.replace(/\s*\[.*?\]/,'');
+      const rawSym = sym.replace(/\\s*\\[.*?\\]/,'');
       const safeSym = rawSym.replace(/[^A-Z0-9]/g, '_');
       return `<tr class="tr-hover">
         <td class="accent">${escHtml(sym)}</td>
@@ -5623,8 +5623,8 @@ function renderAlerts(alertLog, pendingApprovals, pendingPromotes) {
     const d = new Date(a.time);
     const t = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
     let actionBtns = '';
-    const approvalMatch = (a.subject||'').match(/Approval needed:\s*(\w+)\s+(\w+)/i);
-    const promoteMatch  = (a.subject||'').match(/Promote pending:\s*([A-Z0-9.]+)/i);
+    const approvalMatch = (a.subject||'').match(/Approval needed:\\s*(\\w+)\\s+(\\w+)/i);
+    const promoteMatch  = (a.subject||'').match(/Promote pending:\\s*([A-Z0-9.]+)/i);
     if (approvalMatch) {
       const tid = approvalMap[`${approvalMatch[1].toUpperCase()}|${approvalMatch[2].toUpperCase()}`];
       if (tid) {
@@ -6317,7 +6317,7 @@ function mRenderAlerts() {
       const cls = mAlertClassify(a);
       const t = new Date(a.time).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
       let actionBtns = '';
-      const m = (a.subject||'').match(/Approval needed:\s*(\w+)\s+(\w+)/i);
+      const m = (a.subject||'').match(/Approval needed:\\s*(\\w+)\\s+(\\w+)/i);
       if (m) {
         const tid = approvalMap[`${m[1].toUpperCase()}|${m[2].toUpperCase()}`];
         if (tid) {
