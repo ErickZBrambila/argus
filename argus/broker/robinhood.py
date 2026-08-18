@@ -589,27 +589,28 @@ class RobinhoodBroker:
         import robin_stocks.robinhood as rh
         import time
 
-        order: dict = {}   # guard against UnboundLocalError if every poll attempt throws
+        last_known: dict = {}
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                order = (
+                result = (
                     rh.orders.get_crypto_order_info(order_id)
                     if is_crypto
                     else rh.orders.get_stock_order_info(order_id)
                 )
-                if order is None:
+                if result is None:
                     logger.warning("Poll order %s returned None — will retry", order_id)
                     time.sleep(2)
                     continue
-                state = order.get("state", "")
+                last_known = result
+                state = last_known.get("state", "")
                 if state in self._FILL_STATES or state in self._CANCEL_STATES:
-                    return order
+                    return last_known
             except Exception as exc:
                 logger.warning("Poll order %s failed: %s", order_id, exc)
             time.sleep(2)
         logger.warning("Order %s did not fill within %.0fs", order_id, timeout)
-        return order  # return last known state
+        return last_known  # {} if every poll failed — callers must handle missing "state"
 
     def _live_buy(self, symbol: str, qty: float, price: float) -> OrderResult:
         import robin_stocks.robinhood as rh

@@ -653,12 +653,15 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 all_acct_positions[_a.label] = set()
 
         # Collect AI decisions across all accounts; keep highest-confidence per symbol
+        # Only trade watchlist + MCP-injected symbols — screener is display/analysis only
+        mcp_set = set(mcp_syms)
+        tradeable_signal_map = {sym: sig for sym, sig in signal_map.items() if sym in watchlist_set or sym in mcp_set}
         ai_decisions: dict[str, TradeDecision] = {}
         for acct in self._accounts:
             try:
                 # Symbols held by any OTHER account — agentic won't mirror default and vice versa
                 other_held = set().union(*(pos for lbl, pos in all_acct_positions.items() if lbl != acct.label))
-                acct_decisions = self._tick_account(acct, signal_map, other_held)
+                acct_decisions = self._tick_account(acct, tradeable_signal_map, other_held)
                 for sym, dec in acct_decisions.items():
                     if sym not in ai_decisions or dec.confidence > ai_decisions[sym].confidence:
                         ai_decisions[sym] = dec
