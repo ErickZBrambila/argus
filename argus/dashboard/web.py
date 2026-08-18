@@ -3657,8 +3657,9 @@ function renderAccounts(accounts, state) {
     const resetSign = (resetPnl ?? 0) >= 0 ? '+' : '';
     const resetCls = pnlClass(resetPnl ?? 0);
     const largeThresh = (state && state.large_trade_threshold) || 500;
-    const modeLabel = 'AUTO · 100%';
-    const modeCls   = 'acct-mode-auto';
+    const isDefaultAcct = label === 'default';
+    const modeLabel = isDefaultAcct ? 'MANUAL · ALL' : 'AUTO · 100%';
+    const modeCls   = isDefaultAcct ? 'acct-mode-manual' : 'acct-mode-auto';
     const pending   = a.pending_approvals || 0;
     const dayTrades = a.day_trades || 0;
 
