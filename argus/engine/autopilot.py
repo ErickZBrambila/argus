@@ -547,7 +547,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         self._scan_interval_override = seconds
         logger.info(
             "Scan interval %s",
-            f"overridden to {seconds}s" if seconds else "reset to adaptive"
+            f"overridden to {int(seconds)}s" if seconds is not None else "reset to adaptive"
         )
 
     # ── Main tick ────────────────────────────────────────────────────────────

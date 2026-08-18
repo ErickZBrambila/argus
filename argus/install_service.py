@@ -112,7 +112,7 @@ def cmd_install() -> None:
     _PLIST_DIR.mkdir(parents=True, exist_ok=True)
     plist_content = _build_plist(exe, cwd)
     _PLIST_PATH.write_text(plist_content, encoding="utf-8")
-    os.chmod(_PLIST_PATH, 0o644)
+    os.chmod(_PLIST_PATH, 0o600)
 
     # Unload first in case it was already loaded
     _launchctl("unload", str(_PLIST_PATH))

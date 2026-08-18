@@ -46,7 +46,7 @@ def get_secret(key: str) -> Optional[str]:
         value = _keyring().get_password(_SERVICE, key)
         return value or None
     except Exception as exc:
-        logger.debug("Keychain read failed for %s: %s", key, exc)
+        logger.debug("Keychain read failed for %s", key)
         return None
 
 
@@ -55,7 +55,7 @@ def set_secret(key: str, value: str) -> None:
     if not value:
         raise ValueError(f"Refusing to store empty value for {key}")
     _keyring().set_password(_SERVICE, key, value)
-    logger.debug("Stored %s in keychain", key)
+    logger.debug("Stored secret in keychain (key=%s)", key)
 
 
 def delete_secret(key: str) -> None:

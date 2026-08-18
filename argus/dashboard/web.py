@@ -24,6 +24,10 @@ from argus.storage.models import get_session, add_to_db_watchlist, remove_from_d
 
 logger = logging.getLogger(__name__)
 
+def _sl(v: object) -> str:
+    """Sanitize a value for log output — strips newlines to prevent log injection."""
+    return str(v).replace('\n', ' ').replace('\r', ' ')
+
 # Shared state injected by main loop
 _state: dict = {}
 _state_lock = threading.Lock()
@@ -743,7 +747,7 @@ async def force_close(symbol: str) -> dict:
         raise HTTPException(status_code=404, detail=f"{symbol} not in open positions")
     # Signal the main loop to close; the loop polls _force_close_queue
     _force_close_queue.put_nowait(symbol)
-    logger.warning("Force-close requested for %s via web dashboard", symbol)
+    logger.warning("Force-close requested for %s via web dashboard", _sl(symbol))
     return {"status": "close_requested", "symbol": symbol}
 
 
@@ -792,7 +796,7 @@ async def promote_position(symbol: str, body: dict = {}) -> dict:
         f"{from_account.upper()} → {to_account.upper()} — approve to execute at next scan",
     )
     _push_promotes_state()
-    logger.info("Promote approval queued: %s %s → %s (%s)", symbol, from_account, to_account, promote_id)
+    logger.info("Promote approval queued: %s %s → %s (%s)", _sl(symbol), _sl(from_account), _sl(to_account), _sl(promote_id))
     return {"status": "pending_approval", "promote_id": promote_id, "symbol": symbol}
 
 
@@ -808,7 +812,7 @@ async def approve_promote(promote_id: str) -> dict:
         f"Executing {entry['from_account'].upper()} → {entry['to_account'].upper()} at next scan",
     )
     _push_promotes_state()
-    logger.info("Promote approved: %s (%s)", entry["symbol"], promote_id)
+    logger.info("Promote approved: %s (%s)", _sl(entry["symbol"]), _sl(promote_id))
     return {"status": "approved", "promote_id": promote_id, "symbol": entry["symbol"]}
 
 
@@ -823,7 +827,7 @@ async def deny_promote(promote_id: str) -> dict:
         f"{entry['from_account'].upper()} → {entry['to_account'].upper()} cancelled",
     )
     _push_promotes_state()
-    logger.info("Promote denied: %s (%s)", entry["symbol"], promote_id)
+    logger.info("Promote denied: %s (%s)", _sl(entry["symbol"]), _sl(promote_id))
     return {"status": "denied", "promote_id": promote_id, "symbol": entry["symbol"]}
 
 
@@ -1002,7 +1006,7 @@ async def get_chart(
         _chart_cache[cache_key] = (_time.monotonic(), candles)
         return {"candles": candles, "symbol": symbol}
     except Exception as exc:
-        logger.warning("Chart data error for %s: %s", symbol, exc)
+        logger.warning("Chart data error for %s: %s", _sl(symbol), exc)
         return {"candles": [], "symbol": symbol}
 
 
@@ -1027,7 +1031,7 @@ async def start_investigation(body: dict) -> dict:
         }
     _push_investigation_state()
     threading.Thread(target=_run_investigation, args=(symbol,), daemon=True, name=f"inv-{symbol}").start()
-    logger.info("Investigation queued: %s", symbol)
+    logger.info("Investigation queued: %s", _sl(symbol))
     return {"status": "queued", "symbol": symbol}
 
 
@@ -1129,7 +1133,7 @@ async def add_to_watchlist_api(body: dict) -> dict:
         _state["watchlist"] = wl
         snapshot = dict(_state)
     _sse_push(json.dumps(snapshot, default=str))
-    logger.info("Watchlist add: %s → %s", symbol, wl)
+    logger.info("Watchlist add: %s → %s", _sl(symbol), wl)
     return {"watchlist": wl}
 
 
@@ -1151,7 +1155,7 @@ async def remove_from_watchlist_api(symbol: str) -> dict:
         _state["watchlist"] = wl
         snapshot = dict(_state)
     _sse_push(json.dumps(snapshot, default=str))
-    logger.info("Watchlist remove: %s → %s", symbol, wl)
+    logger.info("Watchlist remove: %s → %s", _sl(symbol), wl)
     return {"watchlist": wl}
 
 
@@ -1168,13 +1172,13 @@ async def set_exit_only_api(symbol: str, payload: dict) -> dict:
             session.flush()
             exit_only = get_exit_only_symbols(session)
     except Exception as exc:
-        logger.error("set_exit_only failed for %s: %s", symbol, exc)
+        logger.error("set_exit_only failed for %s: %s", _sl(symbol), exc)
         raise HTTPException(status_code=500, detail="Failed to update exit-only status")
     with _state_lock:
         _state["exit_only_symbols"] = list(exit_only)
         snapshot = dict(_state)
     _sse_push(json.dumps(snapshot, default=str))
-    logger.info("Exit-only %s → %s", symbol, value)
+    logger.info("Exit-only %s → %s", _sl(symbol), value)
     return {"symbol": symbol, "exit_only": value, "exit_only_symbols": list(exit_only)}
 
 
@@ -1198,13 +1202,13 @@ async def set_sell_by_api(symbol: str, payload: dict) -> dict:
             session.flush()
             sell_by = get_sell_by_dates(session)
     except Exception as exc:
-        logger.error("set_sell_by_date failed for %s: %s", symbol, exc)
+        logger.error("set_sell_by_date failed for %s: %s", _sl(symbol), exc)
         raise HTTPException(status_code=500, detail="Failed to update sell-by date")
     with _state_lock:
         _state["sell_by_dates"] = sell_by
         snapshot = dict(_state)
     _sse_push(json.dumps(snapshot, default=str))
-    logger.info("sell_by_date %s → %s", symbol, date_val)
+    logger.info("sell_by_date %s → %s", _sl(symbol), date_val)
     return {"symbol": symbol, "sell_by_date": date_val.isoformat() if date_val else None,
             "sell_by_dates": sell_by}
 
@@ -1224,7 +1228,7 @@ async def approve_trade(trade_id: str) -> dict:
             info = _pending_approvals.pop(trade_id)
             _decided_approvals[trade_id] = info
             _approval_decisions[trade_id] = "approved"
-    logger.info("Trade %s approved via dashboard", trade_id)
+    logger.info("Trade %s approved via dashboard", _sl(trade_id))
     _approval_save()
     _push_approvals_state()
     return {"status": "approved", "trade_id": trade_id}
@@ -1238,7 +1242,7 @@ async def deny_trade(trade_id: str) -> dict:
         if trade_id in _pending_approvals:
             _pending_approvals.pop(trade_id)
             _approval_decisions[trade_id] = "denied"
-    logger.info("Trade %s denied via dashboard", trade_id)
+    logger.info("Trade %s denied via dashboard", _sl(trade_id))
     _approval_save()
     _push_approvals_state()
     return {"status": "denied", "trade_id": trade_id}
@@ -1378,7 +1382,7 @@ async def api_post_settings(payload: dict) -> dict:
             except (ValueError, TypeError):
                 raise HTTPException(status_code=400, detail=f"{k} must be a number")
     _env_write(payload)
-    logger.info("Settings updated via dashboard: %s", list(payload.keys()))
+    logger.info("Settings updated via dashboard: %s", [_sl(k) for k in payload.keys()])
     return {"ok": True, "message": "Settings saved — restart Argus to apply changes."}
 
 
@@ -1403,10 +1407,10 @@ async def run_backtest(payload: dict) -> dict:
             result = await loop.run_in_executor(None, engine.run, symbol, span)
         return result.to_dict()
     except ValueError as exc:
-        logger.warning("Backtest validation error for %s: %s", symbol, exc)
+        logger.warning("Backtest validation error for %s: %s", _sl(symbol), exc)
         raise HTTPException(status_code=422, detail="Insufficient historical data for backtest")
     except Exception as exc:
-        logger.error("Backtest failed for %s: %s", symbol, exc)
+        logger.error("Backtest failed for %s: %s", _sl(symbol), exc)
         raise HTTPException(status_code=500, detail="Backtest failed")
 
 
