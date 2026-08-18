@@ -908,52 +908,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         sig: SignalResult,
         signal_obj: Optional[SignalResult] = None,
     ) -> None:
-        # Agentic account is fully autonomous — no approval gates.
-        if acct.label == "agentic":
-            self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
-            return
-
-        # Default account: all trades require human approval.
-        is_crypto = symbol in CRYPTO_SYMBOLS
-        needs_approval = True
-
-        # Don't queue a duplicate if a BUY for this symbol is already pending
-        already_pending = any(
-            info.get("symbol") == symbol and info.get("action") == "BUY"
-            for info in acct.pending_approvals.values()
-        )
-        if already_pending:
-            logger.debug("[%s][%s] BUY already pending approval — skipping duplicate", acct.label, symbol)
-            return
-
-        trade_id = str(uuid.uuid4())
-        trade_info = {
-            "trade_id": trade_id,
-            "symbol": symbol,
-            "action": "BUY",
-            "dollar_amount": dollar_amount,
-            "risk_level": decision.risk_level,
-            "confidence": decision.confidence,
-            "reasoning": decision.reasoning,
-            "account_label": acct.label,
-            "account_number": acct.account_number,
-            "signal": sig.composite,
-            "signal_confidence": sig.confidence,
-            "price_at_queue": sig.price,
-        }
-        acct.pending_approvals[trade_id] = {
-            **trade_info,
-            "_sig": sig,
-            "_decision": decision,
-            "queued_at": datetime.datetime.now(_UTC).isoformat(),
-        }
-        web_dashboard.queue_approval(trade_id, trade_info)
-        reason_tag = "CRYPTO" if is_crypto else ("DEFAULT ACCT" if acct.label == "default" else f"LARGE TRADE >${self._cfg.large_trade_threshold:.0f}")
-        logger.info("[%s][%s] BUY queued for approval (%s $%.2f) id=%s", acct.label, symbol, reason_tag, dollar_amount, trade_id)
-        self._notifier.send(
-            f"[{acct.label.upper()}] Approval needed: BUY {symbol}",
-            f"{reason_tag} ${dollar_amount:.2f} · {decision.risk_level.upper()} RISK · conf {decision.confidence:.0%}\n{decision.reasoning[:200]}\nApprove at http://{self._cfg.web_host}:{self._cfg.web_port}",
-        )
+        # All accounts are fully autonomous — no approval gates.
+        self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
 
     _APPROVAL_TTL_SECONDS = 1800  # 30 minutes
 

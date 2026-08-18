@@ -138,6 +138,8 @@ class Settings(BaseSettings):
     # Web dashboard — default localhost; set 0.0.0.0 only behind an auth proxy
     web_host: str = Field("127.0.0.1", alias="WEB_HOST")
     web_port: int = Field(8000, alias="WEB_PORT")
+    # Public hostname used in notification links (e.g. Tailscale MagicDNS)
+    web_public_host: str = Field("", alias="WEB_PUBLIC_HOST")
     # If non-empty, all mutating API endpoints require X-Argus-Token: <value>
     dashboard_token: SecretStr = Field("", alias="DASHBOARD_TOKEN")
 
