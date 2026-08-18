@@ -908,12 +908,11 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         sig: SignalResult,
         signal_obj: Optional[SignalResult] = None,
     ) -> None:
-        # Agentic account is fully autonomous — no approval gates.
-        if acct.label == "agentic":
-            self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
-            return
+        # All accounts are fully autonomous — no approval gates.
+        self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
+        return
 
-        # Default account: all trades require human approval.
+        # Dead code — kept for reference if approval gating is re-enabled.
         is_crypto = symbol in CRYPTO_SYMBOLS
         needs_approval = True
 
@@ -1390,7 +1389,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             "trade_count": self._today_trade_count(),
             "day_trades": day_trades,
             "positions": pos_display,
-            "signals": self._latest_signals[-20:],
+            "signals": self._latest_signals,
             "recent_trades": list(self._recent_trades)[:20],
             "accounts": accounts_state,
             "flashcards": [c.as_dict() for c in recent_cards],
