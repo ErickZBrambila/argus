@@ -1133,7 +1133,7 @@ async def add_to_watchlist_api(body: dict) -> dict:
         _state["watchlist"] = wl
         snapshot = dict(_state)
     _sse_push(json.dumps(snapshot, default=str))
-    logger.info("Watchlist add: %s → %s", _sl(symbol), wl)
+    logger.info("Watchlist add: %s (now %d symbols)", _sl(symbol), len(wl))
     return {"watchlist": wl}
 
 
