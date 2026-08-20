@@ -85,6 +85,11 @@ class Autopilot:
         # Decisions cache: symbol -> last TradeDecision (to reuse if signal hasn't changed)
         self._last_decisions: dict[str, TradeDecision] = {}
         self._last_signal_map: dict[str, "SignalResult"] = {}
+
+        # API budget / billing alert state
+        self._last_ai_status: dict = {"claude": "gray", "gemini": "gray"}
+        self._budget_alerted_pcts: set[int] = set()  # which thresholds (80, 95) already fired
+        self._budget_alert_month: str = ""            # reset thresholds on new month
         # Screener candidates: [{symbol, reason, category}] — refreshed daily at open
         self._screener_candidates: list[dict] = []
         self._screener_last_date: datetime.date = datetime.date.min
@@ -450,6 +455,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     self._current_interval = interval
                     self._next_scan_at = datetime.datetime.now(_UTC) + datetime.timedelta(seconds=interval)
                     self._update_dashboard()
+                    self._check_api_alerts()
                     logger.info("Next scan in %ds [session=%s]", interval, self._market_session)
                     for _ in range(interval):
                         if not self._running:
@@ -469,6 +475,58 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
     def _shutdown(self, *_) -> None:
         logger.info("Shutdown signal received — stopping Argus")
         self._running = False
+
+    def _check_api_alerts(self) -> None:
+        """Fire ntfy alerts for billing errors and budget thresholds."""
+        from argus.dashboard.token_tracker import get_summary as _tok
+        from argus.agent.decision import get_ai_status as _get_ai_status
+
+        # ── Reactive: billing / auth errors ──────────────────────────────────
+        current_status = _get_ai_status()
+        for model in ("claude", "gemini"):
+            prev = self._last_ai_status.get(model, "gray")
+            curr = current_status.get(model, "gray")
+            if curr == "yellow" and prev != "yellow":
+                logger.warning("API billing/quota alert: %s status → yellow", model)
+                self._notifier.send(
+                    f"[ARGUS] {model.upper()} API billing/quota issue",
+                    f"The {model.title()} API is returning billing or quota errors. "
+                    f"Argus is running degraded (single-model or cached decisions). "
+                    f"Top up credits at {'console.anthropic.com' if model == 'claude' else 'console.cloud.google.com'}.",
+                )
+            elif curr == "red" and prev != "red":
+                logger.error("API auth alert: %s status → red", model)
+                self._notifier.send(
+                    f"[ARGUS] {model.upper()} API auth error",
+                    f"The {model.title()} API is returning auth errors. Check your API key.",
+                )
+        self._last_ai_status = current_status
+
+        # ── Proactive: monthly budget thresholds ─────────────────────────────
+        usage = _tok()
+        month = usage.get("month", "")
+        if month != self._budget_alert_month:
+            self._budget_alerted_pcts = set()
+            self._budget_alert_month = month
+
+        monthly_cost = usage.get("monthly_cost_usd", 0.0)
+        budget = self._cfg.monthly_api_budget
+        if budget <= 0:
+            return
+
+        pct_used = monthly_cost / budget
+        for threshold in (0.80, 0.95):
+            threshold_key = int(threshold * 100)
+            if pct_used >= threshold and threshold_key not in self._budget_alerted_pcts:
+                self._budget_alerted_pcts.add(threshold_key)
+                logger.warning("API budget alert: %.0f%% of $%.2f used ($%.4f)", threshold * 100, budget, monthly_cost)
+                self._notifier.send(
+                    f"[ARGUS] API budget {threshold_key}% used",
+                    f"Monthly AI spend: ${monthly_cost:.2f} of ${budget:.2f} budget ({pct_used:.0%}). "
+                    f"Claude: ${usage.get('claude', {}).get('cost_usd', 0):.4f} today | "
+                    f"Gemini: ${usage.get('gemini', {}).get('cost_usd', 0):.4f} today. "
+                    f"Increase MONTHLY_API_BUDGET in .env if needed.",
+                )
 
     def _get_interval(self) -> int:
         if self._scan_interval_override is not None:
