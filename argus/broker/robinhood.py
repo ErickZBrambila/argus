@@ -627,9 +627,8 @@ class RobinhoodBroker:
             if order is None:
                 raise RuntimeError(f"Broker returned None for BUY {symbol} — order was not submitted")
 
-            # Log full response for crypto so we can diagnose poll issues
-            if is_crypto:
-                logger.info("[LIVE] Crypto BUY %s raw response: %s", symbol, order)
+            # Log full response for every live order to diagnose poll issues
+            logger.info("[LIVE] %s BUY %s raw response: %s", "Crypto" if is_crypto else "Stock", symbol, order)
 
             # Detect error responses (Robinhood returns dicts with 'detail' on failure)
             if isinstance(order, dict) and "detail" in order and "id" not in order:
@@ -639,16 +638,25 @@ class RobinhoodBroker:
             if order.get("state") not in self._FILL_STATES:
                 order = self._poll_until_filled(order_id, is_crypto)
 
-            # For crypto, poll result is often None — fall back to position check
-            if is_crypto and not order.get("state"):
+            # If poll failed to get a state, fall back to position check for both crypto and stocks
+            if not order.get("state"):
                 import time as _time
                 _time.sleep(3)
-                positions = rh.crypto.get_crypto_positions() or []
-                filled = any(
-                    item.get("currency", {}).get("code", "") == symbol
-                    and float(item.get("quantity", 0)) > 0
-                    for item in positions
-                )
+                if is_crypto:
+                    positions = rh.crypto.get_crypto_positions() or []
+                    filled = any(
+                        item.get("currency", {}).get("code", "") == symbol
+                        and float(item.get("quantity", 0)) > 0
+                        for item in positions
+                    )
+                else:
+                    positions = rh.account.get_open_stock_positions(account_number=self.account_number or None) or []
+                    instrument_url = (rh.stocks.get_instruments_by_symbols(symbol) or [{}])[0].get("url", "")
+                    filled = bool(instrument_url) and any(
+                        p.get("instrument", "") == instrument_url
+                        and float(p.get("quantity", 0)) > 0
+                        for p in positions
+                    )
                 state = "filled" if filled else "unknown"
                 logger.info("[LIVE] BUY %s %.4f @ $%.4f — id=%s state=%s (position check)", symbol, qty, price, order_id, state)
                 return OrderResult(order_id=order_id, symbol=symbol, side="buy", quantity=qty, price=price, filled=filled, paper=False, raw=order)
