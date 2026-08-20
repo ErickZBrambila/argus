@@ -618,7 +618,7 @@ class RobinhoodBroker:
         is_crypto = symbol in CRYPTO_SYMBOLS
         try:
             if is_crypto:
-                order = rh.orders.order_buy_crypto_by_quantity(symbol, qty)
+                order = rh.orders.order_buy_crypto_by_price(symbol, qty * price)
             else:
                 order = rh.orders.order_buy_fractional_by_quantity(
                     symbol, qty, account_number=self.account_number or None
@@ -627,9 +627,32 @@ class RobinhoodBroker:
             if order is None:
                 raise RuntimeError(f"Broker returned None for BUY {symbol} — order was not submitted")
 
+            # Log full response for crypto so we can diagnose poll issues
+            if is_crypto:
+                logger.info("[LIVE] Crypto BUY %s raw response: %s", symbol, order)
+
+            # Detect error responses (Robinhood returns dicts with 'detail' on failure)
+            if isinstance(order, dict) and "detail" in order and "id" not in order:
+                raise RuntimeError(f"Robinhood rejected crypto BUY {symbol}: {order['detail']}")
+
             order_id = order.get("id", str(uuid.uuid4()))
             if order.get("state") not in self._FILL_STATES:
                 order = self._poll_until_filled(order_id, is_crypto)
+
+            # For crypto, poll result is often None — fall back to position check
+            if is_crypto and not order.get("state"):
+                import time as _time
+                _time.sleep(3)
+                positions = rh.crypto.get_crypto_positions() or []
+                filled = any(
+                    item.get("currency", {}).get("code", "") == symbol
+                    and float(item.get("quantity", 0)) > 0
+                    for item in positions
+                )
+                state = "filled" if filled else "unknown"
+                logger.info("[LIVE] BUY %s %.4f @ $%.4f — id=%s state=%s (position check)", symbol, qty, price, order_id, state)
+                return OrderResult(order_id=order_id, symbol=symbol, side="buy", quantity=qty, price=price, filled=filled, paper=False, raw=order)
+
             filled = order.get("state") in self._FILL_STATES
             logger.info("[LIVE] BUY %s %.4f @ $%.4f — id=%s state=%s", symbol, qty, price, order_id, order.get("state"))
             return OrderResult(order_id=order_id, symbol=symbol, side="buy", quantity=qty, price=price, filled=filled, paper=False, raw=order)
