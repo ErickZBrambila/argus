@@ -780,6 +780,16 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             logger.error("[%s] Could not fetch equity: %s", acct.label, exc)
             return decisions
 
+        # Add crypto equity to the first live account's drawdown calculation.
+        # Robinhood's portfolio profile excludes crypto holdings, so buying crypto
+        # falsely deflates equity and can trigger the kill switch incorrectly.
+        if not acct.broker.paper and self._accounts[0] is acct:
+            try:
+                crypto_usd = acct.broker.get_crypto_equity().get("total_usd", 0.0)
+                equity += crypto_usd
+            except Exception:
+                pass
+
         if acct.risk.check_drawdown(equity):
             self._persist_kill_switch(acct)
             self._notifier.send(
