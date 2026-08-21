@@ -903,13 +903,6 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                             acct.label, symbol, sig.rsi,
                         )
                         continue
-                    # High-risk gate: don't auto-execute high-risk trades on the agentic account
-                    if acct.label == "agentic" and decision.risk_level == "high":
-                        logger.info(
-                            "[%s][%s] BUY blocked — high-risk trade skipped on agentic (auto) account",
-                            acct.label, symbol,
-                        )
-                        continue
                     # Earnings guard: block BUY within 5 days of earnings report
                     _earn_blocked, _earn_reason = self._earnings_guard.should_block_buy(symbol)
                     if _earn_blocked:
