@@ -616,6 +616,8 @@ class RobinhoodBroker:
         import robin_stocks.robinhood as rh
 
         is_crypto = symbol in CRYPTO_SYMBOLS
+        # Robinhood rejects fractional quantities with more than 8 decimal places
+        qty = round(qty, 6)
         try:
             if is_crypto:
                 order = rh.orders.order_buy_crypto_by_price(symbol, qty * price)
@@ -630,9 +632,9 @@ class RobinhoodBroker:
             # Log full response for every live order to diagnose poll issues
             logger.info("[LIVE] %s BUY %s raw response: %s", "Crypto" if is_crypto else "Stock", symbol, order)
 
-            # Detect error responses (Robinhood returns dicts with 'detail' on failure)
-            if isinstance(order, dict) and "detail" in order and "id" not in order:
-                raise RuntimeError(f"Robinhood rejected crypto BUY {symbol}: {order['detail']}")
+            # Detect error responses — any response without an 'id' is a rejection
+            if isinstance(order, dict) and "id" not in order:
+                raise RuntimeError(f"Robinhood rejected BUY {symbol}: {order}")
 
             order_id = order.get("id", str(uuid.uuid4()))
             if order.get("state") not in self._FILL_STATES:
