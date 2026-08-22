@@ -805,10 +805,37 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         # Stop-loss sweep — only positions argus opened (has an open flashcard)
         for sym, pos in list(open_positions.items()):
             try:
-                if not self._flashcards.get_open_card_for_symbol(sym, acct.label):
+                card = self._flashcards.get_open_card_for_symbol(sym, acct.label)
+                if not card:
                     continue  # pre-existing / recurring investment — don't touch
                 current_price = acct.broker.get_price(sym)
-                if acct.risk.should_stop_loss(sym, pos["avg_price"], current_price, pos.get("qty", 0)):
+
+                # ATR trailing stop: find highest close since entry and current ATR
+                atr: float | None = None
+                highest_since_entry: float | None = None
+                sig = signal_map.get(sym)
+                if sig:
+                    atr = sig.atr
+                if card.timestamp and atr:
+                    try:
+                        entry_dt = datetime.datetime.fromisoformat(card.timestamp).date()
+                        from argus.storage.models import get_cached_historicals
+                        with get_session() as _hs:
+                            bars = get_cached_historicals(_hs, sym)
+                        closes = [
+                            float(b["close_price"])
+                            for b in bars
+                            if b.get("begins_at", "") >= str(entry_dt)
+                        ]
+                        if closes:
+                            highest_since_entry = max(closes)
+                    except Exception:
+                        pass
+
+                if acct.risk.should_stop_loss(
+                    sym, pos["avg_price"], current_price, pos.get("qty", 0),
+                    atr=atr, highest_since_entry=highest_since_entry,
+                ):
                     self._execute_sell(acct, sym, pos["qty"], reason="stop-loss")
                     open_positions.pop(sym, None)
             except Exception as exc:

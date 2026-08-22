@@ -50,6 +50,7 @@ class SignalResult:
     composite: str        # "bullish" | "bearish" | "neutral"
     confidence: float     # 0.0 – 1.0
     change_pct: float = 0.0  # Daily change percentage
+    atr: Optional[float] = None  # ATR-14 for trailing stop calculation
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
@@ -245,6 +246,10 @@ class SignalEngine:
         df.ta.ema(length=50, append=True)
         sma_col, ema_col = "SMA_20", "EMA_50"
 
+        # ATR 14 — used for trailing stop-loss calculation
+        df.ta.atr(length=14, append=True)
+        atr_col = "ATRr_14"
+
         last = df.iloc[-1]
 
         def _safe(col: str) -> Optional[float]:
@@ -270,6 +275,7 @@ class SignalEngine:
         bb_lower = _safe(bb_lower_col)
         sma_20 = _safe(sma_col)
         ema_50 = _safe(ema_col)
+        atr    = _safe(atr_col)
 
         # Daily change % (current vs prev close)
         change_pct = 0.0
@@ -296,6 +302,7 @@ class SignalEngine:
             ema_50=ema_50,
             composite=composite,
             confidence=confidence,
+            atr=atr,
         )
 
 

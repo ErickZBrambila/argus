@@ -115,21 +115,41 @@ class RiskManager:
 
     # ── Stop-loss check ──────────────────────────────────────────────────────
 
-    def should_stop_loss(self, symbol: str, entry_price: float, current_price: float,
-                         position_qty: float = 0.0) -> bool:
+    def should_stop_loss(
+        self,
+        symbol: str,
+        entry_price: float,
+        current_price: float,
+        position_qty: float = 0.0,
+        atr: float | None = None,
+        highest_since_entry: float | None = None,
+        atr_multiplier: float = 2.5,
+    ) -> bool:
         if entry_price <= 0:
             return False
-        drop = (current_price - entry_price) / entry_price
-        dollar_loss = abs(drop * entry_price * position_qty) if position_qty > 0 else 0.0
 
-        if drop <= -self.stop_loss_pct:
+        # ATR trailing stop: trails below the highest close since entry.
+        # Hard floor = entry × (1 - stop_loss_pct) so a true crash always stops out.
+        # Use whichever stop price is higher (more protective).
+        floor_stop = entry_price * (1 - self.stop_loss_pct)
+        if atr and atr > 0 and highest_since_entry and highest_since_entry > 0:
+            atr_stop = highest_since_entry - (atr_multiplier * atr)
+            stop_price = max(atr_stop, floor_stop)
+            method = f"ATR-trailing (ATR={atr:.4f} high={highest_since_entry:.4f} stop={stop_price:.4f})"
+        else:
+            stop_price = floor_stop
+            method = f"fixed {self.stop_loss_pct*100:.0f}% (stop={stop_price:.4f})"
+
+        if current_price <= stop_price:
+            drop = (current_price - entry_price) / entry_price
             logger.warning(
-                "Stop-loss triggered for %s: entry=%.4f current=%.4f drop=%.2f%%",
-                symbol, entry_price, current_price, drop * 100,
+                "Stop-loss triggered for %s: entry=%.4f current=%.4f drop=%.2f%% — %s",
+                symbol, entry_price, current_price, drop * 100, method,
             )
             return True
 
         # Hard dollar loss cap — catches gap-downs that blow past the % stop
+        dollar_loss = abs((current_price - entry_price) * position_qty) if position_qty > 0 else 0.0
         if self.max_position_loss_usd > 0 and dollar_loss >= self.max_position_loss_usd:
             logger.warning(
                 "Max-loss cap triggered for %s: entry=%.4f current=%.4f loss=$%.2f (cap=$%.2f)",
@@ -151,8 +171,18 @@ class RiskManager:
 
     # ── Stop-loss price calculator ───────────────────────────────────────────
 
-    def stop_loss_price(self, entry_price: float) -> float:
-        return entry_price * (1 - self.stop_loss_pct)
+    def stop_loss_price(
+        self,
+        entry_price: float,
+        atr: float | None = None,
+        highest_since_entry: float | None = None,
+        atr_multiplier: float = 2.5,
+    ) -> float:
+        floor_stop = entry_price * (1 - self.stop_loss_pct)
+        if atr and atr > 0 and highest_since_entry and highest_since_entry > 0:
+            atr_stop = highest_since_entry - (atr_multiplier * atr)
+            return max(atr_stop, floor_stop)
+        return floor_stop
 
     # ── Position size calculator ─────────────────────────────────────────────
 
