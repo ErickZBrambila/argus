@@ -802,9 +802,11 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         # Cache so _update_dashboard can reuse without extra API calls
         self._account_cache[acct.label] = {"equity": equity, "positions": open_positions}
 
-        # Stop-loss sweep
+        # Stop-loss sweep — only positions argus opened (has an open flashcard)
         for sym, pos in list(open_positions.items()):
             try:
+                if not self._flashcards.get_open_card_for_symbol(sym, acct.label):
+                    continue  # pre-existing / recurring investment — don't touch
                 current_price = acct.broker.get_price(sym)
                 if acct.risk.should_stop_loss(sym, pos["avg_price"], current_price, pos.get("qty", 0)):
                     self._execute_sell(acct, sym, pos["qty"], reason="stop-loss")
@@ -931,9 +933,14 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     open_positions = acct.broker.get_open_positions()
 
                 elif decision.action == "SELL" and symbol in open_positions:
-                    # Minimum hold: don't let AI sell within 48h of entry (stop-loss still fires)
+                    # Never sell positions argus didn't open (pre-existing / recurring investments)
                     card = self._flashcards.get_open_card_for_symbol(symbol, acct.label)
-                    if card and card.timestamp:
+                    if not card:
+                        logger.info("[%s][%s] SELL blocked — not an argus-opened position", acct.label, symbol)
+                        decisions[symbol] = decision
+                        continue
+                    # Minimum hold: don't let AI sell within 48h of entry (stop-loss still fires)
+                    if card.timestamp:
                         try:
                             entry_dt = datetime.datetime.fromisoformat(card.timestamp)
                             hold_hours = (datetime.datetime.now(_UTC) - entry_dt).total_seconds() / 3600
