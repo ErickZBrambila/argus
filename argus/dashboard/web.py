@@ -718,6 +718,101 @@ async def get_trades() -> dict:
     return {"trades": _state.get("recent_trades", [])}
 
 
+@app.get("/api/performance", dependencies=[Depends(_require_auth)])
+async def get_performance() -> dict:
+    """Return argus-managed P&L: only trades argus opened (has a buy record)."""
+    from argus.storage.models import get_session, Trade
+    from sqlalchemy import select
+    import datetime as _dt
+
+    with get_session() as session:
+        rows = session.execute(
+            select(Trade).where(Trade.paper == False).order_by(Trade.created_at)
+        ).scalars().all()
+
+    # Separate argus-managed buys from pre-existing sells
+    # A position is argus-managed if we have a BUY record for it
+    buys: dict[str, list] = {}   # symbol → list of {qty, price, date}
+    pnl_closed: list[dict] = []
+    open_positions: dict[str, dict] = {}  # symbol → {qty, cost, date}
+
+    for r in rows:
+        sym = r.symbol
+        if r.side == "buy":
+            if sym not in buys:
+                buys[sym] = []
+            buys[sym].append({"qty": r.quantity, "price": r.price,
+                               "total": r.total_value, "date": str(r.created_at)[:10]})
+            # Track open position (FIFO accumulate)
+            if sym not in open_positions:
+                open_positions[sym] = {"qty": 0.0, "cost": 0.0, "first_buy": str(r.created_at)[:10]}
+            open_positions[sym]["qty"] += r.quantity
+            open_positions[sym]["cost"] += r.total_value
+        elif r.side == "sell" and sym in buys:
+            # Only count sells for symbols argus bought
+            cost_basis = (open_positions.get(sym, {}).get("cost", 0.0) /
+                          max(open_positions.get(sym, {}).get("qty", 1.0), 1e-9)) * r.quantity
+            realized = r.total_value - cost_basis
+            pnl_closed.append({
+                "symbol": sym, "date": str(r.created_at)[:10],
+                "proceeds": round(r.total_value, 2),
+                "cost": round(cost_basis, 2),
+                "pnl": round(realized, 2),
+                "pnl_pct": round(realized / cost_basis * 100, 2) if cost_basis > 0 else 0,
+            })
+            # Reduce open position
+            if sym in open_positions:
+                remaining_qty = open_positions[sym]["qty"] - r.quantity
+                if remaining_qty < 1e-6:
+                    del open_positions[sym]
+                else:
+                    ratio = remaining_qty / open_positions[sym]["qty"]
+                    open_positions[sym]["cost"] *= ratio
+                    open_positions[sym]["qty"] = remaining_qty
+
+    total_realized = sum(p["pnl"] for p in pnl_closed)
+    wins = [p for p in pnl_closed if p["pnl"] > 0]
+    losses = [p for p in pnl_closed if p["pnl"] <= 0]
+
+    # Unrealized: use cached state prices
+    signals = {s["symbol"]: s for s in _state.get("signals", [])}
+    unrealized_detail = []
+    total_unrealized = 0.0
+    for sym, pos in open_positions.items():
+        avg_cost = pos["cost"] / pos["qty"] if pos["qty"] > 0 else 0
+        current = signals.get(sym, {}).get("price", avg_cost)
+        unreal = (current - avg_cost) * pos["qty"]
+        total_unrealized += unreal
+        unrealized_detail.append({
+            "symbol": sym,
+            "qty": round(pos["qty"], 6),
+            "avg_cost": round(avg_cost, 2),
+            "current_price": round(current, 2),
+            "cost_basis": round(pos["cost"], 2),
+            "market_value": round(current * pos["qty"], 2),
+            "pnl": round(unreal, 2),
+            "pnl_pct": round(unreal / pos["cost"] * 100, 2) if pos["cost"] > 0 else 0,
+            "since": pos.get("first_buy", ""),
+        })
+
+    launch_date = str(rows[0].created_at)[:10] if rows else str(_dt.date.today())
+
+    return {
+        "launch_date": launch_date,
+        "realized": round(total_realized, 2),
+        "unrealized": round(total_unrealized, 2),
+        "total_pnl": round(total_realized + total_unrealized, 2),
+        "closed_trades": pnl_closed,
+        "open_positions": sorted(unrealized_detail, key=lambda x: -abs(x["pnl"])),
+        "win_rate": round(len(wins) / len(pnl_closed) * 100) if pnl_closed else 0,
+        "total_closed": len(pnl_closed),
+        "wins": len(wins),
+        "losses": len(losses),
+        "best_trade": max(pnl_closed, key=lambda x: x["pnl"]) if pnl_closed else None,
+        "worst_trade": min(pnl_closed, key=lambda x: x["pnl"]) if pnl_closed else None,
+    }
+
+
 @app.get("/api/signals", dependencies=[Depends(_require_auth)])
 async def get_signals() -> dict:
     return {"signals": _state.get("signals", [])}
@@ -2191,6 +2286,20 @@ _HTML = """<!DOCTYPE html>
   .perf-stat-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
   .perf-tables { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   .perf-section-title { font-size: 10.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; }
+  /* ── Performance tracker ──────────────────────────────────────────────── */
+  .ptrack-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 18px; }
+  .ptrack-stat { background: var(--surface-raised); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 12px 14px; }
+  .ptrack-stat-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); margin-bottom: 4px; }
+  .ptrack-stat-val { font-size: 20px; font-weight: 700; font-family: var(--mono); }
+  .ptrack-stat-val.pos { color: var(--green); }
+  .ptrack-stat-val.neg { color: var(--red); }
+  .ptrack-stat-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  .ptrack-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .ptrack-table th { text-align: left; padding: 5px 8px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); border-bottom: 1px solid var(--border); }
+  .ptrack-table th.txt-right, .ptrack-table td.txt-right { text-align: right; }
+  .ptrack-table td { padding: 6px 8px; border-bottom: 1px solid var(--border-subtle); }
+  .ptrack-table tr:last-child td { border-bottom: none; }
+  .ptrack-section-hdr { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); margin: 14px 0 8px; }
   .perf-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border-subtle); font-size: 12.5px; }
   .perf-row:last-child { border-bottom: none; }
   .streak-win  { color: var(--green); font-weight: 700; }
@@ -2782,6 +2891,12 @@ _HTML = """<!DOCTYPE html>
           <tbody id="trades-body"></tbody>
         </table>
       </div>
+    </div>
+
+    <!-- Performance Tracker -->
+    <div class="card card-full" id="perf-card">
+      <div class="card-title">Performance <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-dim)" id="perf-since"></span></div>
+      <div id="perf-body"><div class="empty">Loading…</div></div>
     </div>
 
     <!-- Trade Decisions -->
@@ -4135,6 +4250,119 @@ async function fetchAll() {
     apiFetch('/api/logs?n=100').then(r=>r.json()),
   ]);
   applyState({...status, ...positions, ...signals, ...trades, logs: logs.logs || []});
+  fetchPerformance();
+}
+
+function _pnlCls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : ''; }
+function _pnlFmt(v) {
+  const s = v >= 0 ? '+' : '';
+  return `${s}$${Math.abs(v).toFixed(2)}`;
+}
+
+async function fetchPerformance() {
+  const el = document.getElementById('perf-body');
+  const sinceEl = document.getElementById('perf-since');
+  if (!el) return;
+  try {
+    const r = await apiFetch('/api/performance');
+    const d = await r.json();
+    if (sinceEl) sinceEl.textContent = `— since ${escHtml(d.launch_date)}`;
+
+    const totalCls = _pnlCls(d.total_pnl);
+    const realCls  = _pnlCls(d.realized);
+    const unCls    = _pnlCls(d.unrealized);
+
+    let openRows = '';
+    (d.open_positions || []).forEach(p => {
+      const pc = _pnlCls(p.pnl);
+      openRows += `<tr>
+        <td><span class="badge-sym">${escHtml(p.symbol)}</span></td>
+        <td class="txt-right">${p.qty}</td>
+        <td class="txt-right">$${p.avg_cost.toFixed(2)}</td>
+        <td class="txt-right">$${p.current_price.toFixed(2)}</td>
+        <td class="txt-right"><span class="${pc}">${_pnlFmt(p.pnl)}</span></td>
+        <td class="txt-right"><span class="${pc}">${p.pnl_pct > 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%</span></td>
+        <td class="txt-right" style="color:var(--text-dim);font-size:11px">${escHtml(p.since)}</td>
+      </tr>`;
+    });
+
+    let closedRows = '';
+    [...(d.closed_trades || [])].reverse().forEach(p => {
+      const pc = _pnlCls(p.pnl);
+      closedRows += `<tr>
+        <td>${escHtml(p.date)}</td>
+        <td><span class="badge-sym">${escHtml(p.symbol)}</span></td>
+        <td class="txt-right">$${p.proceeds.toFixed(2)}</td>
+        <td class="txt-right">$${p.cost.toFixed(2)}</td>
+        <td class="txt-right"><span class="${pc}">${_pnlFmt(p.pnl)}</span></td>
+        <td class="txt-right"><span class="${pc}">${p.pnl_pct > 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%</span></td>
+      </tr>`;
+    });
+
+    const best  = d.best_trade;
+    const worst = d.worst_trade;
+
+    el.innerHTML = `
+      <div class="ptrack-grid">
+        <div class="ptrack-stat">
+          <div class="ptrack-stat-label">Total P&amp;L</div>
+          <div class="ptrack-stat-val ${totalCls}">${_pnlFmt(d.total_pnl)}</div>
+          <div class="ptrack-stat-sub">realized + unrealized</div>
+        </div>
+        <div class="ptrack-stat">
+          <div class="ptrack-stat-label">Realized</div>
+          <div class="ptrack-stat-val ${realCls}">${_pnlFmt(d.realized)}</div>
+          <div class="ptrack-stat-sub">${d.total_closed} closed trades</div>
+        </div>
+        <div class="ptrack-stat">
+          <div class="ptrack-stat-label">Unrealized</div>
+          <div class="ptrack-stat-val ${unCls}">${_pnlFmt(d.unrealized)}</div>
+          <div class="ptrack-stat-sub">${(d.open_positions||[]).length} open position${(d.open_positions||[]).length !== 1 ? 's' : ''}</div>
+        </div>
+        <div class="ptrack-stat">
+          <div class="ptrack-stat-label">Win Rate</div>
+          <div class="ptrack-stat-val ${d.win_rate >= 50 ? 'pos' : 'neg'}">${d.win_rate}%</div>
+          <div class="ptrack-stat-sub">${d.wins}W / ${d.losses}L</div>
+        </div>
+        ${best ? `<div class="ptrack-stat">
+          <div class="ptrack-stat-label">Best Trade</div>
+          <div class="ptrack-stat-val pos">+$${best.pnl.toFixed(2)}</div>
+          <div class="ptrack-stat-sub">${escHtml(best.symbol)} on ${escHtml(best.date)}</div>
+        </div>` : ''}
+        ${worst ? `<div class="ptrack-stat">
+          <div class="ptrack-stat-label">Worst Trade</div>
+          <div class="ptrack-stat-val neg">-$${Math.abs(worst.pnl).toFixed(2)}</div>
+          <div class="ptrack-stat-sub">${escHtml(worst.symbol)} on ${escHtml(worst.date)}</div>
+        </div>` : ''}
+      </div>
+
+      ${openRows ? `
+      <div class="ptrack-section-hdr">Open Positions (argus-managed)</div>
+      <div class="table-wrap">
+        <table class="ptrack-table">
+          <thead><tr>
+            <th>Symbol</th><th class="txt-right">Qty</th><th class="txt-right">Avg Cost</th>
+            <th class="txt-right">Current</th><th class="txt-right">P&amp;L</th><th class="txt-right">%</th><th class="txt-right">Since</th>
+          </tr></thead>
+          <tbody>${openRows}</tbody>
+        </table>
+      </div>` : ''}
+
+      ${closedRows ? `
+      <div class="ptrack-section-hdr">Closed Trades</div>
+      <div class="table-wrap">
+        <table class="ptrack-table">
+          <thead><tr>
+            <th>Date</th><th>Symbol</th><th class="txt-right">Proceeds</th>
+            <th class="txt-right">Cost</th><th class="txt-right">P&amp;L</th><th class="txt-right">%</th>
+          </tr></thead>
+          <tbody>${closedRows}</tbody>
+        </table>
+      </div>` : '<div class="empty" style="margin-top:8px">No closed trades yet</div>'}
+    `;
+  } catch(e) {
+    if (el) el.innerHTML = `<div class="empty">Could not load performance data</div>`;
+  }
 }
 
 // ── Log tail ──────────────────────────────────────────────────────────────────
