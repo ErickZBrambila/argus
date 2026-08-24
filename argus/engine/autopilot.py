@@ -461,7 +461,9 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                         if not self._running:
                             break
                         time.sleep(1)
-                except Exception as exc:
+                except BaseException as exc:
+                    if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                        raise
                     logger.exception("Unhandled error in main loop: %s", exc)
                     for _ in range(30):
                         if not self._running:
