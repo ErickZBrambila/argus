@@ -726,9 +726,13 @@ async def get_performance() -> dict:
     import datetime as _dt
 
     with get_session() as session:
-        rows = session.execute(
+        _rows = session.execute(
             select(Trade).where(Trade.paper == False).order_by(Trade.created_at)
         ).scalars().all()
+        # Detach-safe: copy all needed fields while session is open
+        rows = [{"symbol": r.symbol, "side": r.side, "quantity": r.quantity,
+                 "price": r.price, "total_value": r.total_value,
+                 "created_at": r.created_at} for r in _rows]
 
     # Separate argus-managed buys from pre-existing sells
     # A position is argus-managed if we have a BUY record for it
@@ -737,32 +741,32 @@ async def get_performance() -> dict:
     open_positions: dict[str, dict] = {}  # symbol → {qty, cost, date}
 
     for r in rows:
-        sym = r.symbol
-        if r.side == "buy":
+        sym = r["symbol"]
+        if r["side"] == "buy":
             if sym not in buys:
                 buys[sym] = []
-            buys[sym].append({"qty": r.quantity, "price": r.price,
-                               "total": r.total_value, "date": str(r.created_at)[:10]})
+            buys[sym].append({"qty": r["quantity"], "price": r["price"],
+                               "total": r["total_value"], "date": str(r["created_at"])[:10]})
             # Track open position (FIFO accumulate)
             if sym not in open_positions:
-                open_positions[sym] = {"qty": 0.0, "cost": 0.0, "first_buy": str(r.created_at)[:10]}
-            open_positions[sym]["qty"] += r.quantity
-            open_positions[sym]["cost"] += r.total_value
-        elif r.side == "sell" and sym in buys:
+                open_positions[sym] = {"qty": 0.0, "cost": 0.0, "first_buy": str(r["created_at"])[:10]}
+            open_positions[sym]["qty"] += r["quantity"]
+            open_positions[sym]["cost"] += r["total_value"]
+        elif r["side"] == "sell" and sym in buys:
             # Only count sells for symbols argus bought
             cost_basis = (open_positions.get(sym, {}).get("cost", 0.0) /
-                          max(open_positions.get(sym, {}).get("qty", 1.0), 1e-9)) * r.quantity
-            realized = r.total_value - cost_basis
+                          max(open_positions.get(sym, {}).get("qty", 1.0), 1e-9)) * r["quantity"]
+            realized = r["total_value"] - cost_basis
             pnl_closed.append({
-                "symbol": sym, "date": str(r.created_at)[:10],
-                "proceeds": round(r.total_value, 2),
+                "symbol": sym, "date": str(r["created_at"])[:10],
+                "proceeds": round(r["total_value"], 2),
                 "cost": round(cost_basis, 2),
                 "pnl": round(realized, 2),
                 "pnl_pct": round(realized / cost_basis * 100, 2) if cost_basis > 0 else 0,
             })
             # Reduce open position
             if sym in open_positions:
-                remaining_qty = open_positions[sym]["qty"] - r.quantity
+                remaining_qty = open_positions[sym]["qty"] - r["quantity"]
                 if remaining_qty < 1e-6:
                     del open_positions[sym]
                 else:
@@ -795,7 +799,7 @@ async def get_performance() -> dict:
             "since": pos.get("first_buy", ""),
         })
 
-    launch_date = str(rows[0].created_at)[:10] if rows else str(_dt.date.today())
+    launch_date = str(rows[0]["created_at"])[:10] if rows else str(_dt.date.today())
 
     return {
         "launch_date": launch_date,
