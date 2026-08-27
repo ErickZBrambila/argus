@@ -319,9 +319,16 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
                 def _ask_claude(prompt: str) -> dict:
                     msg = _claude_client.messages.create(
-                        model="claude-sonnet-4-6", max_tokens=700,
+                        model=get_settings().claude_model, max_tokens=700,
                         messages=[{"role": "user", "content": prompt}],
                     )
+                    try:
+                        from argus.dashboard.token_tracker import record_claude
+                        u = msg.usage
+                        record_claude(u.input_tokens, u.output_tokens,
+                                      getattr(u, "cache_read_input_tokens", 0))
+                    except Exception:
+                        pass
                     return _parse(msg.content[0].text)
 
                 def _ask_gemini(prompt: str) -> dict:
