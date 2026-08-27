@@ -15,10 +15,10 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-# Claude Sonnet 4.6 pricing (per token)
-_CLAUDE_INPUT_COST  =  3.00 / 1_000_000
-_CLAUDE_OUTPUT_COST = 15.00 / 1_000_000
-_CLAUDE_CACHE_READ  =  0.30 / 1_000_000
+# Claude Haiku 4.5 pricing (per token)
+_CLAUDE_INPUT_COST  =  0.80 / 1_000_000
+_CLAUDE_OUTPUT_COST =  4.00 / 1_000_000
+_CLAUDE_CACHE_READ  =  0.08 / 1_000_000
 
 # Gemini 2.5 Flash pricing (per token, thinking disabled)
 _GEMINI_INPUT_COST  = 0.15 / 1_000_000
