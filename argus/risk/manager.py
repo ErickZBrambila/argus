@@ -149,7 +149,7 @@ class RiskManager:
             return True
 
         # Hard dollar loss cap — catches gap-downs that blow past the % stop
-        dollar_loss = abs((current_price - entry_price) * position_qty) if position_qty > 0 else 0.0
+        dollar_loss = (entry_price - current_price) * position_qty if position_qty > 0 else 0.0
         if self.max_position_loss_usd > 0 and dollar_loss >= self.max_position_loss_usd:
             logger.warning(
                 "Max-loss cap triggered for %s: entry=%.4f current=%.4f loss=$%.2f (cap=$%.2f)",
