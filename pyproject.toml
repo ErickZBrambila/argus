@@ -47,3 +47,6 @@ argus-service = "argus.install_service:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["argus*"]
+
+[tool.setuptools.package-data]
+"argus.dashboard" = ["static/*"]

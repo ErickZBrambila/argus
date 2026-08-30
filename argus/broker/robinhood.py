@@ -117,7 +117,7 @@ class RobinhoodBroker:
                 self.username,
                 self._password.get_secret_value(),
                 mfa_code=mfa_code,
-                store_session=False,       # never persist tokens to disk
+                store_session=True,
             )
             # rh.login() can fail silently (prints a message, returns None) especially
             # during the device-approval challenge flow. Verify the session is live by
