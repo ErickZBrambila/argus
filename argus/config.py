@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     stop_loss_pct: float = Field(0.05, alias="STOP_LOSS_PCT")
     max_positions: int = Field(5, alias="MAX_POSITIONS")
     daily_drawdown_limit: float = Field(-0.05, alias="DAILY_DRAWDOWN_LIMIT")
+    crypto_daily_drawdown_limit: float = Field(-0.15, alias="CRYPTO_DAILY_DRAWDOWN_LIMIT")
     # Minimum AI confidence to execute a trade (0–1). Decisions below this are held.
     min_confidence: float = Field(0.65, alias="MIN_CONFIDENCE")
     # Hard cap on dollar loss per position — position sold immediately if loss exceeds this

@@ -25,6 +25,7 @@ class RiskManager:
         stop_loss_pct: float = 0.05,
         max_positions: int = 5,
         daily_drawdown_limit: float = -0.05,
+        crypto_daily_drawdown_limit: float = -0.15,
         pdt_aware: bool = True,
         max_position_loss_usd: float = 75.0,
     ) -> None:
@@ -32,12 +33,14 @@ class RiskManager:
         self.stop_loss_pct = stop_loss_pct
         self.max_positions = max_positions
         self.daily_drawdown_limit = daily_drawdown_limit
+        self.crypto_daily_drawdown_limit = crypto_daily_drawdown_limit
         self.pdt_aware = pdt_aware
         self.max_position_loss_usd = max_position_loss_usd
 
         self._kill_switch: bool = False
         self._day_trade_count: int = 0
         self._session_entry_equity: float = 0.0
+        self._crypto_session_equity: float = 0.0
 
     # ── Kill switch ──────────────────────────────────────────────────────────
 
@@ -57,25 +60,48 @@ class RiskManager:
         self._kill_switch = False
         logger.warning("Kill switch manually reset")
 
-    def check_drawdown(self, current_equity: float) -> bool:
-        """Return True if trading should be halted (drawdown exceeded)."""
+    def check_drawdown(self, current_equity: float, current_crypto_equity: float = 0.0) -> bool:
+        """Return True if trading should be halted (drawdown exceeded).
+
+        Stocks and crypto are checked against their own limits independently so
+        crypto volatility doesn't falsely trip the tighter stock drawdown limit.
+        """
         if self._session_entry_equity <= 0:
             return False
 
-        drawdown = (current_equity - self._session_entry_equity) / self._session_entry_equity
-        if drawdown <= self.daily_drawdown_limit:
+        stock_drawdown = (current_equity - self._session_entry_equity) / self._session_entry_equity
+        if stock_drawdown <= self.daily_drawdown_limit:
             if not self._kill_switch:
                 self._kill_switch = True
                 logger.critical(
-                    "KILL SWITCH TRIGGERED — daily drawdown %.2f%% exceeded limit %.2f%%",
-                    drawdown * 100,
+                    "KILL SWITCH TRIGGERED — stock drawdown %.2f%% exceeded limit %.2f%%",
+                    stock_drawdown * 100,
                     self.daily_drawdown_limit * 100,
                 )
             return True
+
+        if self._crypto_session_equity > 0 and current_crypto_equity > 0:
+            crypto_drawdown = (
+                (current_crypto_equity - self._crypto_session_equity)
+                / self._crypto_session_equity
+            )
+            if crypto_drawdown <= self.crypto_daily_drawdown_limit:
+                if not self._kill_switch:
+                    self._kill_switch = True
+                    logger.critical(
+                        "KILL SWITCH TRIGGERED — crypto drawdown %.2f%% exceeded limit %.2f%%",
+                        crypto_drawdown * 100,
+                        self.crypto_daily_drawdown_limit * 100,
+                    )
+                return True
+
         return False
 
     def set_session_equity(self, equity: float) -> None:
         self._session_entry_equity = equity
+
+    def set_crypto_session_equity(self, equity: float) -> None:
+        self._crypto_session_equity = equity
 
     # ── Buy approval ─────────────────────────────────────────────────────────
 

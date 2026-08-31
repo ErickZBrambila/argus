@@ -140,6 +140,7 @@ class Autopilot:
                 stop_loss_pct=self._cfg.stop_loss_pct,
                 max_positions=self._cfg.max_positions,
                 daily_drawdown_limit=self._cfg.daily_drawdown_limit,
+                crypto_daily_drawdown_limit=self._cfg.crypto_daily_drawdown_limit,
                 max_position_loss_usd=self._cfg.max_position_loss_usd,
             )
 
@@ -440,6 +441,15 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     acct.risk.set_session_equity(equity)
                 except Exception as exc:
                     logger.error("[%s] Could not fetch initial equity: %s", acct.label, exc)
+            # Capture crypto baseline on the first live account for its separate drawdown check
+            _first_live = next((a for a in self._accounts if not a.broker.paper), None)
+            if _first_live:
+                try:
+                    _crypto_start = _first_live.broker.get_crypto_equity().get("total_usd", 0.0)
+                    _first_live.risk.set_crypto_session_equity(_crypto_start)
+                    logger.info("Crypto session baseline: $%.2f", _crypto_start)
+                except Exception as exc:
+                    logger.warning("Could not fetch crypto session baseline: %s", exc)
             self._init_daily_stats(first_equity)
             self._restore_session_state()
             self._update_dashboard()
@@ -789,17 +799,16 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             logger.error("[%s] Could not fetch equity: %s", acct.label, exc)
             return decisions
 
-        # Add crypto equity to the first live account's drawdown calculation.
-        # Robinhood's portfolio profile excludes crypto holdings, so buying crypto
-        # falsely deflates equity and can trigger the kill switch incorrectly.
+        # Check crypto drawdown separately from stock drawdown — crypto has its own
+        # (higher) limit because it is far more volatile than equities.
+        crypto_usd = 0.0
         if not acct.broker.paper and self._accounts[0] is acct:
             try:
                 crypto_usd = acct.broker.get_crypto_equity().get("total_usd", 0.0)
-                equity += crypto_usd
             except Exception:
                 pass
 
-        if acct.risk.check_drawdown(equity):
+        if acct.risk.check_drawdown(equity, crypto_usd):
             self._persist_kill_switch(acct)
             self._notifier.send(
                 f"[{acct.label.upper()}] KILL SWITCH",
@@ -1525,6 +1534,15 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 acct.risk.set_session_equity(equity)
             except Exception as exc:
                 logger.error("[%s] Could not fetch equity for day rollover: %s", acct.label, exc)
+        # Reset crypto baseline for the new day
+        _first_live = next((a for a in self._accounts if not a.broker.paper), None)
+        if _first_live:
+            try:
+                _crypto_start = _first_live.broker.get_crypto_equity().get("total_usd", 0.0)
+                _first_live.risk.set_crypto_session_equity(_crypto_start)
+                logger.info("Crypto session baseline reset: $%.2f", _crypto_start)
+            except Exception as exc:
+                logger.warning("Could not reset crypto session baseline: %s", exc)
         # Init daily stats for new day using first account's equity as reference
         first_equity = self._accounts[0].risk.session_entry_equity if self._accounts else 0.0
         self._init_daily_stats(first_equity)
