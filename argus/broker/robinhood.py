@@ -316,15 +316,6 @@ class RobinhoodBroker:
             if sym:
                 result[sym] = {"qty": qty, "avg_price": avg}
 
-        # Crypto positions are not account-scoped in the Robinhood API
-        crypto_holdings = rh.crypto.get_crypto_positions() or []
-        for item in crypto_holdings:
-            sym = item.get("currency", {}).get("code", "")
-            qty = float(item.get("quantity", 0))
-            if sym and qty > 0:
-                cost = float(item.get("cost_bases", [{}])[0].get("direct_cost_basis", 0))
-                avg = cost / qty if qty else 0
-                result[sym] = {"qty": qty, "avg_price": avg}
         return result
 
     def get_screener_symbols(self) -> list[dict]:
