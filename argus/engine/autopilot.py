@@ -67,6 +67,7 @@ class AccountContext:
     risk: RiskManager
     auto_trade: bool              # False = gate medium/high risk on approval
     pending_approvals: dict = field(default_factory=dict)   # trade_id → approval info
+    db_starting_equity: float = 0.0   # from DB — used for dashboard "Today P&L" display only
 
 
 class Autopilot:
@@ -439,6 +440,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     if not first_equity:
                         first_equity = equity
                     acct.risk.set_session_equity(equity)
+                    acct.db_starting_equity = equity  # initial display baseline; overwritten by _restore_session_state
                 except Exception as exc:
                     logger.error("[%s] Could not fetch initial equity: %s", acct.label, exc)
             # Set crypto baseline on every live account — crypto is not account-scoped
@@ -1386,7 +1388,9 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 eq = cached["equity"] if "equity" in cached else acct.broker.get_portfolio_equity()
             except Exception:
                 eq = 0.0
-            entry_eq = acct.risk.session_entry_equity
+            # Use DB starting equity for display so "Today P&L" reflects the
+            # start-of-day baseline rather than the risk manager's combined baseline.
+            entry_eq = acct.db_starting_equity or acct.risk.session_entry_equity
             acct_pnl = eq - entry_eq
             acct_pnl_pct = (acct_pnl / entry_eq * 100) if entry_eq else 0.0
 
@@ -1505,7 +1509,13 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     session, today, acct.label, acct.risk.session_entry_equity
                 )
                 if row.starting_equity > 0:
-                    acct.risk.set_session_equity(row.starting_equity)
+                    # Store for dashboard display only — do NOT feed into the risk
+                    # manager. Restoring only the stock portion from a stale DB
+                    # snapshot while crypto_session_equity reflects the current live
+                    # value creates a time-mismatch that produces a falsely inflated
+                    # combined_baseline and spurious kill-switch triggers every time
+                    # Argus restarts after crypto has been bought.
+                    acct.db_starting_equity = row.starting_equity
                 # Explicitly sync kill switch with today's DB state so a stale
                 # in-memory True from the previous day is cleared on day rollover.
                 if row.kill_switch_triggered:
@@ -1538,6 +1548,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             try:
                 equity = acct.broker.get_portfolio_equity()
                 acct.risk.set_session_equity(equity)
+                acct.db_starting_equity = equity
             except Exception as exc:
                 logger.error("[%s] Could not fetch equity for day rollover: %s", acct.label, exc)
         # Reset crypto baseline on every live account for the new day
