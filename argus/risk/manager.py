@@ -63,19 +63,25 @@ class RiskManager:
     def check_drawdown(self, current_equity: float, current_crypto_equity: float = 0.0) -> bool:
         """Return True if trading should be halted (drawdown exceeded).
 
-        Stocks and crypto are checked against their own limits independently so
-        crypto volatility doesn't falsely trip the tighter stock drawdown limit.
+        Uses combined baseline (stocks + crypto at session start) vs combined
+        current (stocks + crypto now) so that buying crypto with cash is neutral
+        — cash leaves the stock side but crypto gains cancel it out.
+
+        An additional crypto-only check catches a crypto crash that doesn't yet
+        drag the combined portfolio past the main limit.
         """
         if self._session_entry_equity <= 0:
             return False
 
-        stock_drawdown = (current_equity - self._session_entry_equity) / self._session_entry_equity
-        if stock_drawdown <= self.daily_drawdown_limit:
+        combined_baseline = self._session_entry_equity + self._crypto_session_equity
+        combined_current = current_equity + current_crypto_equity
+        combined_drawdown = (combined_current - combined_baseline) / combined_baseline
+        if combined_drawdown <= self.daily_drawdown_limit:
             if not self._kill_switch:
                 self._kill_switch = True
                 logger.critical(
-                    "KILL SWITCH TRIGGERED — stock drawdown %.2f%% exceeded limit %.2f%%",
-                    stock_drawdown * 100,
+                    "KILL SWITCH TRIGGERED — portfolio drawdown %.2f%% exceeded limit %.2f%%",
+                    combined_drawdown * 100,
                     self.daily_drawdown_limit * 100,
                 )
             return True
