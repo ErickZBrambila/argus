@@ -66,6 +66,8 @@ class AccountContext:
     broker: RobinhoodBroker
     risk: RiskManager
     auto_trade: bool              # False = gate medium/high risk on approval
+    min_confidence: float = 0.60  # per-account AI confidence threshold
+    allow_overlap: bool = False   # True = buy symbols already held by another account
     pending_approvals: dict = field(default_factory=dict)   # trade_id → approval info
     db_starting_equity: float = 0.0   # from DB — used for dashboard "Today P&L" display only
 
@@ -135,10 +137,10 @@ class Autopilot:
                 account_number=account_number,
             )
 
-        def _make_risk() -> RiskManager:
+        def _make_risk(stop_loss_pct: float | None = None) -> RiskManager:
             return RiskManager(
                 max_position_pct=self._cfg.max_position_pct,
-                stop_loss_pct=self._cfg.stop_loss_pct,
+                stop_loss_pct=stop_loss_pct or self._cfg.stop_loss_pct,
                 max_positions=self._cfg.max_positions,
                 daily_drawdown_limit=self._cfg.daily_drawdown_limit,
                 crypto_daily_drawdown_limit=self._cfg.crypto_daily_drawdown_limit,
@@ -148,21 +150,29 @@ class Autopilot:
         self._accounts: list[AccountContext] = []
 
         if self._cfg.agentic_account_number:
+            _agentic_stop = self._cfg.agentic_stop_loss_pct or self._cfg.stop_loss_pct
+            _agentic_conf = self._cfg.agentic_min_confidence or self._cfg.min_confidence
             self._accounts.append(AccountContext(
                 label="agentic",
                 account_number=self._cfg.agentic_account_number,
                 broker=_make_broker(self._cfg.agentic_account_number),
-                risk=_make_risk(),
+                risk=_make_risk(stop_loss_pct=_agentic_stop),
                 auto_trade=True,
+                min_confidence=_agentic_conf,
+                allow_overlap=True,
             ))
 
         if self._cfg.default_account_number:
+            _default_stop = self._cfg.default_stop_loss_pct or self._cfg.stop_loss_pct
+            _default_conf = self._cfg.default_min_confidence or self._cfg.min_confidence
             self._accounts.append(AccountContext(
                 label="default",
                 account_number=self._cfg.default_account_number,
                 broker=_make_broker(self._cfg.default_account_number),
-                risk=_make_risk(),
+                risk=_make_risk(stop_loss_pct=_default_stop),
                 auto_trade=True,
+                min_confidence=_default_conf,
+                allow_overlap=False,
             ))
 
         if not self._accounts:
@@ -952,10 +962,10 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     if symbol in _exit_only:
                         logger.info("[%s][%s] BUY skipped — exit-only symbol", acct.label, symbol)
                         continue
-                    if other_held and symbol in other_held:
+                    if not acct.allow_overlap and other_held and symbol in other_held:
                         logger.info("[%s][%s] BUY skipped — already held by another account", acct.label, symbol)
                         continue
-                    if decision.confidence < self._cfg.min_confidence:
+                    if decision.confidence < acct.min_confidence:
                         logger.info(
                             "[%s][%s] BUY blocked — confidence %.0f%% below minimum %.0f%%",
                             acct.label, symbol, decision.confidence * 100, self._cfg.min_confidence * 100,

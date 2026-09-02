@@ -105,6 +105,14 @@ class Settings(BaseSettings):
     # Hard cap on dollar loss per position — position sold immediately if loss exceeds this
     max_position_loss_usd: float = Field(75.0, alias="MAX_POSITION_LOSS_USD")
 
+    # Per-account overrides (fall back to global values if not set)
+    # Agentic: day-trading style — tighter stop, lower confidence threshold, overlap allowed
+    agentic_stop_loss_pct: float = Field(0.0, alias="AGENTIC_STOP_LOSS_PCT")
+    agentic_min_confidence: float = Field(0.0, alias="AGENTIC_MIN_CONFIDENCE")
+    # Default: long-term style — wider stop, higher confidence threshold
+    default_stop_loss_pct: float = Field(0.0, alias="DEFAULT_STOP_LOSS_PCT")
+    default_min_confidence: float = Field(0.0, alias="DEFAULT_MIN_CONFIDENCE")
+
     # Model overrides
     claude_model: str = Field("claude-sonnet-4-6", alias="CLAUDE_MODEL")
     gemini_model: str = Field("gemini-2.5-flash", alias="GEMINI_MODEL")
