@@ -68,6 +68,7 @@ class AccountContext:
     auto_trade: bool              # False = gate medium/high risk on approval
     min_confidence: float = 0.60  # per-account AI confidence threshold
     allow_overlap: bool = False   # True = buy symbols already held by another account
+    cash_reserve: float = 0.0    # USD amount kept untouchable; subtracted from deployable equity
     pending_approvals: dict = field(default_factory=dict)   # trade_id → approval info
     db_starting_equity: float = 0.0   # from DB — used for dashboard "Today P&L" display only
 
@@ -160,6 +161,7 @@ class Autopilot:
                 auto_trade=True,
                 min_confidence=_agentic_conf,
                 allow_overlap=True,
+                cash_reserve=self._cfg.agentic_cash_reserve,
             ))
 
         if self._cfg.default_account_number:
@@ -173,6 +175,7 @@ class Autopilot:
                 auto_trade=True,
                 min_confidence=_default_conf,
                 allow_overlap=False,
+                cash_reserve=self._cfg.default_cash_reserve,
             ))
 
         if not self._accounts:
@@ -988,7 +991,12 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     if _book_blocked:
                         logger.info("[%s][%s] BUY blocked — %s", acct.label, symbol, _book_reason)
                         continue
-                    risk_check = acct.risk.approve_buy(symbol, equity, open_positions, _db_day_trades)
+                    # Subtract cash reserve so Argus never deploys reserved funds.
+                    deployable = max(0.0, equity - acct.cash_reserve)
+                    if acct.cash_reserve > 0 and deployable < equity:
+                        logger.debug("[%s] Cash reserve $%.0f active — deployable equity $%.0f",
+                                     acct.label, acct.cash_reserve, deployable)
+                    risk_check = acct.risk.approve_buy(symbol, deployable, open_positions, _db_day_trades)
                     if not risk_check.allowed:
                         logger.info("[%s][%s] BUY blocked: %s", acct.label, symbol, risk_check.reason)
                         continue

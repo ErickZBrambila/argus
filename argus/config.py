@@ -109,9 +109,11 @@ class Settings(BaseSettings):
     # Agentic: day-trading style — tighter stop, lower confidence threshold, overlap allowed
     agentic_stop_loss_pct: float = Field(0.0, alias="AGENTIC_STOP_LOSS_PCT")
     agentic_min_confidence: float = Field(0.0, alias="AGENTIC_MIN_CONFIDENCE")
+    agentic_cash_reserve: float = Field(0.0, alias="AGENTIC_CASH_RESERVE")
     # Default: long-term style — wider stop, higher confidence threshold
     default_stop_loss_pct: float = Field(0.0, alias="DEFAULT_STOP_LOSS_PCT")
     default_min_confidence: float = Field(0.0, alias="DEFAULT_MIN_CONFIDENCE")
+    default_cash_reserve: float = Field(0.0, alias="DEFAULT_CASH_RESERVE")
 
     # Model overrides
     claude_model: str = Field("claude-sonnet-4-6", alias="CLAUDE_MODEL")
