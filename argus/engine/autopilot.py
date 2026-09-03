@@ -56,7 +56,7 @@ _RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 # when the composite flips to bullish for the first time (new listings, IPO watchlist, etc.)
 _PRIORITY_WATCH_SYMBOLS: frozenset[str] = frozenset({"SPCX"})
 # Force-sell this many calendar days before the sell_by_date deadline
-_SELL_BY_FORCE_DAYS = 7
+_SELL_BY_FORCE_DAYS = 1
 
 
 @dataclass
