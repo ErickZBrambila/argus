@@ -110,6 +110,7 @@ class Settings(BaseSettings):
     agentic_stop_loss_pct: float = Field(0.0, alias="AGENTIC_STOP_LOSS_PCT")
     agentic_min_confidence: float = Field(0.0, alias="AGENTIC_MIN_CONFIDENCE")
     agentic_cash_reserve: float = Field(0.0, alias="AGENTIC_CASH_RESERVE")
+    agentic_max_position_pct: float = Field(0.0, alias="AGENTIC_MAX_POSITION_PCT")
     # Default: long-term style — wider stop, higher confidence threshold
     default_stop_loss_pct: float = Field(0.0, alias="DEFAULT_STOP_LOSS_PCT")
     default_min_confidence: float = Field(0.0, alias="DEFAULT_MIN_CONFIDENCE")
@@ -125,6 +126,9 @@ class Settings(BaseSettings):
     interval_premarket:    int = Field(180, alias="INTERVAL_PREMARKET")
     interval_afterhours:   int = Field(180, alias="INTERVAL_AFTERHOURS")
     interval_closed:       int = Field(300, alias="INTERVAL_CLOSED")
+
+    # Daily market scanner — how many screener picks to promote to tradeable each morning (0 = off)
+    scanner_daily_picks: int = Field(15, alias="SCANNER_DAILY_PICKS")
 
     # Notifications — email
     notify_email: str = Field("", alias="NOTIFY_EMAIL")

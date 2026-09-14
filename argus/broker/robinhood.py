@@ -148,6 +148,45 @@ class RobinhoodBroker:
             except Exception as exc:
                 logger.warning("Logout error: %s", exc)
 
+    def session_alive(self) -> bool:
+        """Quick check — returns False if the session token is missing or a test call 401s."""
+        if not self._logged_in or self.paper:
+            return self.paper  # paper brokers are always "alive"
+        try:
+            import robin_stocks.robinhood as rh
+            from robin_stocks.robinhood import globals as _rh_globals
+            _session = getattr(_rh_globals, "SESSION", None)
+            if not _session or not _session.headers.get("Authorization"):
+                return False
+            result = rh.profiles.load_portfolio_profile(account_number=self.account_number or None)
+            return result is not None
+        except Exception:
+            return False
+
+    def reauth(self) -> bool:
+        """Re-authenticate after a session expiry. Returns True if the session is now live."""
+        global _rh_session_active
+        if self.paper:
+            return True
+        logger.warning("Robinhood session expired — re-authenticating")
+        _rh_session_active = False
+        self._logged_in = False
+        # Re-fetch MFA secret from keychain (it was cleared from memory after first login)
+        try:
+            from argus.secrets import get_secret
+            mfa_raw = get_secret("ROBINHOOD_MFA_SECRET")
+            if mfa_raw:
+                self._mfa_secret = SecretStr(mfa_raw)
+        except Exception as exc:
+            logger.debug("Could not re-fetch MFA secret: %s", exc)
+        try:
+            self._login()
+            logger.info("Robinhood re-authentication successful")
+            return True
+        except Exception as exc:
+            logger.error("Robinhood re-authentication failed: %s", exc)
+            return False
+
     # ── Market data ─────────────────────────────────────────────────────────
 
     def get_price(self, symbol: str) -> float:
@@ -452,6 +491,19 @@ class RobinhoodBroker:
                 if data:
                     return data
             except Exception as exc:
+                # RemoteDisconnected happens right after a session reauth — retry once
+                _is_disconnect = "RemoteDisconnected" in type(exc).__name__ or "RemoteDisconnected" in str(exc)
+                if _is_disconnect:
+                    import time as _t; _t.sleep(1.5)
+                    try:
+                        if symbol in CRYPTO_SYMBOLS:
+                            data = rh.crypto.get_crypto_historicals(symbol, interval=interval, span=span)
+                        else:
+                            data = rh.stocks.get_stock_historicals(symbol, interval=interval, span=span)
+                        if data:
+                            return data
+                    except Exception as exc2:
+                        exc = exc2
                 # Crypto falls back to yfinance below — not actionable, keep quiet
                 if symbol in CRYPTO_SYMBOLS:
                     logger.debug("Robinhood crypto historicals unavailable for %s, using yfinance: %s", symbol, exc)

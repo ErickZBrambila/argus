@@ -6877,9 +6877,14 @@ async def mobile() -> str:
     return _MOBILE_HTML.replace("</head>", token_script + "\n</head>", 1)
 
 
-def main(host: str = "127.0.0.1", port: int = 8000, token: str = "") -> None:
+def main(host: str = "", port: int = 0, token: str = "") -> None:
+    cfg = get_settings()
+    host = host or cfg.web_host
+    port = port or cfg.web_port
+    token = token or cfg.dashboard_token.get_secret_value()
     if token:
         _configure_auth(token)
         logger.info("Dashboard API authentication enabled")
     _start_news_poller()
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    server_cfg = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    uvicorn.Server(server_cfg).run()

@@ -71,6 +71,9 @@ class AccountContext:
     cash_reserve: float = 0.0    # USD amount kept untouchable; subtracted from deployable equity
     pending_approvals: dict = field(default_factory=dict)   # trade_id → approval info
     db_starting_equity: float = 0.0   # from DB — used for dashboard "Today P&L" display only
+    # symbol → UTC datetime of last sell; prevents immediate rebuy after a sell
+    sell_cooldown: dict = field(default_factory=dict)
+    crypto_enabled: bool = True       # False = skip crypto symbols entirely for this account
 
 
 class Autopilot:
@@ -138,9 +141,9 @@ class Autopilot:
                 account_number=account_number,
             )
 
-        def _make_risk(stop_loss_pct: float | None = None) -> RiskManager:
+        def _make_risk(stop_loss_pct: float | None = None, max_position_pct: float | None = None) -> RiskManager:
             return RiskManager(
-                max_position_pct=self._cfg.max_position_pct,
+                max_position_pct=max_position_pct or self._cfg.max_position_pct,
                 stop_loss_pct=stop_loss_pct or self._cfg.stop_loss_pct,
                 max_positions=self._cfg.max_positions,
                 daily_drawdown_limit=self._cfg.daily_drawdown_limit,
@@ -153,15 +156,17 @@ class Autopilot:
         if self._cfg.agentic_account_number:
             _agentic_stop = self._cfg.agentic_stop_loss_pct or self._cfg.stop_loss_pct
             _agentic_conf = self._cfg.agentic_min_confidence or self._cfg.min_confidence
+            _agentic_max_pos = self._cfg.agentic_max_position_pct or self._cfg.max_position_pct
             self._accounts.append(AccountContext(
                 label="agentic",
                 account_number=self._cfg.agentic_account_number,
                 broker=_make_broker(self._cfg.agentic_account_number),
-                risk=_make_risk(stop_loss_pct=_agentic_stop),
+                risk=_make_risk(stop_loss_pct=_agentic_stop, max_position_pct=_agentic_max_pos),
                 auto_trade=True,
                 min_confidence=_agentic_conf,
                 allow_overlap=True,
                 cash_reserve=self._cfg.agentic_cash_reserve,
+                crypto_enabled=False,
             ))
 
         if self._cfg.default_account_number:
@@ -648,6 +653,20 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
     # ── Main tick ────────────────────────────────────────────────────────────
 
     def _tick(self) -> None:
+        # ── Session health check ─────────────────────────────────────────────
+        # Run once per scan. If the Robinhood token has expired, re-auth and alert.
+        _first_live = next((a for a in self._accounts if not a.broker.paper), None)
+        if _first_live and not _first_live.broker.session_alive():
+            ok = _first_live.broker.reauth()
+            if not ok:
+                self._notifier.send(
+                    "Robinhood auth FAILED — trading halted",
+                    "Session expired and re-login failed. Restart Argus or check credentials.",
+                )
+                return  # skip this scan entirely — no valid session
+            # Successful reauth: brief pause so the new HTTP session settles before data fetches
+            import time as _time; _time.sleep(1.5)
+
         # Always compute signals so the ticker and dashboard show live prices,
         # even outside market hours.  Trading only executes when the market is open.
         signals = []
@@ -748,9 +767,17 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 all_acct_positions[_a.label] = set()
 
         # Collect AI decisions across all accounts; keep highest-confidence per symbol
-        # Only trade watchlist + MCP-injected symbols — screener is display/analysis only
         mcp_set = set(mcp_syms)
-        tradeable_signal_map = {sym: sig for sym, sig in signal_map.items() if sym in watchlist_set or sym in mcp_set}
+        # Promote top N screener picks to tradeable if scanner is enabled
+        scanner_set: set[str] = set()
+        if self._cfg.scanner_daily_picks > 0 and self._screener_candidates:
+            _picks = [c["symbol"] for c in self._screener_candidates
+                      if c["symbol"] not in watchlist_set and c["symbol"] not in mcp_set]
+            scanner_set = set(_picks[:self._cfg.scanner_daily_picks])
+            if scanner_set:
+                logger.info("Scanner promoting %d picks to tradeable: %s", len(scanner_set), sorted(scanner_set))
+        tradeable_signal_map = {sym: sig for sym, sig in signal_map.items()
+                                if sym in watchlist_set or sym in mcp_set or sym in scanner_set}
         ai_decisions: dict[str, TradeDecision] = {}
         for acct in self._accounts:
             try:
@@ -895,6 +922,9 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
         for symbol, sig in signal_map.items():
             try:
+                if not acct.crypto_enabled and symbol in CRYPTO_SYMBOLS:
+                    continue
+
                 # DEBOUNCING CHECK
                 if not self._should_decide(sig) and symbol in self._last_decisions:
                     decision = self._last_decisions[symbol]
@@ -965,6 +995,18 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     if symbol in _exit_only:
                         logger.info("[%s][%s] BUY skipped — exit-only symbol", acct.label, symbol)
                         continue
+                    # Sell cooldown: block rebuy for 4 hours after a sell
+                    _sold_at = acct.sell_cooldown.get(symbol)
+                    if _sold_at is not None:
+                        _hours_since = (datetime.datetime.now(_UTC) - _sold_at).total_seconds() / 3600
+                        if _hours_since < 4.0:
+                            logger.info(
+                                "[%s][%s] BUY blocked — sold %.1fh ago (cooldown 4h)",
+                                acct.label, symbol, _hours_since,
+                            )
+                            continue
+                        else:
+                            acct.sell_cooldown.pop(symbol, None)
                     if not acct.allow_overlap and other_held and symbol in other_held:
                         logger.info("[%s][%s] BUY skipped — already held by another account", acct.label, symbol)
                         continue
@@ -1203,6 +1245,9 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         if not result.filled:
             logger.warning("[%s][%s] Sell order not filled", acct.label, symbol)
             return False
+
+        # Record sell time so the BUY cooldown can block an immediate rebuy
+        acct.sell_cooldown[symbol] = datetime.datetime.now(_UTC)
 
         # ── Step 2: flashcard close ──────────────────────────────────────────
         outcome = "stop-loss" if "stop-loss" in reason.lower() else "sell"
