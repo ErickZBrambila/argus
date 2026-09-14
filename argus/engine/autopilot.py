@@ -74,6 +74,7 @@ class AccountContext:
     # symbol → UTC datetime of last sell; prevents immediate rebuy after a sell
     sell_cooldown: dict = field(default_factory=dict)
     crypto_enabled: bool = True       # False = skip crypto symbols entirely for this account
+    rsi_floor: float = 52.0          # BUY blocked if RSI below this (lower = more aggressive)
 
 
 class Autopilot:
@@ -167,6 +168,7 @@ class Autopilot:
                 allow_overlap=True,
                 cash_reserve=self._cfg.agentic_cash_reserve,
                 crypto_enabled=False,
+                rsi_floor=self._cfg.agentic_rsi_floor,
             ))
 
         if self._cfg.default_account_number:
@@ -1017,10 +1019,10 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                         )
                         continue
                     # RSI gate: skip neutral-zone entries (RSI 45-55 has 29% WR vs 53% at 55-70)
-                    if sig.rsi is not None and sig.rsi < 52:
+                    if sig.rsi is not None and sig.rsi < acct.rsi_floor:
                         logger.info(
-                            "[%s][%s] BUY blocked — RSI %.1f below momentum threshold (52)",
-                            acct.label, symbol, sig.rsi,
+                            "[%s][%s] BUY blocked — RSI %.1f below momentum threshold (%.0f)",
+                            acct.label, symbol, sig.rsi, acct.rsi_floor,
                         )
                         continue
                     # Earnings guard: block BUY within 5 days of earnings report

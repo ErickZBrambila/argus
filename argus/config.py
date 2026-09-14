@@ -111,6 +111,7 @@ class Settings(BaseSettings):
     agentic_min_confidence: float = Field(0.0, alias="AGENTIC_MIN_CONFIDENCE")
     agentic_cash_reserve: float = Field(0.0, alias="AGENTIC_CASH_RESERVE")
     agentic_max_position_pct: float = Field(0.0, alias="AGENTIC_MAX_POSITION_PCT")
+    agentic_rsi_floor: float = Field(52.0, alias="AGENTIC_RSI_FLOOR")
     # Default: long-term style — wider stop, higher confidence threshold
     default_stop_loss_pct: float = Field(0.0, alias="DEFAULT_STOP_LOSS_PCT")
     default_min_confidence: float = Field(0.0, alias="DEFAULT_MIN_CONFIDENCE")
