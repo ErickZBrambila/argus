@@ -287,14 +287,18 @@ Argus runs on Windows with no extra steps beyond the install commands above. A f
 
 The next major version adds specialist AI agents that each own a domain, feeding a structured analysis bundle to a final decision engine.
 
-| Agent | Role | When it runs |
-|-------|------|-------------|
-| **RADAR** | Market scanner — scores ~50 candidates from insider buys, options flow, sector momentum | 7am daily |
-| **CASSANDRA** | Regime detector — classifies market as bull/bear/sideways/volatile from SPY + VIX | 9:20am daily |
-| **HERALD** | News/sentiment — scores recent headlines per symbol (−1 to +1) | 9:20am + breaking news |
-| **ATLAS** | Technical analyst — extends existing signals to 5-min/15-min/daily/weekly timeframes | Every tick |
-| **LEDGER** | Fundamentals — forward PE, EPS trend, analyst ratings (daily cache) | Once per symbol per day |
-| **HOUSTON** | Orchestrator — final BUY/SELL/HOLD decision from structured `AnalysisBundle` | Every tick |
+| Agent | Role | When it runs | Monthly cost |
+|-------|------|-------------|-------------|
+| **RADAR** | Market scanner — scores ~50 candidates from insider buys, options flow, sector momentum | 7am daily | <$0.05 (Haiku) |
+| **CASSANDRA** | Regime detector — classifies market as bull/bear/sideways/volatile from SPY + VIX | 9:20am daily | $0 (pure math) |
+| **HERALD** | News/sentiment — scores recent headlines per symbol (−1 to +1) | 9:20am + breaking news | ~$0.25 (Haiku) |
+| **ATLAS** | Technical analyst — extends existing signals to 5-min/15-min/daily/weekly timeframes | Every tick | $0 (pandas_ta) |
+| **LEDGER** | Fundamentals — forward PE, EPS trend, analyst ratings (daily cache) | Once per symbol per day | ~$0.50 (Haiku) |
+| **HOUSTON** | Orchestrator — final BUY/SELL/HOLD decision from structured `AnalysisBundle` | Every tick | $55–$80 (Sonnet + Gemini) |
+
+**Projected total: $62–$88/month** vs ~$15–$20/month today — roughly a 4–5× increase.
+The jump is almost entirely HOUSTON: replacing flat indicator prompts with a rich multi-domain bundle means more tokens per call, but better decisions. Specialists like CASSANDRA and ATLAS add zero marginal cost.
+Cost can be brought back down ~30% by tightening signal debounce or switching the default account to Haiku.
 
 New additions to the risk layer:
 - **Sector concentration** cap (40% max in any sector across both accounts combined)
