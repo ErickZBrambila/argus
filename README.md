@@ -2,7 +2,7 @@
 
 ![Argus](argus/dashboard/static/banner.png)
 
-![version](https://img.shields.io/badge/version-v0.7.1-blue)
+![version](https://img.shields.io/badge/version-v0.8.0-blue)
 ![python](https://img.shields.io/badge/python-3.12-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![CI](https://github.com/ErickZBrambila/argus/actions/workflows/ci.yml/badge.svg)
@@ -95,12 +95,14 @@ If you only have one Robinhood account, enter the same number for both Agentic a
 
 ## Two account modes
 
-| Mode | What it does |
-|------|-------------|
-| **Agentic** | Trades fully automatically — no approval needed |
-| **Default** | Shows a card in the dashboard for each trade, waits for you to approve or deny |
+Argus supports two separate Robinhood accounts with different personalities:
 
-Start with Default if you want to review every decision. Switch to Agentic once you trust the system.
+| Account | Strategy | Hold period | Risk threshold |
+|---------|----------|-------------|----------------|
+| **Agentic** | Day-trading — buys and sells within the same session | 0h minimum | RSI floor 46, confidence 55% |
+| **Default** | Long-term — holds positions for days or weeks | 48h minimum | RSI floor 52, confidence 65%, $10K cash reserve |
+
+Both accounts are fully autonomous. Each enforces its own stop-loss, PDT rules, and drawdown kill switch independently. A symbol held by one account won't be duplicated by the other.
 
 ---
 
@@ -278,6 +280,29 @@ Argus runs on Windows with no extra steps beyond the install commands above. A f
 - The `argus-tmux` / `argus-bg` shell aliases listed in the technical docs are macOS/Linux only — on Windows just run `argus` in a terminal window
 - Secrets are stored in **Windows Credential Manager** (same as macOS Keychain — automatic, nothing to configure)
 - Stop Argus with `Ctrl+C` — `SIGTERM` isn't available on Windows but `Ctrl+C` works fine
+
+---
+
+## Roadmap — Argus 2.0
+
+The next major version adds specialist AI agents that each own a domain, feeding a structured analysis bundle to a final decision engine.
+
+| Agent | Role | When it runs |
+|-------|------|-------------|
+| **RADAR** | Market scanner — scores ~50 candidates from insider buys, options flow, sector momentum | 7am daily |
+| **CASSANDRA** | Regime detector — classifies market as bull/bear/sideways/volatile from SPY + VIX | 9:20am daily |
+| **HERALD** | News/sentiment — scores recent headlines per symbol (−1 to +1) | 9:20am + breaking news |
+| **ATLAS** | Technical analyst — extends existing signals to 5-min/15-min/daily/weekly timeframes | Every tick |
+| **LEDGER** | Fundamentals — forward PE, EPS trend, analyst ratings (daily cache) | Once per symbol per day |
+| **HOUSTON** | Orchestrator — final BUY/SELL/HOLD decision from structured `AnalysisBundle` | Every tick |
+
+New additions to the risk layer:
+- **Sector concentration** cap (40% max in any sector across both accounts combined)
+- **Correlation guard** — blocks buying when a new position correlates >85% with an existing one
+- **Regime-adjusted sizing** — bear market halves position size automatically
+- **Weekly learning loop** — LearnAgent reads trade history each Sunday, adjusts per-symbol confidence thresholds
+
+Migration is 6 phases with no behavior changes until Phase 3. Full design in **[ARGUS_2.0_ARCHITECTURE.md](ARGUS_2.0_ARCHITECTURE.md)**.
 
 ---
 
