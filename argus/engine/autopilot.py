@@ -75,6 +75,7 @@ class AccountContext:
     sell_cooldown: dict = field(default_factory=dict)
     crypto_enabled: bool = True       # False = skip crypto symbols entirely for this account
     rsi_floor: float = 52.0          # BUY blocked if RSI below this (lower = more aggressive)
+    min_hold_hours: float = 48.0     # SELL blocked within this many hours of entry (0 = day-trade freely)
 
 
 class Autopilot:
@@ -169,6 +170,7 @@ class Autopilot:
                 cash_reserve=self._cfg.agentic_cash_reserve,
                 crypto_enabled=False,
                 rsi_floor=self._cfg.agentic_rsi_floor,
+                min_hold_hours=0.0,
             ))
 
         if self._cfg.default_account_number:
@@ -1054,15 +1056,15 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                         logger.info("[%s][%s] SELL blocked — not an argus-opened position", acct.label, symbol)
                         decisions[symbol] = decision
                         continue
-                    # Minimum hold: don't let AI sell within 48h of entry (stop-loss still fires)
-                    if card.timestamp:
+                    # Minimum hold: don't let AI sell before min_hold_hours (stop-loss still fires)
+                    if acct.min_hold_hours > 0 and card.timestamp:
                         try:
                             entry_dt = datetime.datetime.fromisoformat(card.timestamp)
                             hold_hours = (datetime.datetime.now(_UTC) - entry_dt).total_seconds() / 3600
-                            if hold_hours < 48:
+                            if hold_hours < acct.min_hold_hours:
                                 logger.info(
-                                    "[%s][%s] SELL blocked — held %.1fh, minimum 48h (stop-loss still active)",
-                                    acct.label, symbol, hold_hours,
+                                    "[%s][%s] SELL blocked — held %.1fh, minimum %.0fh (stop-loss still active)",
+                                    acct.label, symbol, hold_hours, acct.min_hold_hours,
                                 )
                                 decisions[symbol] = decision
                                 continue
