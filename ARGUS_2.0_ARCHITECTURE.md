@@ -148,9 +148,24 @@ sideways (else): size=0.7x, conf+0.04
 
 ### LEDGER — Fundamentals Agent
 - **Runs**: Once per symbol per trading day (daily TTL cache).
-- **Output**: `FundamentalScore` with forward PE (yfinance), analyst ratings, short float %, `value_score` 0–1, `prompt_block` ready for Houston.
+- **Output**: `FundamentalScore` with forward PE (yfinance), analyst ratings, short float %, `value_score` 0–1, `prompt_block` ready for Houston. Also writes an **OKF document** to `knowledge/symbols/<SYMBOL>.md` so the profile is human-readable and persists across restarts.
 - **Model**: Haiku only for unusual data (negative forward PE, short float >30%).
 - **Modified file**: `argus/engine/fundamentals_cache.py`
+
+```markdown
+---
+type: Symbol Profile
+title: NVDA — Fundamentals
+tags: [equity, fundamentals, semiconductor]
+updated_at: 2026-09-21T09:20:00Z
+value_score: 0.71
+forward_pe: 34.2
+short_float_pct: 1.8
+---
+NVDA trades at a premium (fwd PE 34.2) but EPS trend is improving (+18% YoY).
+Short interest is low. Analyst consensus: Buy (28/35 analysts).
+No unusual flags. Value score 0.71 — acceptable for momentum entry.
+```
 
 ### HERALD — News/Sentiment Agent
 - **Runs**: 9:20am per symbol. 1-hour TTL cache.
@@ -202,23 +217,38 @@ Sees BOTH accounts combined. Runs after Houston, before execution:
 
 **New file**: `argus/learning/reviewer.py`
 
-Runs Sundays 8pm via APScheduler. Reads `FlashcardStore.performance()`. One Haiku call (~$0.005) produces `strategy_overrides.json`:
+Runs Sundays 8pm via APScheduler. Reads `FlashcardStore.performance()`. One Haiku call (~$0.005) produces per-symbol OKF documents in `knowledge/overrides/`:
 
-```json
-{
-  "symbol_overrides": {
-    "TSLA": {"confidence_delta": 0.08, "note": "Win rate 38% — require higher confidence"},
-    "AAPL": {"confidence_delta": -0.05, "note": "Win rate 72% — can be less restrictive"},
-    "NVDA": {"regime_filter": "bull_only", "note": "3 of 3 losses were in sideways regime"}
-  },
-  "pattern_overrides": {
-    "price_vs_bb_lower_only": {"block": true, "note": "31% win rate — require MACD confirmation"}
-  },
-  "correlation_matrix": {"NVDA_AMD": 0.91}
-}
+```
+knowledge/
+├── overrides/
+│   ├── index.md          ← summary of all active overrides
+│   ├── TSLA.md
+│   ├── AAPL.md
+│   └── NVDA.md
+└── patterns/
+    └── bb_lower_only.md
 ```
 
-Confidence delta caps at ±0.15 to prevent over-fitting. `regime_filter` enforced in Python before Houston is called.
+Each override is an **Open Knowledge Format (OKF)** document — plain markdown + YAML frontmatter, readable in any editor, auditable in git diff:
+
+```markdown
+---
+type: Strategy Override
+title: TSLA confidence adjustment
+tags: [equity, override, learning-loop]
+generated_at: 2026-09-21T20:00:00Z
+confidence_delta: 0.08
+regime_filter: null
+---
+Win rate 38% over 13 trades — require higher confidence before buying.
+Losses concentrated in Q3 earnings windows. No regime filter applied yet
+(need more data — re-evaluate after 20 more trades).
+```
+
+Houston reads the `knowledge/` directory at startup and on each weekly review cycle. Confidence delta caps at ±0.15 to prevent over-fitting. `regime_filter` enforced in Python before Houston is called.
+
+**Why OKF here:** The override decisions are Argus's accumulated trading knowledge — keeping them as inspectable text files means you can read exactly why the system is cautious on TSLA, audit changes in git history, and override manually if the AI reasoning looks wrong.
 
 ---
 
@@ -228,6 +258,7 @@ Confidence delta caps at ±0.15 to prevent over-fitting. `regime_filter` enforce
 - **APScheduler 3.x**: Replace `time.sleep()` loop with cron-style jobs. Radar at 7am, Cassandra at 9:20am, Oracle every 30min, LearnAgent Sundays 8pm.
 - **Anthropic prompt caching**: `cache_control: {"type": "ephemeral"}` on system prompt + regime context. ~60% input token cost reduction for Houston.
 - Proactive Robinhood session keep-alive: background thread calling `rh.profiles.load_account_profile()` every 45 minutes. 3 lines of code, eliminates reactive reauth.
+- **Open Knowledge Format (OKF)**: Markdown + YAML frontmatter for two outputs that benefit from being human-readable and auditable — LearnAgent strategy overrides (`knowledge/overrides/`) and LEDGER symbol profiles (`knowledge/symbols/`). No new dependency — plain file writes. Everything in `knowledge/` is gitignored from the main repo but can be version-controlled separately if desired. Spec: [github.com/GoogleCloudPlatform/knowledge-catalog](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
 
 ### Keep (unchanged)
 Python 3.12, FastAPI, SQLite, pandas_ta, yfinance, Anthropic SDK, Gemini, ntfy.sh, Tailscale, httpx, keyring.
@@ -299,7 +330,8 @@ Current 1.0 cost: ~$15–20/month. 2.0 is 3–5x more — the tradeoff for multi
 - `argus/risk/portfolio_guard.py`
 - `argus/learning/reviewer.py`
 - `argus/broker/mcp_broker.py` (Phase 4)
-- `strategy_overrides.json` (auto-generated, gitignore)
+- `knowledge/overrides/<SYMBOL>.md` (OKF — auto-generated by LearnAgent, gitignore)
+- `knowledge/symbols/<SYMBOL>.md` (OKF — auto-generated by Ledger, gitignore)
 
 **Modified files**:
 - `argus/engine/autopilot.py` — APScheduler, PortfolioGuard, AnalysisBundle, regime reads
