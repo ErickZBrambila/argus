@@ -6121,6 +6121,9 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
 
 /* ── Market status bar ── */
 #m-status-bar{display:flex;align-items:center;justify-content:space-between;padding:5px 14px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0}
+#m-eye-btn{background:none;border:none;font-size:16px;cursor:pointer;padding:2px 4px;line-height:1;color:var(--muted)}
+body.hide-values .private{filter:blur(7px);user-select:none;transition:filter .2s}
+body.hide-values .private:active{filter:blur(0);transition:filter .05s}
 .m-sess-badge{font-size:10px;font-weight:700;padding:3px 9px;border-radius:99px;letter-spacing:.3px;white-space:nowrap}
 .m-sess-open {background:rgba(63,185,80,.15);color:var(--bull);border:1px solid rgba(63,185,80,.3)}
 .m-sess-pre  {background:rgba(88,166,255,.12);color:var(--blue);border:1px solid rgba(88,166,255,.25)}
@@ -6185,9 +6188,12 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
       <span id="conn-label">Connecting…</span>
     </div>
     <span class="m-sess-badge m-sess-closed" id="m-session-badge">CLOSED</span>
-    <div id="m-mc">
-      <span id="m-mc-label">Opens in</span>
-      <span id="m-mc-val">—</span>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div id="m-mc">
+        <span id="m-mc-label">Opens in</span>
+        <span id="m-mc-val">—</span>
+      </div>
+      <button id="m-eye-btn" onclick="mToggleValues()" title="Show/hide dollar amounts">👁</button>
     </div>
   </div>
   <div id="screen">
@@ -6198,8 +6204,8 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-
       <div id="m-readiness-wrap"></div>
       <div class="card">
         <div class="card-label">Total Equity</div>
-        <div class="card-big" id="m-equity">—</div>
-        <div class="card-sub" id="m-pnl">—</div>
+        <div class="card-big private" id="m-equity">—</div>
+        <div class="card-sub private" id="m-pnl">—</div>
       </div>
       <div class="acct-row" id="m-accts"></div>
       <div id="m-kill-wrap"></div>
@@ -6343,8 +6349,8 @@ function mApply(state) {
       const kill = a.kill_switch_active ? '<div class="acct-kill">⚠ Kill switch active</div>' : '';
       return `<div class="acct-card">
         <div class="acct-name">${esc(label)}</div>
-        <div class="acct-eq">${fmt$(a.equity ?? 0)}</div>
-        <div class="acct-pnl ${pnl>=0?'pill-up':'pill-dn'}">${fmtPct(pnl)}</div>
+        <div class="acct-eq private">${fmt$(a.equity ?? 0)}</div>
+        <div class="acct-pnl ${pnl>=0?'pill-up':'pill-dn'} private">${fmtPct(pnl)}</div>
         ${kill}
       </div>`;
     }).join('');
@@ -6752,6 +6758,19 @@ function _setConn(state) {
 // ── Mobile market session badge ────────────────────────────────────────────
 const _M_SESS_LABELS  = {open:'MARKET OPEN',premarket:'PRE-MARKET',afterhours:'AFTER-HOURS',closed:'CLOSED'};
 const _M_SESS_CLASSES = {open:'m-sess-open',premarket:'m-sess-pre',afterhours:'m-sess-after',closed:'m-sess-closed'};
+// ── Hide/show dollar values ───────────────────────────────────────────────
+let _mValuesHidden = localStorage.getItem('argus-hide-values') === '1';
+function mToggleValues() {
+  _mValuesHidden = !_mValuesHidden;
+  document.body.classList.toggle('hide-values', _mValuesHidden);
+  document.getElementById('m-eye-btn').textContent = _mValuesHidden ? '🙈' : '👁';
+  localStorage.setItem('argus-hide-values', _mValuesHidden ? '1' : '0');
+}
+if (_mValuesHidden) {
+  document.body.classList.add('hide-values');
+  document.getElementById('m-eye-btn').textContent = '🙈';
+}
+
 function mUpdateSession(session) {
   _mLastSession = session || 'closed';
   const el = document.getElementById('m-session-badge');
