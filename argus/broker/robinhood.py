@@ -108,18 +108,36 @@ class RobinhoodBroker:
             return
         try:
             import robin_stocks.robinhood as rh
+            import robin_stocks.robinhood.authentication as _rh_auth
+
+            # robin_stocks raises TimeoutError("...Assuming login approved...") when the
+            # workflow-status confirmation step times out, even though the user DID approve
+            # in the app. Patch _validate_sherrif_id to swallow that TimeoutError so the
+            # outer rh.login() proceeds to re-attempt the POST with the approved session.
+            _orig_validate = _rh_auth._validate_sherrif_id
+
+            def _patched_validate(device_token, workflow_id):
+                try:
+                    _orig_validate(device_token, workflow_id)
+                except TimeoutError as _te:
+                    logger.info("Device approval timeout (%s) — assuming approved, continuing login", _te)
+
+            _rh_auth._validate_sherrif_id = _patched_validate
 
             mfa_code: Optional[str] = None
             if self._mfa_secret:
                 mfa_code = pyotp.TOTP(self._mfa_secret.get_secret_value()).now()
                 self._mfa_secret = None    # clear from memory immediately
 
-            rh.login(
-                self.username,
-                self._password.get_secret_value(),
-                mfa_code=mfa_code,
-                store_session=True,
-            )
+            try:
+                rh.login(
+                    self.username,
+                    self._password.get_secret_value(),
+                    mfa_code=mfa_code,
+                    store_session=True,
+                )
+            finally:
+                _rh_auth._validate_sherrif_id = _orig_validate  # always restore
             # rh.login() can fail silently (prints a message, returns None) especially
             # during the device-approval challenge flow. Verify the session is live by
             # checking the Authorization header on the shared session object.
