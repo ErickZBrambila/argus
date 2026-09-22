@@ -56,6 +56,10 @@ class Flashcard:
     # Pattern label (set manually or by future ML)
     pattern: str = ""
 
+    # Market regime at decision time (Argus 2.0 Phase 1). Defaults to "unknown"
+    # so existing flashcard records without this field load unchanged.
+    regime: str = "unknown"
+
     def as_dict(self) -> dict:
         return asdict(self)
 

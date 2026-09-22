@@ -132,6 +132,22 @@ class AccountDailyStats(Base):
     __table_args__ = (UniqueConstraint("date", "account_label", name="uq_account_daily"),)
 
 
+class RegimeState(Base):
+    """Market regime snapshots written by CassandraAgent (Argus 2.0 Phase 1).
+
+    Log-only for now — no trading logic consumes these rows yet.
+    """
+    __tablename__ = "regime_state"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime(timezone=True), default=_utcnow, index=True)
+    regime = Column(String(10), nullable=False, default="unknown")  # bull | bear | neutral | unknown
+    vix = Column(Float, nullable=True)
+    spy_vs_200d_pct = Column(Float, nullable=True)
+    spy_rsi = Column(Float, nullable=True)
+    notes = Column(Text, nullable=True)
+
+
 class Watchlist(Base):
     """Persistent user watchlist symbols."""
     __tablename__ = "watchlist"

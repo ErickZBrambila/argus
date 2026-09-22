@@ -217,6 +217,10 @@ class Autopilot:
             else TerminalDashboard()
         )
         self._flashcards = FlashcardStore()
+        # Argus 2.0 Phase 1 — market regime classifier (log-only, no decisions).
+        from argus.engine.regime import CassandraAgent
+        self._cassandra = CassandraAgent()
+        self._scheduler = None  # APScheduler BackgroundScheduler, created in run()
         self._earnings_guard = EarningsGuard()
         self._fundamentals = FundamentalsCache()
         self._tax_lots = TaxLotChecker()
@@ -481,6 +485,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             self._restore_session_state()
             self._update_dashboard()
 
+            self._start_scheduler()
+
             while self._running:
                 try:
                     # Day-boundary rollover
@@ -514,9 +520,48 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                             break
                         time.sleep(1)
         finally:
+            self._stop_scheduler()
             self._terminal.stop()
             for acct in self._accounts:
                 acct.broker.logout()
+
+    def _start_scheduler(self) -> None:
+        """Start the background scheduler for Argus 2.0 periodic agents.
+
+        Phase 1: schedules CassandraAgent at 9:20am ET, Mon–Fri. This runs on a
+        separate thread and does not touch the main tick loop.
+        """
+        try:
+            from apscheduler.schedulers.background import BackgroundScheduler
+            import pytz
+
+            self._scheduler = BackgroundScheduler(timezone=pytz.timezone("America/New_York"))
+            self._scheduler.add_job(
+                self._cassandra.run,
+                trigger="cron",
+                day_of_week="mon-fri",
+                hour=9,
+                minute=20,
+                id="cassandra_regime",
+                misfire_grace_time=3600,
+                coalesce=True,
+                max_instances=1,
+            )
+            self._scheduler.start()
+            logger.info("Scheduler started — CassandraAgent scheduled 9:20am ET Mon–Fri")
+        except Exception as exc:
+            logger.warning("Could not start scheduler: %s", exc)
+            self._scheduler = None
+
+    def _stop_scheduler(self) -> None:
+        if self._scheduler is not None:
+            try:
+                self._scheduler.shutdown(wait=False)
+                logger.info("Scheduler stopped")
+            except Exception as exc:
+                logger.debug("Scheduler shutdown error: %s", exc)
+            finally:
+                self._scheduler = None
 
     def _shutdown(self, *_) -> None:
         logger.info("Shutdown signal received — stopping Argus")
@@ -1052,7 +1097,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     if buy_amount < risk_check.dollar_amount:
                         logger.debug("[%s][%s] Position sized down to $%.0f (buying power $%.0f)",
                                      acct.label, symbol, buy_amount, buying_power)
-                    if buy_amount <= 1.0:
+                    if buy_amount < 25.0:
                         logger.info("[%s][%s] BUY blocked — insufficient buying power ($%.2f)",
                                     acct.label, symbol, buying_power)
                         continue
