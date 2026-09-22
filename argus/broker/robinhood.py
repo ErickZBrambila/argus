@@ -39,6 +39,7 @@ _VALID_INTERVALS = frozenset({"5minute", "10minute", "hour", "day", "week"})
 # robin_stocks uses a single global session. Only the first RobinhoodBroker
 # in a process should call rh.login() — subsequent instances reuse the session.
 _rh_session_active: bool = False
+_keepalive_started: bool = False  # only one keep-alive thread per process
 
 
 @dataclass
@@ -133,6 +134,7 @@ class RobinhoodBroker:
             self._logged_in = True
             _rh_session_active = True
             logger.info("Robinhood login successful")
+            self._start_keepalive()
         except Exception as exc:
             logger.error("Robinhood login failed: %s", exc)
             raise
@@ -186,6 +188,29 @@ class RobinhoodBroker:
         except Exception as exc:
             logger.error("Robinhood re-authentication failed: %s", exc)
             return False
+
+    def _start_keepalive(self) -> None:
+        """Ping Robinhood every 45 min to prevent session expiry."""
+        global _keepalive_started
+        if _keepalive_started or self.paper:
+            return
+        _keepalive_started = True
+
+        def _loop() -> None:
+            import time
+            import robin_stocks.robinhood as rh
+            while True:
+                time.sleep(45 * 60)
+                try:
+                    rh.profiles.load_account_profile()
+                    logger.debug("Robinhood session keep-alive ping OK")
+                except Exception as exc:
+                    logger.warning("Keep-alive ping failed — triggering reauth: %s", exc)
+                    self.reauth()
+
+        t = threading.Thread(target=_loop, daemon=True, name="rh-keepalive")
+        t.start()
+        logger.info("Robinhood session keep-alive started (45 min interval)")
 
     # ── Market data ─────────────────────────────────────────────────────────
 
@@ -313,6 +338,20 @@ class RobinhoodBroker:
         # Use extended-hours equity when available (after-hours positions are marked to market)
         eq = profile.get("extended_hours_equity") or profile.get("equity") or 0
         return float(eq)
+
+    def get_buying_power(self) -> float:
+        """Return spendable cash (buying power) for this account — not total equity."""
+        if self.paper:
+            with self._paper_lock:
+                return self._paper_equity
+        try:
+            import robin_stocks.robinhood as rh
+            acct = self.account_number or None
+            profile = rh.profiles.load_account_profile(account_number=acct)
+            bp = profile.get("buying_power") or profile.get("cash_available_for_withdrawal") or 0
+            return float(bp)
+        except Exception:
+            return self._live_equity()
 
     def _paper_position_value_unsafe(self) -> float:
         """Return total market value of all open positions. Must be called with _paper_lock held."""

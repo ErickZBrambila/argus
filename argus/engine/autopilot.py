@@ -169,7 +169,7 @@ class Autopilot:
                 allow_overlap=True,
                 cash_reserve=self._cfg.agentic_cash_reserve,
                 crypto_enabled=False,
-                rsi_floor=self._cfg.agentic_rsi_floor,
+                rsi_floor=self._cfg.agentic_rsi_floor or 46.0,
                 min_hold_hours=0.0,
             ))
 
@@ -1046,7 +1046,17 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     if not risk_check.allowed:
                         logger.info("[%s][%s] BUY blocked: %s", acct.label, symbol, risk_check.reason)
                         continue
-                    self._route_buy(acct, symbol, risk_check.dollar_amount, decision, sig, signal_obj=sig)
+                    # Cap at actual buying power — equity includes unsettled/position value
+                    buying_power = acct.broker.get_buying_power()
+                    buy_amount = min(risk_check.dollar_amount, buying_power * 0.99)
+                    if buy_amount < risk_check.dollar_amount:
+                        logger.debug("[%s][%s] Position sized down to $%.0f (buying power $%.0f)",
+                                     acct.label, symbol, buy_amount, buying_power)
+                    if buy_amount <= 1.0:
+                        logger.info("[%s][%s] BUY blocked — insufficient buying power ($%.2f)",
+                                    acct.label, symbol, buying_power)
+                        continue
+                    self._route_buy(acct, symbol, buy_amount, decision, sig, signal_obj=sig)
                     open_positions = acct.broker.get_open_positions()
 
                 elif decision.action == "SELL" and symbol in open_positions:
