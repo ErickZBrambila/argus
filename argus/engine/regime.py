@@ -12,23 +12,26 @@ from __future__ import annotations
 
 import datetime
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_UTC = datetime.timezone.utc
+_UTC = datetime.UTC
 
 
 class CassandraAgent:
     def run(self) -> None:
         """Classify the current regime and persist a snapshot. Never raises."""
-        from argus.metrics import cassandra_runs_total, cassandra_duration_seconds, set_regime
+        from argus.metrics import (
+            cassandra_duration_seconds,
+            cassandra_runs_total,
+            set_regime,
+        )
         with cassandra_duration_seconds.time():
             try:
                 vix, spy_vs_200d, spy_rsi = self._fetch_inputs()
                 regime, notes = self._classify(vix, spy_vs_200d, spy_rsi)
                 cassandra_runs_total.labels(result="success").inc()
-            except Exception as exc:  # pragma: no cover - defensive, log-only agent
+            except Exception as exc:  # pragma: no cover - defensive, log-only agent  # noqa: BLE001
                 logger.warning("CassandraAgent failed: %s", exc)
                 regime, vix, spy_vs_200d, spy_rsi, notes = "unknown", None, None, None, str(exc)
                 cassandra_runs_total.labels(result="failure").inc()
@@ -42,7 +45,7 @@ class CassandraAgent:
             spy_vs_200d if spy_vs_200d is not None else float("nan"),
         )
 
-    def _fetch_inputs(self) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    def _fetch_inputs(self) -> tuple[float | None, float | None, float | None]:
         import numpy as np
         import pandas as pd  # noqa: F401  (pandas_ta accessor needs pandas imported)
         import pandas_ta  # noqa: F401  (registers the .ta DataFrame accessor)
@@ -75,9 +78,9 @@ class CassandraAgent:
 
     def _classify(
         self,
-        vix: Optional[float],
-        spy_vs_200d: Optional[float],
-        spy_rsi: Optional[float],
+        vix: float | None,
+        spy_vs_200d: float | None,
+        spy_rsi: float | None,
     ) -> tuple[str, str]:
         """Deterministic regime rules. Returns (regime, notes)."""
         if spy_vs_200d is None or vix is None:
@@ -98,10 +101,10 @@ class CassandraAgent:
     def _persist(
         self,
         regime: str,
-        vix: Optional[float],
-        spy_vs_200d: Optional[float],
-        spy_rsi: Optional[float],
-        notes: Optional[str],
+        vix: float | None,
+        spy_vs_200d: float | None,
+        spy_rsi: float | None,
+        notes: str | None,
     ) -> None:
         from argus.storage.models import RegimeState, get_session
 
@@ -115,5 +118,5 @@ class CassandraAgent:
                     spy_rsi=spy_rsi,
                     notes=notes,
                 ))
-        except Exception as exc:  # pragma: no cover - log-only agent must not crash
+        except Exception as exc:  # pragma: no cover - log-only agent must not crash  # noqa: BLE001
             logger.warning("CassandraAgent could not persist regime_state: %s", exc)

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -23,16 +22,16 @@ class MultiTFSignal:
     symbol: str
 
     # Daily timeframe
-    daily_rsi: Optional[float] = None
-    daily_macd: Optional[float] = None
-    daily_bb_position: Optional[str] = None  # "above_upper" | "below_lower" | "inside"
-    daily_trend: Optional[str] = None        # "up" | "down" | "flat"
+    daily_rsi: float | None = None
+    daily_macd: float | None = None
+    daily_bb_position: str | None = None  # "above_upper" | "below_lower" | "inside"
+    daily_trend: str | None = None        # "up" | "down" | "flat"
 
     # Weekly timeframe
-    weekly_rsi: Optional[float] = None
-    weekly_macd: Optional[float] = None
-    weekly_bb_position: Optional[str] = None
-    weekly_trend: Optional[str] = None
+    weekly_rsi: float | None = None
+    weekly_macd: float | None = None
+    weekly_bb_position: str | None = None
+    weekly_trend: str | None = None
 
 
 @dataclass
@@ -46,5 +45,5 @@ class AnalysisBundle:
     symbol: str
     timestamp: datetime.datetime
     multi_tf: MultiTFSignal
-    sentiment: Optional[str] = None  # free-form sentiment label, nullable
-    regime: Optional[str] = None     # "bull" | "bear" | "neutral" | "unknown"
+    sentiment: str | None = None  # free-form sentiment label, nullable
+    regime: str | None = None     # "bull" | "bear" | "neutral" | "unknown"
