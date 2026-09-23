@@ -84,5 +84,5 @@ def set_regime(regime: str) -> None:
         r = regime if regime in _REGIMES else "unknown"
         for label in _REGIMES:
             regime_current.labels(regime=label).set(1.0 if label == r else 0.0)
-    except Exception:
+    except Exception:  # pragma: no cover — metrics must never crash callers
         pass

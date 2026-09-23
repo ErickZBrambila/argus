@@ -932,7 +932,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             _start_eq = acct.db_starting_equity or acct.risk.session_entry_equity
             daily_pnl_dollars.labels(account=acct.label).set(equity - _start_eq)
             active_positions_count.labels(account=acct.label).set(len(open_positions))
-        except Exception:
+        except Exception:  # pragma: no cover — metrics must never interrupt the trading loop
             pass
 
         # Stop-loss sweep — only positions argus opened (has an open flashcard)
@@ -1017,7 +1017,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     try:
                         from argus.metrics import decisions_total
                         decisions_total.labels(decision=decision.action, account=acct.label).inc()
-                    except Exception:
+                    except Exception:  # pragma: no cover — metrics must never interrupt the trading loop
                         pass
 
                 if decision.is_error:
@@ -1306,7 +1306,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         try:
             from argus.metrics import trades_total
             trades_total.labels(action="buy", account=acct.label).inc()
-        except Exception:
+        except Exception:  # pragma: no cover — metrics must never interrupt the trading loop
             pass
 
         self._recent_trades.appendleft({
@@ -1380,7 +1380,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         try:
             from argus.metrics import trades_total
             trades_total.labels(action="sell", account=acct.label).inc()
-        except Exception:
+        except Exception:  # pragma: no cover — metrics must never interrupt the trading loop
             pass
 
         self._recent_trades.appendleft({

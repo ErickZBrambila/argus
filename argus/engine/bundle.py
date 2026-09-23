@@ -8,7 +8,7 @@ populate and read. Nothing in the live trading path touches them today.
 from __future__ import annotations
 
 import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
