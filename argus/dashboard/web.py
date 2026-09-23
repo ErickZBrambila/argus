@@ -487,12 +487,18 @@ from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
+        if request.url.path.startswith("/metrics"):
+            return response
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
 app.add_middleware(_SecurityHeadersMiddleware)
+
+# ── Prometheus metrics endpoint (unauthenticated — Prometheus scrapes this) ──
+from prometheus_client import make_asgi_app as _make_metrics_app  # noqa: E402
+app.mount("/metrics", _make_metrics_app())
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 _dashboard_token: str = ""

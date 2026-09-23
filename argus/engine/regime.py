@@ -22,13 +22,18 @@ _UTC = datetime.timezone.utc
 class CassandraAgent:
     def run(self) -> None:
         """Classify the current regime and persist a snapshot. Never raises."""
-        try:
-            vix, spy_vs_200d, spy_rsi = self._fetch_inputs()
-            regime, notes = self._classify(vix, spy_vs_200d, spy_rsi)
-        except Exception as exc:  # pragma: no cover - defensive, log-only agent
-            logger.warning("CassandraAgent failed: %s", exc)
-            regime, vix, spy_vs_200d, spy_rsi, notes = "unknown", None, None, None, str(exc)
+        from argus.metrics import cassandra_runs_total, cassandra_duration_seconds, set_regime
+        with cassandra_duration_seconds.time():
+            try:
+                vix, spy_vs_200d, spy_rsi = self._fetch_inputs()
+                regime, notes = self._classify(vix, spy_vs_200d, spy_rsi)
+                cassandra_runs_total.labels(result="success").inc()
+            except Exception as exc:  # pragma: no cover - defensive, log-only agent
+                logger.warning("CassandraAgent failed: %s", exc)
+                regime, vix, spy_vs_200d, spy_rsi, notes = "unknown", None, None, None, str(exc)
+                cassandra_runs_total.labels(result="failure").inc()
 
+        set_regime(regime)
         self._persist(regime, vix, spy_vs_200d, spy_rsi, notes)
         logger.info(
             "Regime: %s (VIX=%.1f, SPY vs 200d=%.1f%%)",

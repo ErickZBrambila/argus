@@ -702,6 +702,15 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
     # ── Main tick ────────────────────────────────────────────────────────────
 
     def _tick(self) -> None:
+        from argus.metrics import decision_cycle_seconds
+        _tick_timer = decision_cycle_seconds.time()
+        _tick_timer.__enter__()
+        try:
+            self._tick_inner()
+        finally:
+            _tick_timer.__exit__(None, None, None)
+
+    def _tick_inner(self) -> None:
         # ── Session health check ─────────────────────────────────────────────
         # Run once per scan. If the Robinhood token has expired, re-auth and alert.
         _first_live = next((a for a in self._accounts if not a.broker.paper), None)
@@ -917,6 +926,15 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         # Cache so _update_dashboard can reuse without extra API calls
         self._account_cache[acct.label] = {"equity": equity, "positions": open_positions}
 
+        try:
+            from argus.metrics import portfolio_equity_dollars, daily_pnl_dollars, active_positions_count
+            portfolio_equity_dollars.labels(account=acct.label).set(equity)
+            _start_eq = acct.db_starting_equity or acct.risk.session_entry_equity
+            daily_pnl_dollars.labels(account=acct.label).set(equity - _start_eq)
+            active_positions_count.labels(account=acct.label).set(len(open_positions))
+        except Exception:
+            pass
+
         # Stop-loss sweep — only positions argus opened (has an open flashcard)
         for sym, pos in list(open_positions.items()):
             try:
@@ -995,6 +1013,12 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     else:
                         self._last_evaluated_signals[symbol] = sig
                         self._last_decisions[symbol] = decision
+
+                    try:
+                        from argus.metrics import decisions_total
+                        decisions_total.labels(decision=decision.action, account=acct.label).inc()
+                    except Exception:
+                        pass
 
                 if decision.is_error:
                     logger.critical(
@@ -1279,6 +1303,12 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 dollar_amount=dollar_amount,
             )
 
+        try:
+            from argus.metrics import trades_total
+            trades_total.labels(action="buy", account=acct.label).inc()
+        except Exception:
+            pass
+
         self._recent_trades.appendleft({
             "time": datetime.datetime.now(_UTC).strftime("%H:%M:%S"),
             "symbol": symbol,
@@ -1347,6 +1377,12 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             return True  # sell did fill at the broker; caller should treat as success
 
         # ── Step 4: in-memory + notification ────────────────────────────────
+        try:
+            from argus.metrics import trades_total
+            trades_total.labels(action="sell", account=acct.label).inc()
+        except Exception:
+            pass
+
         self._recent_trades.appendleft({
             "time": datetime.datetime.now(_UTC).strftime("%H:%M:%S"),
             "symbol": symbol,
