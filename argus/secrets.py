@@ -12,7 +12,6 @@ Non-secret config (watchlist, scan interval, etc.) still lives in .env.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +39,12 @@ def _keyring():
         raise ImportError("Install keyring: pip install keyring") from exc
 
 
-def get_secret(key: str) -> Optional[str]:
+def get_secret(key: str) -> str | None:
     """Return the secret stored under *key*, or None if not present."""
     try:
         value = _keyring().get_password(_SERVICE, key)
         return value or None
-    except Exception as exc:
+    except Exception:
         logger.debug("Keychain read failed")
         return None
 

@@ -11,13 +11,12 @@ import json
 import logging
 import threading
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_UTC = timezone.utc
+_UTC = UTC
 
 
 @dataclass
@@ -32,8 +31,8 @@ class Flashcard:
     # Signal snapshot
     signal_composite: str    # bullish | bearish | neutral
     signal_confidence: float
-    rsi: Optional[float]
-    macd_hist: Optional[float]
+    rsi: float | None
+    macd_hist: float | None
     bb_position: str         # "above_upper" | "below_lower" | "inside"
     price_vs_sma20: str      # "above" | "below"
     price_vs_ema50: str      # "above" | "below"
@@ -48,13 +47,17 @@ class Flashcard:
     dollar_amount: float
 
     # Outcome (filled in when position closes)
-    exit_price: Optional[float] = None
-    pnl_pct: Optional[float] = None
-    outcome: Optional[str] = None   # "win" | "loss" | "stop-loss"
-    hold_duration_hours: Optional[float] = None
+    exit_price: float | None = None
+    pnl_pct: float | None = None
+    outcome: str | None = None   # "win" | "loss" | "stop-loss"
+    hold_duration_hours: float | None = None
 
     # Pattern label (set manually or by future ML)
     pattern: str = ""
+
+    # Market regime at decision time (Argus 2.0 Phase 1). Defaults to "unknown"
+    # so existing flashcard records without this field load unchanged.
+    regime: str = "unknown"
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -198,7 +201,7 @@ class FlashcardStore:
         trade_id: str,
         exit_price: float,
         outcome: str,
-    ) -> Optional[Flashcard]:
+    ) -> Flashcard | None:
         with self._lock:
             card = self._cards.get(trade_id)
             if card is None:
@@ -212,7 +215,7 @@ class FlashcardStore:
         logger.info("Flashcard closed: %s %s | P&L %.2f%%", card.symbol, outcome, card.pnl_pct)
         return card
 
-    def get_open_card_for_symbol(self, symbol: str, account: str) -> Optional["Flashcard"]:
+    def get_open_card_for_symbol(self, symbol: str, account: str) -> Flashcard | None:
         """Return the most recent open flashcard for a symbol+account, or None."""
         with self._lock:
             candidates = [

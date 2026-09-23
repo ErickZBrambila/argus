@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Protocol
 
 import numpy as np
 import pandas as pd
@@ -37,20 +37,20 @@ class SignalResult:
     price: float
     volume: float
 
-    rsi: Optional[float]
-    macd: Optional[float]
-    macd_signal: Optional[float]
-    macd_hist: Optional[float]
-    bb_upper: Optional[float]
-    bb_mid: Optional[float]
-    bb_lower: Optional[float]
-    sma_20: Optional[float]
-    ema_50: Optional[float]
+    rsi: float | None
+    macd: float | None
+    macd_signal: float | None
+    macd_hist: float | None
+    bb_upper: float | None
+    bb_mid: float | None
+    bb_lower: float | None
+    sma_20: float | None
+    ema_50: float | None
 
     composite: str        # "bullish" | "bearish" | "neutral"
     confidence: float     # 0.0 – 1.0
     change_pct: float = 0.0  # Daily change percentage
-    atr: Optional[float] = None  # ATR-14 for trailing stop calculation
+    atr: float | None = None  # ATR-14 for trailing stop calculation
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
@@ -60,12 +60,12 @@ class StrategyProtocol(Protocol):
     def score(
         self,
         price: float,
-        rsi: Optional[float],
-        macd_hist: Optional[float],
-        bb_upper: Optional[float],
-        bb_lower: Optional[float],
-        sma_20: Optional[float],
-        ema_50: Optional[float],
+        rsi: float | None,
+        macd_hist: float | None,
+        bb_upper: float | None,
+        bb_lower: float | None,
+        sma_20: float | None,
+        ema_50: float | None,
     ) -> tuple[str, float]:
         ...
 
@@ -74,12 +74,12 @@ class DefaultStrategy(StrategyProtocol):
     def score(
         self,
         price: float,
-        rsi: Optional[float],
-        macd_hist: Optional[float],
-        bb_upper: Optional[float],
-        bb_lower: Optional[float],
-        sma_20: Optional[float],
-        ema_50: Optional[float],
+        rsi: float | None,
+        macd_hist: float | None,
+        bb_upper: float | None,
+        bb_lower: float | None,
+        sma_20: float | None,
+        ema_50: float | None,
     ) -> tuple[str, float]:
         """Simple vote-based composite signal."""
         bullish = 0
@@ -133,11 +133,11 @@ class DefaultStrategy(StrategyProtocol):
 
 
 class SignalEngine:
-    def __init__(self, broker, strategy: Optional[StrategyProtocol] = None) -> None:
+    def __init__(self, broker, strategy: StrategyProtocol | None = None) -> None:
         self._broker = broker
         self._strategy = strategy or DefaultStrategy()
 
-    def compute(self, symbol: str) -> Optional[SignalResult]:
+    def compute(self, symbol: str) -> SignalResult | None:
         symbol = _validate_symbol(symbol)
         try:
             return self._compute(symbol)
@@ -176,8 +176,12 @@ class SignalEngine:
             logger.warning("Failed to annotate chart for %s: %s", symbol, exc)
             return []
 
-    def _compute(self, symbol: str) -> Optional[SignalResult]:
-        from argus.storage.models import get_session, get_cached_historicals, save_historicals
+    def _compute(self, symbol: str) -> SignalResult | None:
+        from argus.storage.models import (
+            get_cached_historicals,
+            get_session,
+            save_historicals,
+        )
         
         # 1. Try to load from cache
         with get_session() as session:
@@ -252,7 +256,7 @@ class SignalEngine:
 
         last = df.iloc[-1]
 
-        def _safe(col: str) -> Optional[float]:
+        def _safe(col: str) -> float | None:
             v = last.get(col)
             if v is None or (isinstance(v, float) and np.isnan(v)):
                 return None
@@ -306,7 +310,7 @@ class SignalEngine:
         )
 
 
-def _build_dataframe(raw: list[dict]) -> Optional[pd.DataFrame]:
+def _build_dataframe(raw: list[dict]) -> pd.DataFrame | None:
     try:
         df = pd.DataFrame(raw)
         for col in ("open_price", "close_price", "high_price", "low_price"):

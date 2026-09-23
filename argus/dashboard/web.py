@@ -7,20 +7,23 @@ import datetime
 import hmac as _hmac
 import json
 import logging
+import pathlib
 import queue as stdlib_queue
 import re
 import threading
 import uuid as uuid_pkg
-from typing import AsyncGenerator
-
-import pathlib
+from collections.abc import AsyncGenerator
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from argus.storage.models import get_session, add_to_db_watchlist, remove_from_db_watchlist
+from argus.storage.models import (
+    add_to_db_watchlist,
+    get_session,
+    remove_from_db_watchlist,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +49,16 @@ _search_fn = None          # callable(query: str) -> list[{symbol, name}]
 _autopilot = None         # Autopilot instance for runtime control
 
 # Equity curve — ring buffer of {time, value} points for the session
-import collections as _collections  # noqa: E402
-import pathlib as _pathlib  # noqa: E402
+import collections as _collections
+import pathlib as _pathlib
+
 _equity_history: _collections.deque = _collections.deque(maxlen=480)  # ~8h at 60s interval
 _equity_history_by_account: dict = {}  # label → deque(maxlen=480)
 _EQUITY_PERSIST_PATH = _pathlib.Path(__file__).parent.parent.parent / "equity_history.json"
 
 def _equity_load() -> None:
     """Load today's equity history from disk on startup."""
-    global _equity_history, _equity_history_by_account
+    global _equity_history, _equity_history_by_account  # noqa: PLW0602
     try:
         if not _EQUITY_PERSIST_PATH.exists():
             return
@@ -110,7 +114,7 @@ def _alert_save() -> None:
 def _push_alert_entry(subject: str, body: str) -> None:
     """Append an alert entry and push to SSE clients."""
     entry = {
-        "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "time": datetime.datetime.now(datetime.UTC).isoformat(),
         "subject": subject,
         "body": body,
     }
@@ -177,7 +181,7 @@ def get_persisted_approvals() -> dict[str, dict]:
 
 def queue_approval(trade_id: str, trade_info: dict) -> None:
     with _approval_lock:
-        _pending_approvals[trade_id] = {**trade_info, "queued_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+        _pending_approvals[trade_id] = {**trade_info, "queued_at": datetime.datetime.now(datetime.UTC).isoformat()}
     _approval_save()
     _push_approvals_state()
 
@@ -237,9 +241,9 @@ _NEWS_FEEDS = [
 
 
 def _news_fetch_loop() -> None:
+    import time as _time
     import urllib.request
     import xml.etree.ElementTree as ET
-    import time as _time
 
     while True:
         for url in _NEWS_FEEDS:
@@ -330,7 +334,7 @@ def add_to_runtime_watchlist(symbol: str) -> None:
 # ── MCP-injected discovery candidates ────────────────────────────────────────
 # External bridge (Claude MCP → Argus): Claude calls MCP tools and POSTs symbols here.
 # Autopilot reads these each tick and adds them to the scan universe.
-import datetime as _dt_mod  # noqa: E402
+import datetime as _dt_mod
 
 _mcp_candidates: list[dict] = []
 _mcp_candidates_lock = threading.Lock()
@@ -347,7 +351,7 @@ def inject_mcp_candidates(candidates: list[dict]) -> None:
                     "symbol": sym,
                     "reason": c.get("reason", "MCP discovery"),
                     "category": c.get("category", "mcp"),
-                    "injected_at": _dt_mod.datetime.utcnow().isoformat(),
+                    "injected_at": _dt_mod.datetime.now(_dt_mod.UTC).isoformat(),
                     "ttl_hours": float(c.get("ttl_hours", 8)),
                 }
         _mcp_candidates[:] = list(existing.values())
@@ -355,7 +359,7 @@ def inject_mcp_candidates(candidates: list[dict]) -> None:
 
 def get_mcp_candidates() -> list[dict]:
     """Return non-expired MCP candidates."""
-    now = _dt_mod.datetime.utcnow()
+    now = _dt_mod.datetime.now(_dt_mod.UTC)
     with _mcp_candidates_lock:
         valid = []
         for c in _mcp_candidates:
@@ -394,7 +398,7 @@ def _run_investigation(symbol: str) -> None:
         if symbol not in _investigations:
             return
         _investigations[symbol]["status"] = "running"
-        _investigations[symbol]["started_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        _investigations[symbol]["started_at"] = datetime.datetime.now(_dt_mod.UTC).isoformat()
     _push_investigation_state()
 
     try:
@@ -425,7 +429,7 @@ def _run_investigation(symbol: str) -> None:
                 "findings":   result.get("findings") or [],
                 "risks":      result.get("risks") or [],
                 "timeframe":  result.get("timeframe", ""),
-                "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "completed_at": datetime.datetime.now(_dt_mod.UTC).isoformat(),
             })
 
         if _notifier and verdict.upper() != "HOLD":
@@ -446,7 +450,7 @@ def _run_investigation(symbol: str) -> None:
             _investigations[symbol].update({
                 "status": "error",
                 "error": str(exc),
-                "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "completed_at": datetime.datetime.now(_dt_mod.UTC).isoformat(),
             })
 
     _push_investigation_state()
@@ -482,17 +486,25 @@ _STATIC_DIR = pathlib.Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 # ── Security headers middleware ───────────────────────────────────────────────
-from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
+from starlette.middleware.base import BaseHTTPMiddleware
+
 
 class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
+        if request.url.path.startswith("/metrics"):
+            return response
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
 app.add_middleware(_SecurityHeadersMiddleware)
+
+# ── Prometheus metrics endpoint (unauthenticated — Prometheus scrapes this) ──
+from prometheus_client import make_asgi_app as _make_metrics_app
+
+app.mount("/metrics", _make_metrics_app())
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 _dashboard_token: str = ""
@@ -594,7 +606,7 @@ def _auto_trigger_investigations(state: dict) -> None:
             _investigations[sym] = {
                 "symbol": sym,
                 "status": "queued",
-                "queued_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "queued_at": datetime.datetime.now(_dt_mod.UTC).isoformat(),
                 "auto_triggered": True,
                 "trigger_reason": f"{composite} {confidence:.0%} | AI {ai_action} {ai_conf:.0%}",
             }
@@ -614,7 +626,7 @@ def push_state(state: dict) -> None:
     for _k in ("watchlist", "investigations", "pending_approvals", "pending_promotes"):
         if _k not in state and _k in _state:
             state = {**state, _k: _state[_k]}
-    now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    now_ts = int(datetime.datetime.now(_dt_mod.UTC).timestamp())
     with _state_lock:
         equity = state.get("equity")
         if equity:
@@ -670,7 +682,7 @@ async def get_status() -> dict:
     with _state_lock:
         snap = dict(_state)
     snap["paused"] = _paused
-    snap["timestamp"] = datetime.datetime.utcnow().isoformat()
+    snap["timestamp"] = datetime.datetime.now(datetime.UTC).isoformat()
     return snap
 
 
@@ -721,9 +733,11 @@ async def get_trades() -> dict:
 @app.get("/api/performance", dependencies=[Depends(_require_auth)])
 async def get_performance() -> dict:
     """Return argus-managed P&L: only trades argus opened (has a buy record)."""
-    from argus.storage.models import get_session, Trade
-    from sqlalchemy import select
     import datetime as _dt
+
+    from sqlalchemy import select
+
+    from argus.storage.models import Trade, get_session
 
     with get_session() as session:
         _rows = session.execute(
@@ -872,7 +886,8 @@ def get_promote_request() -> dict | None:
 
 
 @app.post("/api/promote/{symbol}", dependencies=[Depends(_require_auth)])
-async def promote_position(symbol: str, body: dict = {}) -> dict:
+async def promote_position(symbol: str, body: dict | None = None) -> dict:
+    body = body or {}
     symbol = symbol.upper().strip()
     if not _SYMBOL_RE.match(symbol):
         raise HTTPException(status_code=400, detail="Invalid symbol")
@@ -886,7 +901,7 @@ async def promote_position(symbol: str, body: dict = {}) -> dict:
         "symbol": symbol,
         "from_account": from_account,
         "to_account": to_account,
-        "queued_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "queued_at": datetime.datetime.now(_dt_mod.UTC).isoformat(),
     }
     with _promote_lock:
         _pending_promotes[promote_id] = entry
@@ -947,9 +962,10 @@ def _yf_chart_fallback(symbol: str, existing: list, span: str = "3month") -> lis
     dataset (yfinance if more candles, else existing).
     """
     try:
-        import yfinance as yf
-        import pandas as pd
         import datetime as _dt
+
+        import pandas as pd
+        import yfinance as yf
         try:
             from argus.broker.robinhood import CRYPTO_SYMBOLS as _CS
         except Exception:
@@ -1126,7 +1142,7 @@ async def start_investigation(body: dict) -> dict:
         _investigations[symbol] = {
             "symbol": symbol,
             "status": "queued",
-            "queued_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "queued_at": datetime.datetime.now(_dt_mod.UTC).isoformat(),
         }
     _push_investigation_state()
     threading.Thread(target=_run_investigation, args=(symbol,), daemon=True, name=f"inv-{symbol}").start()
@@ -1265,7 +1281,7 @@ async def set_exit_only_api(symbol: str, payload: dict) -> dict:
         raise HTTPException(status_code=400, detail="Invalid symbol")
     value = bool(payload.get("value", True))
     try:
-        from argus.storage.models import set_exit_only, get_exit_only_symbols
+        from argus.storage.models import get_exit_only_symbols, set_exit_only
         with get_session() as session:
             set_exit_only(session, symbol, value)
             session.flush()
@@ -1295,7 +1311,7 @@ async def set_sell_by_api(symbol: str, payload: dict) -> dict:
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date — use YYYY-MM-DD")
     try:
-        from argus.storage.models import set_sell_by_date, get_sell_by_dates
+        from argus.storage.models import get_sell_by_dates, set_sell_by_date
         with get_session() as session:
             set_sell_by_date(session, symbol, date_val)
             session.flush()
@@ -1349,7 +1365,7 @@ async def deny_trade(trade_id: str) -> dict:
 
 @app.post("/api/alerts/clear", dependencies=[Depends(_require_auth)])
 async def clear_alerts() -> dict:
-    global _alert_log
+    global _alert_log  # noqa: PLW0602
     _alert_log.clear()
     _alert_save()
     with _state_lock:
@@ -1481,7 +1497,7 @@ async def api_post_settings(payload: dict) -> dict:
             except (ValueError, TypeError):
                 raise HTTPException(status_code=400, detail=f"{k} must be a number")
     _env_write(payload)
-    logger.info("Settings updated via dashboard: %s", [_sl(k) for k in payload.keys()])
+    logger.info("Settings updated via dashboard: %s", [_sl(k) for k in payload])
     return {"ok": True, "message": "Settings saved — restart Argus to apply changes."}
 
 
@@ -1536,7 +1552,6 @@ async def get_realized_pnl() -> dict:
 
             # Gather closed positions P&L from order history
             orders = rh.orders.get_all_stock_orders() or []
-            realized: list[dict] = []
             sold: dict[str, list] = {}
             for o in orders:
                 if o.get("state") != "filled":
@@ -1604,7 +1619,7 @@ async def sse_stream() -> StreamingResponse:
                 try:
                     data = await asyncio.wait_for(q.get(), timeout=30.0)
                     yield f"data: {data}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield ": heartbeat\n\n"
         finally:
             _subscribers.discard(q)
@@ -6897,6 +6912,7 @@ async def mobile() -> str:
 
 
 def main(host: str = "", port: int = 0, token: str = "") -> None:
+    from argus.config import get_settings
     cfg = get_settings()
     host = host or cfg.web_host
     port = port or cfg.web_port
