@@ -12,7 +12,6 @@ import re
 import threading
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
 
 import pyotp
 from pydantic import SecretStr
@@ -65,7 +64,7 @@ class RobinhoodBroker:
     ) -> None:
         self.username = username
         self._password = password if isinstance(password, SecretStr) else SecretStr(password)
-        self._mfa_secret: Optional[SecretStr] = (
+        self._mfa_secret: SecretStr | None = (
             (mfa_secret if isinstance(mfa_secret, SecretStr) else SecretStr(mfa_secret))
             if mfa_secret
             else None
@@ -124,7 +123,7 @@ class RobinhoodBroker:
 
             _rh_auth._validate_sherrif_id = _patched_validate
 
-            mfa_code: Optional[str] = None
+            mfa_code: str | None = None
             if self._mfa_secret:
                 mfa_code = pyotp.TOTP(self._mfa_secret.get_secret_value()).now()
                 self._mfa_secret = None    # clear from memory immediately
@@ -216,6 +215,7 @@ class RobinhoodBroker:
 
         def _loop() -> None:
             import time
+
             import robin_stocks.robinhood as rh
             while True:
                 time.sleep(45 * 60)
@@ -407,7 +407,7 @@ class RobinhoodBroker:
             try:
                 sym_data = rh.stocks.get_instrument_by_url(instrument_url, info="symbol")
                 sym = (sym_data or "").strip().upper()
-            except Exception:
+            except Exception:  # noqa: S112
                 continue
             if sym:
                 result[sym] = {"qty": qty, "avg_price": avg}
@@ -497,12 +497,13 @@ class RobinhoodBroker:
             logger.debug("Screener upcoming-earnings tag failed: %s", exc)
 
         try:
-            import robin_stocks.robinhood as rh
             import datetime as _dt
+
+            import robin_stocks.robinhood as rh
 
             # Per-symbol earnings check for movers already in result
             today = _dt.date.today()
-            for item in list(result):
+            for item in result:
                 sym = item["symbol"]
                 if item["category"] == "earnings":
                     continue
@@ -551,7 +552,8 @@ class RobinhoodBroker:
                 # RemoteDisconnected happens right after a session reauth — retry once
                 _is_disconnect = "RemoteDisconnected" in type(exc).__name__ or "RemoteDisconnected" in str(exc)
                 if _is_disconnect:
-                    import time as _t; _t.sleep(1.5)
+                    import time as _t
+                    _t.sleep(1.5)
                     try:
                         if symbol in CRYPTO_SYMBOLS:
                             data = rh.crypto.get_crypto_historicals(symbol, interval=interval, span=span)
@@ -575,8 +577,9 @@ class RobinhoodBroker:
     def _yf_crypto_historicals(self, symbol: str, span: str) -> list[dict]:
         """Fetch crypto OHLCV from Yahoo Finance — no Robinhood auth needed."""
         try:
-            import yfinance as yf
             import datetime as _dt
+
+            import yfinance as yf
             _span_days = {
                 'day': 7, 'week': 35, 'month': 35, '3month': 95,
                 'year': 370, '5year': 1830,
@@ -686,8 +689,9 @@ class RobinhoodBroker:
 
     def _poll_until_filled(self, order_id: str, is_crypto: bool, timeout: float = 30.0) -> dict:
         """Poll order status until filled, cancelled, or timeout. Returns last order dict."""
-        import robin_stocks.robinhood as rh
         import time
+
+        import robin_stocks.robinhood as rh
 
         last_known: dict = {}
         deadline = time.monotonic() + timeout

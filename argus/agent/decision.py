@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import anthropic
 
@@ -85,7 +84,8 @@ def classify_risk(signal_confidence: float, decision_confidence: float, consensu
     return "high"
 
 
-from argus.config import get_settings  # noqa: E402
+from argus.config import get_settings
+
 
 def get_model_info() -> dict:
     settings = get_settings()
@@ -188,9 +188,9 @@ class _GeminiEngine:
             _ai_status["gemini"] = status
             # On quota exhaustion (429), pause Gemini for the rest of the trading day
             if "429" in err_str or "quota" in err_str.lower() or "resource_exhausted" in err_str.lower():
-                import time
                 import datetime as _dt
-                now = _dt.datetime.now()
+                import time
+                now = _dt.datetime.now(_dt.UTC)
                 midnight = _dt.datetime.combine(now.date() + _dt.timedelta(days=1), _dt.time.min)
                 self._quota_exhausted_until = midnight.timestamp()
                 logger.warning("Gemini daily quota exhausted — switching to Claude-only until midnight")
@@ -263,9 +263,9 @@ def _consensus(claude: TradeDecision, gemini: TradeDecision, symbol: str) -> Tra
 class DecisionEngine:
     """Ensemble decision engine. Uses both Claude and Gemini when Gemini key is set."""
 
-    def __init__(self, anthropic_key: str, gemini_key: Optional[str] = None) -> None:
+    def __init__(self, anthropic_key: str, gemini_key: str | None = None) -> None:
         self._claude = _ClaudeEngine(anthropic_key)
-        self._gemini: Optional[_GeminiEngine] = None
+        self._gemini: _GeminiEngine | None = None
         if gemini_key:
             try:
                 self._gemini = _GeminiEngine(gemini_key)

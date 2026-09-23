@@ -31,7 +31,7 @@ class CassandraAgent:
                 vix, spy_vs_200d, spy_rsi = self._fetch_inputs()
                 regime, notes = self._classify(vix, spy_vs_200d, spy_rsi)
                 cassandra_runs_total.labels(result="success").inc()
-            except Exception as exc:  # pragma: no cover - defensive, log-only agent  # noqa: BLE001
+            except Exception as exc:  # pragma: no cover - defensive, log-only agent
                 logger.warning("CassandraAgent failed: %s", exc)
                 regime, vix, spy_vs_200d, spy_rsi, notes = "unknown", None, None, None, str(exc)
                 cassandra_runs_total.labels(result="failure").inc()
@@ -118,5 +118,5 @@ class CassandraAgent:
                     spy_rsi=spy_rsi,
                     notes=notes,
                 ))
-        except Exception as exc:  # pragma: no cover - log-only agent must not crash  # noqa: BLE001
+        except Exception as exc:  # pragma: no cover - log-only agent must not crash
             logger.warning("CassandraAgent could not persist regime_state: %s", exc)

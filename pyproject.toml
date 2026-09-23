@@ -46,6 +46,19 @@ argus-setup   = "argus.setup_secrets:main"
 argus-setup-gui = "argus.setup_wizard:main"
 argus-service = "argus.install_service:main"
 
+[tool.ruff.lint]
+# Rules suppressed project-wide — all intentional in trading-safety context:
+#   BLE001  blind except: every broker/AI call is wrapped in broad try/except so a
+#           transient failure never crashes the trading loop or corrupts state.
+#   S110    try-except-pass: same rationale — silencing non-critical side effects
+#           (metrics, notifications, DB writes) must not raise.
+#   DTZ011  date.today(): used for local market-date tracking (NYSE calendar), not
+#           cross-timezone comparisons; UTC offset is irrelevant here.
+#   PLW1510 subprocess without check=True: only used in install_service.py utilities.
+#   TRY401  verbose log in except: existing logging style uses exc_info kwarg.
+#   FURB162 fromisoformat Z suffix: Python 3.11+ only; keep 3.10 compatibility.
+ignore = ["BLE001", "S110", "DTZ011", "PLW1510", "TRY401", "FURB162"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["argus*"]

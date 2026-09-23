@@ -10,7 +10,6 @@ import datetime
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +19,9 @@ _EARNINGS_BLOCK_DAYS = 5   # block BUY if earnings within this many calendar day
 @dataclass
 class EarningsInfo:
     symbol: str
-    report_date: Optional[datetime.date]   # None if no upcoming earnings found
-    days_away: Optional[int]               # None if no upcoming earnings found
-    timing: Optional[str]                  # "am" | "pm" | None
+    report_date: datetime.date | None   # None if no upcoming earnings found
+    days_away: int | None               # None if no upcoming earnings found
+    timing: str | None                  # "am" | "pm" | None
     cached_on: datetime.date               # cache key — invalidated on day change
 
 

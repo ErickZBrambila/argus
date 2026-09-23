@@ -1,3 +1,3 @@
-from .manager import RiskManager, RiskDecision
+from .manager import RiskDecision, RiskManager
 
-__all__ = ["RiskManager", "RiskDecision"]
+__all__ = ["RiskDecision", "RiskManager"]

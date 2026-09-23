@@ -6,8 +6,8 @@ import datetime
 import logging
 import os
 import stat
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Generator, Optional
 
 from sqlalchemy import (
     Boolean,
@@ -26,7 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 logger = logging.getLogger(__name__)
-_UTC = datetime.timezone.utc
+_UTC = datetime.UTC
 
 
 def _utcnow() -> datetime.datetime:
@@ -219,7 +219,7 @@ def init_db(url: str = "sqlite:///argus.db") -> None:
     connect_args: dict = {}
     if url.startswith("sqlite"):
         connect_args = {"check_same_thread": False, "timeout": 30}
-        if url.startswith("sqlite:////") or url.startswith("sqlite:///"):
+        if url.startswith(("sqlite:////", "sqlite:///")):
             db_path = url.replace("sqlite:///", "", 1).replace("sqlite:////", "/", 1)
             if db_path and not db_path.startswith(":"):
                 db_dir = os.path.dirname(os.path.abspath(db_path))
@@ -460,7 +460,7 @@ def get_exit_only_symbols(session: Session) -> set[str]:
 
 
 def set_sell_by_date(
-    session: Session, symbol: str, date_val: Optional[datetime.date]
+    session: Session, symbol: str, date_val: datetime.date | None
 ) -> None:
     row = session.query(Watchlist).filter_by(symbol=symbol).first()
     if row:

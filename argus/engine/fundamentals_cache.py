@@ -10,8 +10,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -24,19 +23,19 @@ class FundamentalsSnapshot:
     cached_on: datetime.date
 
     # Valuation
-    pe_ratio: Optional[float] = None
-    pb_ratio: Optional[float] = None
-    market_cap_b: Optional[float] = None   # billions
+    pe_ratio: float | None = None
+    pb_ratio: float | None = None
+    market_cap_b: float | None = None   # billions
 
     # 52-week position (0.0 = at 52w low, 1.0 = at 52w high)
-    week52_position: Optional[float] = None
-    week52_low: Optional[float] = None
-    week52_high: Optional[float] = None
+    week52_position: float | None = None
+    week52_low: float | None = None
+    week52_high: float | None = None
 
     # Financials: last two quarters (most-recent first)
-    revenue_growth_pct: Optional[float] = None   # QoQ revenue growth %
-    net_margin_latest: Optional[float] = None    # most recent quarter net margin %
-    net_margin_prev: Optional[float] = None      # prior quarter net margin %
+    revenue_growth_pct: float | None = None   # QoQ revenue growth %
+    net_margin_latest: float | None = None    # most recent quarter net margin %
+    net_margin_prev: float | None = None      # prior quarter net margin %
 
 
 class FundamentalsCache:
@@ -61,7 +60,7 @@ class FundamentalsCache:
             if raw and isinstance(raw, list):
                 raw = raw[0]
             if raw and isinstance(raw, dict):
-                def _f(key: str) -> Optional[float]:
+                def _f(key: str) -> float | None:
                     v = raw.get(key)
                     try:
                         return float(v) if v not in (None, "", "None") else None
