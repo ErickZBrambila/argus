@@ -3819,8 +3819,8 @@ function renderAccounts(accounts, state) {
         <span class="${pnlCls} private" id="acct-pnl-${label}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${pnlPct.toFixed(2)}%)</span>
       </div>
       ${resetPnl !== null ? `<div class="acct-row">
-        <span class="acct-row-label">Since Reset</span>
-        <span class="${resetCls} private">${resetSign}$${Math.abs(resetPnl).toFixed(2)} (${resetSign}${(resetPnlPct||0).toFixed(2)}%)</span>
+        <span class="acct-row-label">Net Winnings</span>
+        <span class="${resetCls} private" style="font-weight:600">${resetSign}$${Math.abs(resetPnl).toFixed(2)} (${resetSign}${(resetPnlPct||0).toFixed(2)}%)</span>
       </div>` : ''}
       <div class="acct-row">
         <span class="acct-row-label">Mode</span>
