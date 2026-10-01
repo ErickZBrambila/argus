@@ -129,17 +129,15 @@ class FundamentalsCache:
             if trades:
                 buys  = sum(1 for t in trades if "buy"  in (t.get("transaction_type") or "").lower())
                 sells = sum(1 for t in trades if "sell" in (t.get("transaction_type") or "").lower())
+                # Only emit derived counts — raw politician/amount strings are free-text
+                # from a third-party feed and must not flow into the AI prompt verbatim.
                 parts = []
                 if buys:
                     parts.append(f"{buys} buy{'s' if buys > 1 else ''}")
                 if sells:
                     parts.append(f"{sells} sell{'s' if sells > 1 else ''}")
-                sample = trades[0]
-                snap.politician_trades_summary = (
-                    f"{', '.join(parts)} — "
-                    f"e.g. {sample.get('politician','')} {sample.get('transaction_type','')} "
-                    f"{sample.get('amount_range','')} on {sample.get('transaction_date','')}"
-                )
+                if parts:
+                    snap.politician_trades_summary = f"{', '.join(parts)} in last 90 days"
         except Exception as exc:
             logger.debug("MCP politician trades fetch failed for %s: %s", symbol, exc)
 

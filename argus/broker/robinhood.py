@@ -332,11 +332,12 @@ class RobinhoodBroker:
 
             # Try MCP for authoritative cost bases; fall back to robin_stocks fields
             mcp_costs: dict[str, float] = {}
-            try:
-                from argus.broker.robinhood_mcp import get_crypto_cost_basis as _gcb
-                mcp_costs = _gcb(self.account_number or "464992270")
-            except Exception as _mcp_exc:
-                logger.debug("MCP crypto cost basis unavailable: %s", _mcp_exc)
+            if self.account_number:
+                try:
+                    from argus.broker.robinhood_mcp import get_crypto_cost_basis as _gcb
+                    mcp_costs = _gcb(self.account_number)
+                except Exception as _mcp_exc:
+                    logger.debug("MCP crypto cost basis unavailable: %s", _mcp_exc)
 
             breakdown = []
             total = 0.0

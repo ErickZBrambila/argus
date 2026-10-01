@@ -127,7 +127,7 @@ class DefaultStrategy(StrategyProtocol):
             elif price < ema_50:
                 bearish += 1
 
-        if supertrend_dir is not None:
+        if supertrend_dir in (1, -1):   # only exact values vote; 0 or garbage is ignored
             total += 1
             if supertrend_dir == 1:
                 bullish += 1
@@ -138,7 +138,7 @@ class DefaultStrategy(StrategyProtocol):
             return "neutral", 0.0
 
         confidence = max(bullish, bearish) / total
-        if adx is not None:
+        if adx is not None and 0.0 <= adx <= 100.0:   # reject out-of-range MCP values
             if adx < 20:
                 confidence *= 0.8
             elif adx > 30:

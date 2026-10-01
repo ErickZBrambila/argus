@@ -16,6 +16,9 @@ import subprocess
 import threading
 import time
 from typing import Any
+from urllib.parse import urlparse
+
+_ALLOWED_REFRESH_HOSTS = frozenset({"robinhood.com", "api.robinhood.com", "agent.robinhood.com"})
 
 import requests
 
@@ -74,6 +77,12 @@ def _refresh_token() -> None:
         logger.warning("robinhood_mcp: missing refresh credentials, cannot refresh token")
         return
 
+    parsed = urlparse(token_endpoint)
+    host = parsed.hostname or ""
+    if parsed.scheme != "https" or not any(host == h or host.endswith(f".{h}") for h in _ALLOWED_REFRESH_HOSTS):
+        logger.warning("robinhood_mcp: refusing refresh to untrusted endpoint: %s", parsed.netloc)
+        return
+
     try:
         resp = requests.post(
             token_endpoint,
@@ -93,7 +102,7 @@ def _refresh_token() -> None:
         _token_cache["expiresAt"] = int(time.time() * 1000) + expires_in * 1000
         logger.info("robinhood_mcp: token refreshed successfully")
     except Exception as exc:
-        logger.warning("robinhood_mcp: token refresh failed: %s", exc)
+        logger.warning("robinhood_mcp: token refresh failed: %s", type(exc).__name__)
 
 
 def _call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
