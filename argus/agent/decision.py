@@ -390,6 +390,11 @@ def _build_prompt(
     sma_str = f"{signal.sma_20:.2f}" if signal.sma_20 is not None else "N/A"
     ema_str = f"{signal.ema_50:.2f}" if signal.ema_50 is not None else "N/A"
 
+    st_dir = getattr(signal, "supertrend_dir", None)
+    st_str = ("bullish ↑" if st_dir == 1 else "bearish ↓") if st_dir is not None else "N/A"
+    adx_val = getattr(signal, "adx", None)
+    adx_str = f"{adx_val:.1f}" if adx_val is not None else "N/A"
+
     fundamentals_section = f"\n{fundamentals_block}\n" if fundamentals_block else ""
     return f"""Symbol: {signal.symbol}
 Current price: ${signal.price:.4f}
@@ -401,6 +406,8 @@ Technical indicators:
   Bollinger Bands: {bb_str}
   SMA-20: {sma_str}
   EMA-50: {ema_str}
+  SuperTrend (10,3): {st_str}
+  ADX (10): {adx_str}
 {fundamentals_section}
 Portfolio context:
   Equity: ${portfolio_equity:,.2f}

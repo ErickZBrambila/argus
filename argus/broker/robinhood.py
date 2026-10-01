@@ -329,6 +329,15 @@ class RobinhoodBroker:
         try:
             import robin_stocks.robinhood as rh
             holdings = rh.crypto.get_crypto_positions() or []
+
+            # Try MCP for authoritative cost bases; fall back to robin_stocks fields
+            mcp_costs: dict[str, float] = {}
+            try:
+                from argus.broker.robinhood_mcp import get_crypto_cost_basis as _gcb
+                mcp_costs = _gcb(self.account_number or "464992270")
+            except Exception as _mcp_exc:
+                logger.debug("MCP crypto cost basis unavailable: %s", _mcp_exc)
+
             breakdown = []
             total = 0.0
             total_cost = 0.0
@@ -337,10 +346,12 @@ class RobinhoodBroker:
                 qty = float(item.get("quantity", 0))
                 if not sym or qty < 1e-8:
                     continue
-                cb = item.get("cost_bases", [{}])[0]
-                cost = float(cb.get("direct_cost_basis", 0))
+                # MCP cost basis is most accurate; fall back through robin_stocks fields
+                cost = mcp_costs.get(sym.upper(), 0.0)
                 if cost == 0:
-                    # Fall back to clearing book cost basis (covers pre-direct-custody ETH, transfers, etc.)
+                    cb = item.get("cost_bases", [{}])[0]
+                    cost = float(cb.get("direct_cost_basis", 0) or 0)
+                if cost == 0:
                     tax_lots = item.get("tax_lot_cost_bases", [{}])
                     cost = float(tax_lots[0].get("clearing_book_cost_basis", 0)) if tax_lots else 0.0
                 try:
