@@ -2336,6 +2336,27 @@ _HTML = """<!DOCTYPE html>
     color: var(--muted);
   }
   .acct-total-bar strong { color: var(--text); }
+  /* ── Net Winnings banner ────────────────────────────────────────────────── */
+  .nw-banner {
+    display: flex;
+    align-items: center;
+    gap: 28px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 22px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  .nw-main { display: flex; flex-direction: column; gap: 2px; min-width: 160px; }
+  .nw-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .nw-value { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .nw-sub   { font-size: 12px; color: var(--muted); margin-top: 1px; }
+  .nw-divider { width: 1px; height: 44px; background: var(--border); flex-shrink: 0; }
+  .nw-acct  { display: flex; flex-direction: column; gap: 3px; min-width: 120px; }
+  .nw-acct-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .nw-acct-val   { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .nw-acct-sub   { font-size: 11px; color: var(--muted); }
   /* ── Crypto panel ───────────────────────────────────────────────────────── */
   .acct-panel.crypto { border-color: rgba(247,147,26,.35); }
   .acct-panel-title.crypto { color: #f7931a; }
@@ -2758,6 +2779,9 @@ _HTML = """<!DOCTYPE html>
   <main>
 
   <div class="tab-pane active" id="tab-dashboard">
+
+    <!-- Net Winnings summary banner -->
+    <div class="nw-banner" id="nw-banner" style="display:none"></div>
 
     <!-- Per-account panels -->
     <div class="card card-full">
@@ -3841,6 +3865,76 @@ function renderAccounts(accounts, state) {
   }).join('') + cryptoPanel;
 }
 
+function updateNetWinnings(state) {
+  const banner = document.getElementById('nw-banner');
+  if (!banner || !state.accounts) return;
+  const accts = Object.entries(state.accounts);
+  if (!accts.length) { banner.style.display = 'none'; return; }
+
+  let totalNet = 0, totalBaseline = 0, totalEquity = 0;
+  const acctBlocks = [];
+  for (const [label, a] of accts) {
+    // Prefer official Robinhood realized P&L; fall back to equity-delta
+    const useOfficial = a.realized_pnl != null;
+    const net      = useOfficial ? a.realized_pnl : (a.since_reset_pnl ?? null);
+    const baseline = a.reset_baseline ?? null;
+    const eq       = a.equity         ?? 0;
+    if (net === null) continue;
+    totalNet    += net;
+    totalEquity += eq;
+    if (baseline) totalBaseline += baseline;
+    const pct  = useOfficial
+      ? ((a.realized_pnl_rate ?? 0) * 100)
+      : (baseline ? (net / baseline * 100) : 0);
+    const sign = net >= 0 ? '+' : '';
+    const cls  = pnlClass(net);
+    const subLabel = useOfficial ? 'realized · since inception' : `${fmtDollar(baseline)} funded`;
+    acctBlocks.push(`
+      <div class="nw-acct">
+        <span class="nw-acct-label">${label}</span>
+        <span class="nw-acct-val ${cls} private">${sign}${fmtDollar(net)}</span>
+        <span class="nw-acct-sub private">${sign}${pct.toFixed(1)}% · ${subLabel}</span>
+      </div>`);
+  }
+
+  // Crypto block — uses cost basis from Robinhood as the "funded" amount
+  const ce = state.crypto_equity;
+  if (ce && ce.total_cost > 0) {
+    const cryptoNet  = (ce.total_usd || 0) - ce.total_cost;
+    const cryptoPct  = ce.total_cost ? (cryptoNet / ce.total_cost * 100) : 0;
+    const cryptoSign = cryptoNet >= 0 ? '+' : '';
+    const cryptoCls  = pnlClass(cryptoNet);
+    totalNet      += cryptoNet;
+    totalBaseline += ce.total_cost;
+    totalEquity   += ce.total_usd || 0;
+    acctBlocks.push(`
+      <div class="nw-acct">
+        <span class="nw-acct-label" style="color:#f7931a">crypto</span>
+        <span class="nw-acct-val ${cryptoCls} private">${cryptoSign}${fmtDollar(cryptoNet)}</span>
+        <span class="nw-acct-sub private">${cryptoSign}${cryptoPct.toFixed(1)}% · ${fmtDollar(ce.total_cost)} cost basis</span>
+      </div>`);
+  }
+
+  if (!acctBlocks.length) { banner.style.display = 'none'; return; }
+
+  const totalPct  = totalBaseline ? (totalNet / totalBaseline * 100) : 0;
+  const totalSign = totalNet >= 0 ? '+' : '';
+  const totalCls  = pnlClass(totalNet);
+  const totalSub  = totalBaseline
+    ? `${totalSign}${totalPct.toFixed(1)}% · ${fmtDollar(totalBaseline)} funded · ${fmtDollar(totalEquity)} today`
+    : `${fmtDollar(totalEquity)} equity today`;
+
+  banner.style.display = 'flex';
+  banner.innerHTML = `
+    <div class="nw-main">
+      <span class="nw-label">Net Winnings — All Time</span>
+      <span class="nw-value ${totalCls} private">${totalSign}${fmtDollar(totalNet)}</span>
+      <span class="nw-sub private">${totalSub}</span>
+    </div>
+    <div class="nw-divider"></div>
+    ${acctBlocks.join('<div class="nw-divider"></div>')}`;
+}
+
 function updateAiStatus(ai) {
   if (!ai) return;
   ['claude', 'gemini'].forEach(model => {
@@ -3906,6 +4000,9 @@ function applyState(state) {
   if (state.equity_goal) _equityGoal = state.equity_goal;
   updateBadges(state);
   updateAiStatus(state.ai_status);
+
+  // Net Winnings banner
+  updateNetWinnings(state);
 
   // Per-account panels
   renderAccounts(state.accounts, state);

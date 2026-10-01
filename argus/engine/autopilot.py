@@ -232,6 +232,9 @@ class Autopilot:
         self._account_cache: dict[str, dict] = {}
         self._last_ai_vote: dict = {}
         self._ticks_since_vote = 999
+        # Official realized P&L from Robinhood MCP — keyed by account label
+        self._realized_pnl: dict[str, dict] = {}
+        self._realized_pnl_tick = 0  # fetch on first tick, then every 120 ticks (~2h)
 
         for acct in self._accounts:
             logger.info(
@@ -1505,6 +1508,33 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         capped_amount = min(dollar_value, risk_check.dollar_amount)
         self._execute_buy(to_acct, symbol, capped_amount, f"promoted from {from_label}")
 
+    # ── Robinhood MCP helpers ────────────────────────────────────────────────
+
+    def _fetch_realized_pnl(self) -> None:
+        """Pull official realized P&L from Robinhood MCP for each account.
+
+        Maps account number → account label so we can key by label in the state.
+        Uses span=3month which covers all trades since Argus inception (Aug 2026).
+        Silently no-ops if the keychain token is unavailable or the call fails.
+        """
+        from argus.broker.robinhood_mcp import (  # lazy import
+            get_realized_pnl as _rh_pnl,
+        )
+
+        for acct in self._accounts:
+            acct_num = acct.account_number
+            if not acct_num:
+                continue
+            try:
+                data = _rh_pnl(acct_num, span="3month")
+                self._realized_pnl[acct.label] = data
+                logger.debug(
+                    "[%s] realized P&L refreshed: %.2f (%.1f%%)",
+                    acct.label, data["total_returns"], data["total_rate"] * 100,
+                )
+            except Exception as exc:
+                logger.debug("[%s] realized P&L fetch failed: %s", acct.label, exc)
+
     # ── Dashboard state ──────────────────────────────────────────────────────
 
     def _update_dashboard(self, trading: bool = True) -> None:
@@ -1546,6 +1576,11 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
         day_trades = sum(a.risk.day_trade_count for a in self._accounts)
 
+        # Refresh official realized P&L once on startup then every ~2h
+        if self._realized_pnl_tick == 0:
+            self._fetch_realized_pnl()
+        self._realized_pnl_tick = (self._realized_pnl_tick + 1) % 120
+
         accounts_state = {}
         for acct in self._accounts:
             cached = self._account_cache.get(acct.label, {})
@@ -1560,7 +1595,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             acct_pnl_pct = (acct_pnl / entry_eq * 100) if entry_eq else 0.0
 
             try:
-                with next(get_session()) as _sess:
+                with get_session() as _sess:
                     reset_baseline = get_reset_baseline(_sess, acct.label)
             except Exception:
                 reset_baseline = entry_eq
@@ -1586,6 +1621,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     }
                 except Exception:
                     pass
+            rh_pnl = self._realized_pnl.get(acct.label, {})
             accounts_state[acct.label] = {
                 "equity": eq,
                 "daily_pnl": acct_pnl,
@@ -1593,6 +1629,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 "since_reset_pnl": since_reset_pnl,
                 "since_reset_pnl_pct": since_reset_pnl_pct,
                 "reset_baseline": reset_baseline,
+                "realized_pnl": rh_pnl.get("total_returns"),
+                "realized_pnl_rate": rh_pnl.get("total_rate"),
                 "kill_switch": acct.risk.kill_switch_active,
                 "day_trades": acct.risk.day_trade_count,
                 "auto_trade": acct.auto_trade,

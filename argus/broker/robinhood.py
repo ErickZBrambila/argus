@@ -322,29 +322,36 @@ class RobinhoodBroker:
         Crypto is not account-scoped in Robinhood — call this once per process,
         not once per account, to avoid double-counting.
 
-        Returns: {"total_usd": float, "positions": [{"symbol", "qty", "price", "value"}]}
+        Returns: {"total_usd": float, "total_cost": float, "positions": [{"symbol", "qty", "price", "value", "cost"}]}
         """
         if not self._logged_in:
-            return {"total_usd": 0.0, "positions": []}
+            return {"total_usd": 0.0, "total_cost": 0.0, "positions": []}
         try:
             import robin_stocks.robinhood as rh
             holdings = rh.crypto.get_crypto_positions() or []
             breakdown = []
             total = 0.0
+            total_cost = 0.0
             for item in holdings:
                 sym = item.get("currency", {}).get("code", "")
                 qty = float(item.get("quantity", 0))
                 if not sym or qty < 1e-8:
                     continue
+                cb = item.get("cost_bases", [{}])[0]
+                cost = float(cb.get("direct_cost_basis", 0))
+                if cost == 0:
+                    # Fall back to clearing book cost basis (covers pre-direct-custody ETH, transfers, etc.)
+                    tax_lots = item.get("tax_lot_cost_bases", [{}])
+                    cost = float(tax_lots[0].get("clearing_book_cost_basis", 0)) if tax_lots else 0.0
                 try:
                     price = self._live_get_price(sym)
                 except Exception:
-                    cost = float(item.get("cost_bases", [{}])[0].get("direct_cost_basis", 0))
                     price = cost / qty if qty else 0.0
                 value = price * qty
                 total += value
-                breakdown.append({"symbol": sym, "qty": qty, "price": price, "value": value})
-            return {"total_usd": round(total, 2), "positions": breakdown}
+                total_cost += cost
+                breakdown.append({"symbol": sym, "qty": qty, "price": price, "value": value, "cost": cost})
+            return {"total_usd": round(total, 2), "total_cost": round(total_cost, 2), "positions": breakdown}
         except Exception as exc:
             logger.warning("Could not fetch crypto equity: %s", exc)
             return {"total_usd": 0.0, "positions": []}
