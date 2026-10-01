@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import threading
 import time
 from typing import Any
 
@@ -25,6 +26,7 @@ _KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 # In-memory token cache: {"access_token": str, "refresh_token": str, "expires_at": int, "client_id": str}
 _token_cache: dict[str, Any] = {}
+_token_lock = threading.Lock()
 
 
 def _load_token_from_keychain() -> dict[str, Any]:
@@ -48,23 +50,21 @@ def _load_token_from_keychain() -> dict[str, Any]:
 def _get_access_token() -> str | None:
     """Return a valid access token, refreshing if needed."""
     global _token_cache
-    if not _token_cache:
-        _token_cache = _load_token_from_keychain()
-
-    if not _token_cache:
-        return None
-
-    expires_at_ms = _token_cache.get("expiresAt", 0)
-    now_ms = int(time.time() * 1000)
-    # Refresh 5 minutes before expiry
-    if expires_at_ms and (expires_at_ms - now_ms) < 5 * 60 * 1000:
-        _refresh_token()
-
-    return _token_cache.get("accessToken")
+    with _token_lock:
+        if not _token_cache:
+            _token_cache = _load_token_from_keychain()
+        if not _token_cache:
+            return None
+        expires_at_ms = _token_cache.get("expiresAt", 0)
+        now_ms = int(time.time() * 1000)
+        # Refresh 5 minutes before expiry
+        if expires_at_ms and (expires_at_ms - now_ms) < 5 * 60 * 1000:
+            _refresh_token()
+        return _token_cache.get("accessToken")
 
 
 def _refresh_token() -> None:
-    """Attempt to refresh the OAuth access token using the refresh token."""
+    """Attempt to refresh the OAuth access token. Must be called while holding _token_lock."""
     refresh = _token_cache.get("refreshToken")
     client_id = _token_cache.get("clientId")
     discovery = _token_cache.get("discoveryState", {})

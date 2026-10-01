@@ -44,6 +44,9 @@ class FundamentalsSnapshot:
     analyst_target_avg: float | None = None
     analyst_target_upside_pct: float | None = None  # relative to estimated current price
 
+    # Politician disclosures (90-day window, cached with daily TTL)
+    politician_trades_summary: str | None = None
+
 
 class FundamentalsCache:
     """Thread-safe per-symbol fundamentals cache with a daily TTL."""
@@ -117,6 +120,29 @@ class FundamentalsCache:
         except Exception as exc:
             logger.debug("MCP analyst ratings fetch failed for %s: %s", symbol, exc)
 
+        try:
+            import datetime as _dt
+
+            from argus.broker.robinhood_mcp import get_politician_trades_for as _pt
+            cutoff = (_dt.date.today() - _dt.timedelta(days=90)).isoformat()
+            trades = [t for t in _pt(symbol) if t.get("transaction_date", "") >= cutoff]
+            if trades:
+                buys  = sum(1 for t in trades if "buy"  in (t.get("transaction_type") or "").lower())
+                sells = sum(1 for t in trades if "sell" in (t.get("transaction_type") or "").lower())
+                parts = []
+                if buys:
+                    parts.append(f"{buys} buy{'s' if buys > 1 else ''}")
+                if sells:
+                    parts.append(f"{sells} sell{'s' if sells > 1 else ''}")
+                sample = trades[0]
+                snap.politician_trades_summary = (
+                    f"{', '.join(parts)} — "
+                    f"e.g. {sample.get('politician','')} {sample.get('transaction_type','')} "
+                    f"{sample.get('amount_range','')} on {sample.get('transaction_date','')}"
+                )
+        except Exception as exc:
+            logger.debug("MCP politician trades fetch failed for %s: %s", symbol, exc)
+
         return snap
 
     def get(self, symbol: str) -> FundamentalsSnapshot:
@@ -172,29 +198,8 @@ class FundamentalsCache:
                 analyst_str += f" ({sign}{snap.analyst_target_upside_pct:.1f}% upside)"
             lines.append(analyst_str)
 
-        # Politician trades (last 90 days) — real-money conviction signal
-        try:
-            import datetime as _dt
-
-            from argus.broker.robinhood_mcp import get_politician_trades_for as _pt
-            cutoff = (_dt.date.today() - _dt.timedelta(days=90)).isoformat()
-            trades = [t for t in _pt(symbol) if t.get("transaction_date", "") >= cutoff]
-            if trades:
-                buys  = [t for t in trades if "buy" in (t.get("transaction_type") or "").lower()]
-                sells = [t for t in trades if "sell" in (t.get("transaction_type") or "").lower()]
-                parts = []
-                if buys:
-                    parts.append(f"{len(buys)} buy{'s' if len(buys) > 1 else ''}")
-                if sells:
-                    parts.append(f"{len(sells)} sell{'s' if len(sells) > 1 else ''}")
-                sample = trades[0]
-                lines.append(
-                    f"  Politician disclosures (90d): {', '.join(parts)} — "
-                    f"e.g. {sample.get('politician','')} {sample.get('transaction_type','')} "
-                    f"{sample.get('amount_range','')} on {sample.get('transaction_date','')}"
-                )
-        except Exception:
-            pass
+        if snap.politician_trades_summary:
+            lines.append(f"  Politician disclosures (90d): {snap.politician_trades_summary}")
 
         if not lines:
             return ""
