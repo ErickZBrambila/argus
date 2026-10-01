@@ -210,6 +210,12 @@ class Autopilot:
             slack_channel=self._cfg.slack_channel,
             discord_webhook_url=self._cfg.discord_webhook_url,
             ntfy_url=self._cfg.ntfy_url,
+            public_url=(
+                f"http://{self._cfg.web_public_host}:{self._cfg.web_port}"
+                if self._cfg.web_public_host
+                else f"http://localhost:{self._cfg.web_port}"
+            ),
+            dashboard_token=self._cfg.dashboard_token,
         )
         self._terminal = (
             NullTerminalDashboard()
@@ -1185,8 +1191,41 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         sig: SignalResult,
         signal_obj: SignalResult | None = None,
     ) -> None:
-        # All accounts are fully autonomous — no approval gates.
-        self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
+        threshold = self._cfg.large_trade_threshold
+        needs_approval = threshold == 0 or dollar_amount >= threshold
+        if not needs_approval:
+            self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
+            return
+
+        trade_id = f"{acct.label}-{symbol}-{datetime.datetime.now(_UTC).strftime('%Y%m%dT%H%M%S')}"
+        now_iso = datetime.datetime.now(_UTC).isoformat()
+        trade_info = {
+            "trade_id": trade_id,
+            "account_label": acct.label,
+            "symbol": symbol,
+            "dollar_amount": dollar_amount,
+            "reasoning": decision.reasoning,
+            "action": "BUY",
+            "price_at_queue": sig.price,
+            "queued_at": now_iso,
+            "_sig": signal_obj,
+            "_decision": decision,
+        }
+        acct.pending_approvals[trade_id] = trade_info
+        web_dashboard.queue_approval(trade_id, trade_info)
+        logger.info("[%s] BUY %s $%.2f queued for approval (id=%s)", acct.label, symbol, dollar_amount, trade_id)
+
+        signal_summary = f"{sig.composite.upper()} · confidence {sig.confidence:.0%}"
+        if sig.rsi is not None:
+            signal_summary += f" · RSI {sig.rsi:.0f}"
+        self._notifier.send_trade_approval(
+            trade_id=trade_id,
+            account_label=acct.label,
+            symbol=symbol,
+            dollar_amount=dollar_amount,
+            action="BUY",
+            signal_summary=signal_summary,
+        )
 
     _APPROVAL_TTL_SECONDS = 1800  # 30 minutes
 
