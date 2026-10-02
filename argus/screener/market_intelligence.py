@@ -9,7 +9,8 @@ import logging
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import date, timedelta
 from functools import lru_cache
 

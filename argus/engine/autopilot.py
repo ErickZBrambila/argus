@@ -9,47 +9,47 @@ import os
 import signal
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field
-from typing import Optional
 
-from argus.agent.decision import DecisionEngine, TradeDecision, get_ai_status as _get_ai_status, get_model_info as _get_model_info
+from argus.agent.decision import DecisionEngine, TradeDecision
+from argus.agent.decision import get_ai_status as _get_ai_status
+from argus.agent.decision import get_model_info as _get_model_info
 from argus.broker.robinhood import CRYPTO_SYMBOLS, RobinhoodBroker
 from argus.config import get_settings
-from argus.dashboard.terminal import NullTerminalDashboard, TerminalDashboard
 from argus.dashboard import web as web_dashboard
+from argus.dashboard.terminal import NullTerminalDashboard, TerminalDashboard
+from argus.engine.earnings_guard import EarningsGuard
+from argus.engine.fundamentals_cache import FundamentalsCache
+from argus.engine.price_book_guard import PriceBookGuard
+from argus.engine.session import get_market_session, is_market_hours
+from argus.engine.tax_lot_checker import TaxLotChecker
+from argus.learning.flashcards import FlashcardStore
 from argus.notifications.notifier import Notifier
 from argus.risk.manager import RiskManager
 from argus.storage.models import (
     DailyStats,
     Signal,
     Trade,
+    add_to_db_watchlist,
     count_day_trades_last_5_days,
     delete_position,
+    get_db_watchlist,
     get_or_create_account_daily_stats,
     get_or_create_daily_stats,
-    get_db_watchlist,
-    get_sell_by_dates,
-    get_today_day_trades,
-    add_to_db_watchlist,
-    get_session,
     get_reset_baseline,
+    get_sell_by_dates,
+    get_session,
+    get_today_day_trades,
     increment_day_trades,
     init_db,
     mark_account_kill_switch,
     upsert_position,
 )
-from argus.learning.flashcards import FlashcardStore
 from argus.strategy.indicators import SignalEngine, SignalResult
-from argus.engine.session import get_market_session, is_market_hours
-from argus.engine.earnings_guard import EarningsGuard
-from argus.engine.fundamentals_cache import FundamentalsCache
-from argus.engine.tax_lot_checker import TaxLotChecker
-from argus.engine.price_book_guard import PriceBookGuard
 
 logger = logging.getLogger(__name__)
 
-_UTC = datetime.timezone.utc
+_UTC = datetime.UTC
 _RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 # Symbols to watch for their FIRST bullish signal — fire a high-priority ntfy alert
@@ -83,8 +83,8 @@ class Autopilot:
         self._cfg = get_settings()
         self._running = False
         self._paused = False
-        self._scan_interval_override: Optional[int] = None
-        self._next_scan_at: Optional[datetime.datetime] = None
+        self._scan_interval_override: int | None = None
+        self._next_scan_at: datetime.datetime | None = None
         self._current_interval: int = self._cfg.scan_interval_seconds
         self._market_session: str = "closed"
         self._current_day: datetime.date = datetime.date.today()
@@ -93,7 +93,7 @@ class Autopilot:
         self._last_evaluated_signals: dict[str, SignalResult] = {}
         # Decisions cache: symbol -> last TradeDecision (to reuse if signal hasn't changed)
         self._last_decisions: dict[str, TradeDecision] = {}
-        self._last_signal_map: dict[str, "SignalResult"] = {}
+        self._last_signal_map: dict[str, SignalResult] = {}
 
         # API budget / billing alert state
         self._last_ai_status: dict = {"claude": "gray", "gemini": "gray"}
@@ -210,6 +210,12 @@ class Autopilot:
             slack_channel=self._cfg.slack_channel,
             discord_webhook_url=self._cfg.discord_webhook_url,
             ntfy_url=self._cfg.ntfy_url,
+            public_url=(
+                f"http://{self._cfg.web_public_host}:{self._cfg.web_port}"
+                if self._cfg.web_public_host
+                else f"http://localhost:{self._cfg.web_port}"
+            ),
+            dashboard_token=self._cfg.dashboard_token,
         )
         self._terminal = (
             NullTerminalDashboard()
@@ -217,6 +223,10 @@ class Autopilot:
             else TerminalDashboard()
         )
         self._flashcards = FlashcardStore()
+        # Argus 2.0 Phase 1 — market regime classifier (log-only, no decisions).
+        from argus.engine.regime import CassandraAgent
+        self._cassandra = CassandraAgent()
+        self._scheduler = None  # APScheduler BackgroundScheduler, created in run()
         self._earnings_guard = EarningsGuard()
         self._fundamentals = FundamentalsCache()
         self._tax_lots = TaxLotChecker()
@@ -228,6 +238,9 @@ class Autopilot:
         self._account_cache: dict[str, dict] = {}
         self._last_ai_vote: dict = {}
         self._ticks_since_vote = 999
+        # Official realized P&L from Robinhood MCP — keyed by account label
+        self._realized_pnl: dict[str, dict] = {}
+        self._realized_pnl_tick = 0  # fetch on first tick, then every 120 ticks (~2h)
 
         for acct in self._accounts:
             logger.info(
@@ -300,10 +313,11 @@ class Autopilot:
         _gemini_key    = self._cfg.gemini_api_key.get_secret_value() if self._cfg.gemini_api_key else ""
         if _anthropic_key:
             def _make_investigate_fn(anthropic_key: str, gemini_key: str):
-                import anthropic as _ant
+                import concurrent.futures as _cf
                 import json as _json
                 import re as _re
-                import concurrent.futures as _cf
+
+                import anthropic as _ant
 
                 _claude_client = _ant.Anthropic(api_key=anthropic_key, timeout=45.0)
                 _gemini_client = None
@@ -481,6 +495,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             self._restore_session_state()
             self._update_dashboard()
 
+            self._start_scheduler()
+
             while self._running:
                 try:
                     # Day-boundary rollover
@@ -514,9 +530,48 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                             break
                         time.sleep(1)
         finally:
+            self._stop_scheduler()
             self._terminal.stop()
             for acct in self._accounts:
                 acct.broker.logout()
+
+    def _start_scheduler(self) -> None:
+        """Start the background scheduler for Argus 2.0 periodic agents.
+
+        Phase 1: schedules CassandraAgent at 9:20am ET, Mon–Fri. This runs on a
+        separate thread and does not touch the main tick loop.
+        """
+        try:
+            import pytz
+            from apscheduler.schedulers.background import BackgroundScheduler
+
+            self._scheduler = BackgroundScheduler(timezone=pytz.timezone("America/New_York"))
+            self._scheduler.add_job(
+                self._cassandra.run,
+                trigger="cron",
+                day_of_week="mon-fri",
+                hour=9,
+                minute=20,
+                id="cassandra_regime",
+                misfire_grace_time=3600,
+                coalesce=True,
+                max_instances=1,
+            )
+            self._scheduler.start()
+            logger.info("Scheduler started — CassandraAgent scheduled 9:20am ET Mon–Fri")
+        except Exception as exc:
+            logger.warning("Could not start scheduler: %s", exc)
+            self._scheduler = None
+
+    def _stop_scheduler(self) -> None:
+        if self._scheduler is not None:
+            try:
+                self._scheduler.shutdown(wait=False)
+                logger.info("Scheduler stopped")
+            except Exception as exc:
+                logger.debug("Scheduler shutdown error: %s", exc)
+            finally:
+                self._scheduler = None
 
     def _shutdown(self, *_) -> None:
         logger.info("Shutdown signal received — stopping Argus")
@@ -524,8 +579,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
     def _check_api_alerts(self) -> None:
         """Fire ntfy alerts for billing errors and budget thresholds."""
-        from argus.dashboard.token_tracker import get_summary as _tok
         from argus.agent.decision import get_ai_status as _get_ai_status
+        from argus.dashboard.token_tracker import get_summary as _tok
 
         # ── Reactive: billing / auth errors ──────────────────────────────────
         current_status = _get_ai_status()
@@ -624,7 +679,10 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 logger.info("Screener updated: %d candidates %s", len(candidates), syms)
 
             # Unusual options flow — scan combined watchlist + screener universe
-            from argus.screener.market_intelligence import get_unusual_options_flow, get_insider_buys
+            from argus.screener.market_intelligence import (
+                get_insider_buys,
+                get_unusual_options_flow,
+            )
             watchlist = web_dashboard.get_watchlist() or self._cfg.watchlist
             scan_universe = list({*watchlist, *(c["symbol"] for c in self._screener_candidates)})
             flow = get_unusual_options_flow(scan_universe)
@@ -647,7 +705,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         except Exception as exc:
             logger.warning("Screener refresh failed: %s", exc)
 
-    def set_scan_interval(self, seconds: Optional[int]) -> None:
+    def set_scan_interval(self, seconds: int | None) -> None:
         self._scan_interval_override = seconds
         logger.info(
             "Scan interval %s",
@@ -657,6 +715,15 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
     # ── Main tick ────────────────────────────────────────────────────────────
 
     def _tick(self) -> None:
+        from argus.metrics import decision_cycle_seconds
+        _tick_timer = decision_cycle_seconds.time()
+        _tick_timer.__enter__()
+        try:
+            self._tick_inner()
+        finally:
+            _tick_timer.__exit__(None, None, None)
+
+    def _tick_inner(self) -> None:
         # ── Session health check ─────────────────────────────────────────────
         # Run once per scan. If the Robinhood token has expired, re-auth and alert.
         _first_live = next((a for a in self._accounts if not a.broker.paper), None)
@@ -669,7 +736,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 )
                 return  # skip this scan entirely — no valid session
             # Successful reauth: brief pause so the new HTTP session settles before data fetches
-            import time as _time; _time.sleep(1.5)
+            import time as _time
+            _time.sleep(1.5)
 
         # Always compute signals so the ticker and dashboard show live prices,
         # even outside market hours.  Trading only executes when the market is open.
@@ -833,9 +901,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
         conf_stable = abs(sig.confidence - last.confidence) <= 0.05
 
-        if same_composite and rsi_stable and macd_stable and conf_stable:
-            return False
-        return True
+        return not (same_composite and rsi_stable and macd_stable and conf_stable)
 
     def _tick_account(self, acct: AccountContext, signal_map: dict[str, SignalResult], other_held: set[str] | None = None) -> dict[str, TradeDecision]:
         decisions: dict[str, TradeDecision] = {}
@@ -871,6 +937,19 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         open_positions = acct.broker.get_open_positions()
         # Cache so _update_dashboard can reuse without extra API calls
         self._account_cache[acct.label] = {"equity": equity, "positions": open_positions}
+
+        try:
+            from argus.metrics import (
+                active_positions_count,
+                daily_pnl_dollars,
+                portfolio_equity_dollars,
+            )
+            portfolio_equity_dollars.labels(account=acct.label).set(equity)
+            _start_eq = acct.db_starting_equity or acct.risk.session_entry_equity
+            daily_pnl_dollars.labels(account=acct.label).set(equity - _start_eq)
+            active_positions_count.labels(account=acct.label).set(len(open_positions))
+        except Exception:  # pragma: no cover — metrics must never interrupt the trading loop
+            pass
 
         # Stop-loss sweep — only positions argus opened (has an open flashcard)
         for sym, pos in list(open_positions.items()):
@@ -950,6 +1029,12 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     else:
                         self._last_evaluated_signals[symbol] = sig
                         self._last_decisions[symbol] = decision
+
+                    try:
+                        from argus.metrics import decisions_total
+                        decisions_total.labels(decision=decision.action, account=acct.label).inc()
+                    except Exception:  # pragma: no cover — metrics must never interrupt the trading loop
+                        pass
 
                 if decision.is_error:
                     logger.critical(
@@ -1052,7 +1137,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     if buy_amount < risk_check.dollar_amount:
                         logger.debug("[%s][%s] Position sized down to $%.0f (buying power $%.0f)",
                                      acct.label, symbol, buy_amount, buying_power)
-                    if buy_amount <= 1.0:
+                    if buy_amount < 25.0:
                         logger.info("[%s][%s] BUY blocked — insufficient buying power ($%.2f)",
                                     acct.label, symbol, buying_power)
                         continue
@@ -1104,10 +1189,43 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         dollar_amount: float,
         decision: TradeDecision,
         sig: SignalResult,
-        signal_obj: Optional[SignalResult] = None,
+        signal_obj: SignalResult | None = None,
     ) -> None:
-        # All accounts are fully autonomous — no approval gates.
-        self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
+        threshold = self._cfg.large_trade_threshold
+        needs_approval = threshold == 0 or dollar_amount >= threshold
+        if not needs_approval:
+            self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
+            return
+
+        trade_id = f"{acct.label}-{symbol}-{datetime.datetime.now(_UTC).strftime('%Y%m%dT%H%M%S')}"
+        now_iso = datetime.datetime.now(_UTC).isoformat()
+        trade_info = {
+            "trade_id": trade_id,
+            "account_label": acct.label,
+            "symbol": symbol,
+            "dollar_amount": dollar_amount,
+            "reasoning": decision.reasoning,
+            "action": "BUY",
+            "price_at_queue": sig.price,
+            "queued_at": now_iso,
+            "_sig": signal_obj,
+            "_decision": decision,
+        }
+        acct.pending_approvals[trade_id] = trade_info
+        web_dashboard.queue_approval(trade_id, trade_info)
+        logger.info("[%s] BUY %s $%.2f queued for approval (id=%s)", acct.label, symbol, dollar_amount, trade_id)
+
+        signal_summary = f"{sig.composite.upper()} · confidence {sig.confidence:.0%}"
+        if sig.rsi is not None:
+            signal_summary += f" · RSI {sig.rsi:.0f}"
+        self._notifier.send_trade_approval(
+            trade_id=trade_id,
+            account_label=acct.label,
+            symbol=symbol,
+            dollar_amount=dollar_amount,
+            action="BUY",
+            signal_summary=signal_summary,
+        )
 
     _APPROVAL_TTL_SECONDS = 1800  # 30 minutes
 
@@ -1177,8 +1295,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         symbol: str,
         dollar_amount: float,
         reasoning: str,
-        signal: Optional[SignalResult] = None,
-        decision: Optional[TradeDecision] = None,
+        signal: SignalResult | None = None,
+        decision: TradeDecision | None = None,
     ) -> None:
         # ── Step 1: broker order ─────────────────────────────────────────────
         try:
@@ -1233,6 +1351,12 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 entry_price=result.price,
                 dollar_amount=dollar_amount,
             )
+
+        try:
+            from argus.metrics import trades_total
+            trades_total.labels(action="buy", account=acct.label).inc()
+        except Exception:  # pragma: no cover — metrics must never interrupt the trading loop
+            pass
 
         self._recent_trades.appendleft({
             "time": datetime.datetime.now(_UTC).strftime("%H:%M:%S"),
@@ -1302,6 +1426,12 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             return True  # sell did fill at the broker; caller should treat as success
 
         # ── Step 4: in-memory + notification ────────────────────────────────
+        try:
+            from argus.metrics import trades_total
+            trades_total.labels(action="sell", account=acct.label).inc()
+        except Exception:  # pragma: no cover — metrics must never interrupt the trading loop
+            pass
+
         self._recent_trades.appendleft({
             "time": datetime.datetime.now(_UTC).strftime("%H:%M:%S"),
             "symbol": symbol,
@@ -1316,7 +1446,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         )
         return True
 
-    def _is_day_trade(self, acct: "AccountContext", symbol: str) -> bool:
+    def _is_day_trade(self, acct: AccountContext, symbol: str) -> bool:
         """True if this account bought symbol today — making the same-day sell a day trade."""
         today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min, tzinfo=_UTC)
         try:
@@ -1417,6 +1547,33 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         capped_amount = min(dollar_value, risk_check.dollar_amount)
         self._execute_buy(to_acct, symbol, capped_amount, f"promoted from {from_label}")
 
+    # ── Robinhood MCP helpers ────────────────────────────────────────────────
+
+    def _fetch_realized_pnl(self) -> None:
+        """Pull official realized P&L from Robinhood MCP for each account.
+
+        Maps account number → account label so we can key by label in the state.
+        Uses span=3month which covers all trades since Argus inception (Aug 2026).
+        Silently no-ops if the keychain token is unavailable or the call fails.
+        """
+        from argus.broker.robinhood_mcp import (  # lazy import
+            get_realized_pnl as _rh_pnl,
+        )
+
+        for acct in self._accounts:
+            acct_num = acct.account_number
+            if not acct_num:
+                continue
+            try:
+                data = _rh_pnl(acct_num, span="3month")
+                self._realized_pnl[acct.label] = data
+                logger.debug(
+                    "[%s] realized P&L refreshed: %.2f (%.1f%%)",
+                    acct.label, data["total_returns"], data["total_rate"] * 100,
+                )
+            except Exception as exc:
+                logger.debug("[%s] realized P&L fetch failed: %s", acct.label, exc)
+
     # ── Dashboard state ──────────────────────────────────────────────────────
 
     def _update_dashboard(self, trading: bool = True) -> None:
@@ -1458,6 +1615,11 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
         day_trades = sum(a.risk.day_trade_count for a in self._accounts)
 
+        # Refresh official realized P&L once on startup then every ~2h
+        if self._realized_pnl_tick == 0:
+            self._fetch_realized_pnl()
+        self._realized_pnl_tick = (self._realized_pnl_tick + 1) % 120
+
         accounts_state = {}
         for acct in self._accounts:
             cached = self._account_cache.get(acct.label, {})
@@ -1472,7 +1634,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             acct_pnl_pct = (acct_pnl / entry_eq * 100) if entry_eq else 0.0
 
             try:
-                with next(get_session()) as _sess:
+                with get_session() as _sess:
                     reset_baseline = get_reset_baseline(_sess, acct.label)
             except Exception:
                 reset_baseline = entry_eq
@@ -1498,6 +1660,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     }
                 except Exception:
                     pass
+            rh_pnl = self._realized_pnl.get(acct.label, {})
             accounts_state[acct.label] = {
                 "equity": eq,
                 "daily_pnl": acct_pnl,
@@ -1505,6 +1668,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 "since_reset_pnl": since_reset_pnl,
                 "since_reset_pnl_pct": since_reset_pnl_pct,
                 "reset_baseline": reset_baseline,
+                "realized_pnl": rh_pnl.get("total_returns"),
+                "realized_pnl_rate": rh_pnl.get("total_rate"),
                 "kill_switch": acct.risk.kill_switch_active,
                 "day_trades": acct.risk.day_trade_count,
                 "auto_trade": acct.auto_trade,
@@ -1603,8 +1768,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 # Seed today's per-account day trade count from DB so restarts don't
                 # under-count and mistakenly allow buys that would breach PDT.
                 today_dt = get_today_day_trades(session, acct.label)
-                if today_dt > acct.risk._day_trade_count:
-                    acct.risk._day_trade_count = today_dt
+                acct.risk._day_trade_count = max(acct.risk._day_trade_count, today_dt)
         if restored_ks:
             logger.warning(
                 "Kill switch restored for [%s] — drawdown limit was exceeded earlier today",
@@ -1690,7 +1854,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         except Exception as exc:
             logger.debug("Signal persist failed: %s", exc)
 
-    def _update_positions_in_db(self, positions: dict, acct: Optional[AccountContext] = None) -> None:
+    def _update_positions_in_db(self, positions: dict, acct: AccountContext | None = None) -> None:
         risk = acct.risk if acct else self._accounts[0].risk
         label = acct.label if acct else "main"
         with get_session() as session:

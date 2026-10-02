@@ -10,7 +10,6 @@ import datetime
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +19,9 @@ _EARNINGS_BLOCK_DAYS = 5   # block BUY if earnings within this many calendar day
 @dataclass
 class EarningsInfo:
     symbol: str
-    report_date: Optional[datetime.date]   # None if no upcoming earnings found
-    days_away: Optional[int]               # None if no upcoming earnings found
-    timing: Optional[str]                  # "am" | "pm" | None
+    report_date: datetime.date | None   # None if no upcoming earnings found
+    days_away: int | None               # None if no upcoming earnings found
+    timing: str | None                  # "am" | "pm" | None
     cached_on: datetime.date               # cache key — invalidated on day change
 
 
@@ -69,6 +68,33 @@ class EarningsGuard:
                 )
         except Exception as exc:
             logger.debug("Earnings fetch failed for %s: %s", symbol, exc)
+
+        # MCP fallback — robin_stocks earnings endpoint returns 400/404 frequently
+        try:
+            from argus.broker.robinhood_mcp import get_earnings_upcoming as _eu
+            events = _eu(days_forward=14)
+            sym_upper = symbol.upper()
+            for event in events:
+                if event.get("symbol", "").upper() != sym_upper:
+                    continue
+                date_str = event.get("report_date", "")
+                if not date_str:
+                    continue
+                try:
+                    report_date = datetime.date.fromisoformat(date_str[:10])
+                except (ValueError, TypeError):
+                    continue
+                if report_date >= today:
+                    days_away = (report_date - today).days
+                    return EarningsInfo(
+                        symbol=symbol,
+                        report_date=report_date,
+                        days_away=days_away,
+                        timing=event.get("timing"),
+                        cached_on=today,
+                    )
+        except Exception as exc:
+            logger.debug("MCP earnings calendar fallback failed for %s: %s", symbol, exc)
 
         return EarningsInfo(symbol=symbol, report_date=None, days_away=None, timing=None, cached_on=today)
 
