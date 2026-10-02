@@ -7010,6 +7010,8 @@ async def mobile() -> str:
 
 def main(host: str = "", port: int = 0, token: str = "") -> None:
     from argus.config import get_settings
+    from argus.storage.models import init_db
+    init_db()
     cfg = get_settings()
     host = host or cfg.web_host
     port = port or cfg.web_port
