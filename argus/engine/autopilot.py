@@ -1191,41 +1191,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         sig: SignalResult,
         signal_obj: SignalResult | None = None,
     ) -> None:
-        threshold = self._cfg.large_trade_threshold
-        needs_approval = threshold == 0 or dollar_amount >= threshold
-        if not needs_approval:
-            self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
-            return
-
-        trade_id = f"{acct.label}-{symbol}-{datetime.datetime.now(_UTC).strftime('%Y%m%dT%H%M%S')}"
-        now_iso = datetime.datetime.now(_UTC).isoformat()
-        trade_info = {
-            "trade_id": trade_id,
-            "account_label": acct.label,
-            "symbol": symbol,
-            "dollar_amount": dollar_amount,
-            "reasoning": decision.reasoning,
-            "action": "BUY",
-            "price_at_queue": sig.price,
-            "queued_at": now_iso,
-            "_sig": signal_obj,
-            "_decision": decision,
-        }
-        acct.pending_approvals[trade_id] = trade_info
-        web_dashboard.queue_approval(trade_id, trade_info)
-        logger.info("[%s] BUY %s $%.2f queued for approval (id=%s)", acct.label, symbol, dollar_amount, trade_id)
-
-        signal_summary = f"{sig.composite.upper()} · confidence {sig.confidence:.0%}"
-        if sig.rsi is not None:
-            signal_summary += f" · RSI {sig.rsi:.0f}"
-        self._notifier.send_trade_approval(
-            trade_id=trade_id,
-            account_label=acct.label,
-            symbol=symbol,
-            dollar_amount=dollar_amount,
-            action="BUY",
-            signal_summary=signal_summary,
-        )
+        self._execute_buy(acct, symbol, dollar_amount, decision.reasoning, signal=signal_obj, decision=decision)
 
     _APPROVAL_TTL_SECONDS = 1800  # 30 minutes
 
@@ -1679,15 +1645,22 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 "equity_goal": self._cfg.equity_goal,
             }
 
-        # Crypto equity — fetch once from first live broker (not account-scoped)
+        # Crypto equity — fetch from the default account broker (MCP cost basis is
+        # registered there); fall back to any live broker if default isn't available.
         crypto_equity: dict = {"total_usd": 0.0, "positions": []}
+        _crypto_broker = None
         for _acct in self._accounts:
             if _acct.broker._logged_in and not _acct.broker.paper:
-                try:
-                    crypto_equity = _acct.broker.get_crypto_equity()
-                except Exception as _ce:
-                    logger.debug("Could not fetch crypto equity: %s", _ce)
-                break
+                if _acct.account_number == self._cfg.default_account_number:
+                    _crypto_broker = _acct.broker
+                    break
+                if _crypto_broker is None:
+                    _crypto_broker = _acct.broker
+        if _crypto_broker:
+            try:
+                crypto_equity = _crypto_broker.get_crypto_equity()
+            except Exception as _ce:
+                logger.debug("Could not fetch crypto equity: %s", _ce)
 
         from argus.dashboard.token_tracker import get_summary as _token_summary
         tokens = _token_summary()
