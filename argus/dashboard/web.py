@@ -3814,10 +3814,14 @@ function renderAccounts(accounts, state) {
     const pnlPct = a.daily_pnl_pct || 0;
     const pnlSign = pnl >= 0 ? '+' : '';
     const pnlCls = pnlClass(pnl);
-    const resetPnl = a.since_reset_pnl ?? null;
-    const resetPnlPct = a.since_reset_pnl_pct ?? null;
+    const useOfficial = a.realized_pnl != null;
+    const resetPnl    = useOfficial ? a.realized_pnl : (a.since_reset_pnl ?? null);
+    const resetPnlPct = useOfficial
+      ? ((a.realized_pnl_rate ?? 0) * 100)
+      : (a.since_reset_pnl_pct ?? null);
     const resetSign = (resetPnl ?? 0) >= 0 ? '+' : '';
     const resetCls = pnlClass(resetPnl ?? 0);
+    const resetLabel = useOfficial ? 'Net Winnings (realized)' : 'Net Winnings';
     const largeThresh = (state && state.large_trade_threshold) || 500;
     const modeLabel = 'AUTO · 100%';
     const modeCls   = 'acct-mode-auto';
@@ -3843,8 +3847,8 @@ function renderAccounts(accounts, state) {
         <span class="${pnlCls} private" id="acct-pnl-${label}">${pnlSign}$${Math.abs(pnl).toFixed(2)} (${pnlSign}${pnlPct.toFixed(2)}%)</span>
       </div>
       ${resetPnl !== null ? `<div class="acct-row">
-        <span class="acct-row-label">Net Winnings</span>
-        <span class="${resetCls} private" style="font-weight:600">${resetSign}$${Math.abs(resetPnl).toFixed(2)} (${resetSign}${(resetPnlPct||0).toFixed(2)}%)</span>
+        <span class="acct-row-label">${resetLabel}</span>
+        <span class="${resetCls} private" style="font-weight:600">${resetSign}$${Math.abs(resetPnl).toFixed(2)} (${resetSign}${Math.abs(resetPnlPct||0).toFixed(2)}%)</span>
       </div>` : ''}
       <div class="acct-row">
         <span class="acct-row-label">Mode</span>
