@@ -17,13 +17,12 @@ start:
 
 stop:
 	@echo "Stopping argus and argus-web..."
-	@pkill -f "$(VENV)/argus" 2>/dev/null || true
+	@pkill -9 -f "$(VENV)/argus" 2>/dev/null || true
 	@lsof -ti :8000 | xargs kill -9 2>/dev/null || true
-	@sleep 2
+	@sleep 3
 	@echo "Stopped."
 
 restart: stop
-	@sleep 1
 	@$(MAKE) --no-print-directory start
 
 status:
