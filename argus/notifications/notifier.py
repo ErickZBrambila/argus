@@ -36,6 +36,8 @@ class Notifier:
         slack_channel: str = "#argus-alerts",
         discord_webhook_url: str = "",
         ntfy_url: str = "",
+        public_url: str = "",
+        dashboard_token: SecretStr | str = "",
     ) -> None:
         self._email = notify_email
         self._smtp_host = smtp_host
@@ -53,6 +55,8 @@ class Notifier:
 
         self._discord_webhook = discord_webhook_url
         self._ntfy_url = ntfy_url
+        self._public_url = public_url.rstrip("/")
+        self._dashboard_token = dashboard_token
         self._log_fn = None
 
     def set_log_fn(self, fn) -> None:
@@ -115,7 +119,15 @@ class Notifier:
 
     # ── ntfy.sh ──────────────────────────────────────────────────────────────
 
-    def _try_ntfy(self, subject: str, body: str) -> None:
+    def _try_ntfy(
+        self,
+        subject: str,
+        body: str,
+        *,
+        priority: str = "default",
+        tags: str = "chart_with_upwards_trend",
+        actions: list[str] | None = None,
+    ) -> None:
         if not self._ntfy_url:
             return
         try:
@@ -123,18 +135,61 @@ class Notifier:
             safe_title = safe_title.encode("latin-1", errors="replace").decode("latin-1")
             if not self._ntfy_url.startswith("https://"):
                 raise ValueError("ntfy URL must use HTTPS")
+            headers: dict[str, str] = {
+                "Title": safe_title,
+                "Priority": priority,
+                "Tags": tags,
+            }
+            if actions:
+                headers["Actions"] = "; ".join(actions)
             req = urllib.request.Request(
-                self._ntfy_url, data=body.encode("utf-8"),
-                headers={
-                    "Title": safe_title,
-                    "Priority": "default",
-                    "Tags": "chart_with_upwards_trend",
-                },
+                self._ntfy_url, data=body.encode("utf-8"), headers=headers,
             )
             urllib.request.urlopen(req, timeout=10)  # nosec B310 — HTTPS enforced above
             logger.info("ntfy notification sent")
         except Exception as exc:
             logger.warning("ntfy notification failed: %s", exc)
+
+    def send_trade_approval(
+        self,
+        trade_id: str,
+        account_label: str,
+        symbol: str,
+        dollar_amount: float,
+        action: str,
+        signal_summary: str,
+    ) -> None:
+        """Send a push notification with Approve / Deny action buttons."""
+        subject = f"[{account_label.upper()}] {action} {symbol} — approval needed"
+        body = (
+            f"{action} {symbol}  |  ${dollar_amount:,.2f}\n"
+            f"{signal_summary}\n"
+            f"Trade ID: {trade_id}"
+        )
+
+        actions: list[str] = []
+        token = _secret(self._dashboard_token)
+        base = self._public_url
+        if base and token:
+            approve_url = f"{base}/api/approve/{trade_id}"
+            deny_url    = f"{base}/api/deny/{trade_id}"
+            actions = [
+                f"http, Approve, {approve_url}, method=POST, headers.X-Argus-Token={token}",
+                f"http, Deny, {deny_url}, method=POST, headers.X-Argus-Token={token}",
+            ]
+
+        self._try_ntfy(
+            subject, body,
+            priority="high",
+            tags="rotating_light",
+            actions=actions or None,
+        )
+        self._try_macos(subject, body)
+        if self._log_fn:
+            try:
+                self._log_fn(subject, body)
+            except Exception:
+                pass
 
     # ── Email ────────────────────────────────────────────────────────────────
 

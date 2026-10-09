@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Protocol
 
 import numpy as np
 import pandas as pd
@@ -37,20 +37,22 @@ class SignalResult:
     price: float
     volume: float
 
-    rsi: Optional[float]
-    macd: Optional[float]
-    macd_signal: Optional[float]
-    macd_hist: Optional[float]
-    bb_upper: Optional[float]
-    bb_mid: Optional[float]
-    bb_lower: Optional[float]
-    sma_20: Optional[float]
-    ema_50: Optional[float]
+    rsi: float | None
+    macd: float | None
+    macd_signal: float | None
+    macd_hist: float | None
+    bb_upper: float | None
+    bb_mid: float | None
+    bb_lower: float | None
+    sma_20: float | None
+    ema_50: float | None
 
     composite: str        # "bullish" | "bearish" | "neutral"
     confidence: float     # 0.0 – 1.0
     change_pct: float = 0.0  # Daily change percentage
-    atr: Optional[float] = None  # ATR-14 for trailing stop calculation
+    atr: float | None = None  # ATR-14 for trailing stop calculation
+    supertrend_dir: int | None = None   # 1=bullish (price above line), -1=bearish
+    adx: float | None = None            # ADX trend strength; <20=choppy, >25=trending
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
@@ -60,12 +62,14 @@ class StrategyProtocol(Protocol):
     def score(
         self,
         price: float,
-        rsi: Optional[float],
-        macd_hist: Optional[float],
-        bb_upper: Optional[float],
-        bb_lower: Optional[float],
-        sma_20: Optional[float],
-        ema_50: Optional[float],
+        rsi: float | None,
+        macd_hist: float | None,
+        bb_upper: float | None,
+        bb_lower: float | None,
+        sma_20: float | None,
+        ema_50: float | None,
+        supertrend_dir: int | None = None,
+        adx: float | None = None,
     ) -> tuple[str, float]:
         ...
 
@@ -74,14 +78,16 @@ class DefaultStrategy(StrategyProtocol):
     def score(
         self,
         price: float,
-        rsi: Optional[float],
-        macd_hist: Optional[float],
-        bb_upper: Optional[float],
-        bb_lower: Optional[float],
-        sma_20: Optional[float],
-        ema_50: Optional[float],
+        rsi: float | None,
+        macd_hist: float | None,
+        bb_upper: float | None,
+        bb_lower: float | None,
+        sma_20: float | None,
+        ema_50: float | None,
+        supertrend_dir: int | None = None,
+        adx: float | None = None,
     ) -> tuple[str, float]:
-        """Simple vote-based composite signal."""
+        """Vote-based composite signal with MCP SuperTrend/ADX modifiers."""
         bullish = 0
         bearish = 0
         total = 0
@@ -121,23 +127,37 @@ class DefaultStrategy(StrategyProtocol):
             elif price < ema_50:
                 bearish += 1
 
+        if supertrend_dir in (1, -1):   # only exact values vote; 0 or garbage is ignored
+            total += 1
+            if supertrend_dir == 1:
+                bullish += 1
+            else:
+                bearish += 1
+
         if total == 0:
             return "neutral", 0.0
 
         confidence = max(bullish, bearish) / total
+        if adx is not None and 0.0 <= adx <= 100.0:   # reject out-of-range MCP values
+            if adx < 20:
+                confidence *= 0.8
+            elif adx > 30:
+                confidence = min(confidence * 1.15, 1.0)
+
         if bullish > bearish:
-            return "bullish", confidence
+            return "bullish", round(confidence, 4)
         elif bearish > bullish:
-            return "bearish", confidence
-        return "neutral", confidence
+            return "bearish", round(confidence, 4)
+        return "neutral", round(confidence, 4)
 
 
 class SignalEngine:
-    def __init__(self, broker, strategy: Optional[StrategyProtocol] = None) -> None:
+    def __init__(self, broker, strategy: StrategyProtocol | None = None) -> None:
         self._broker = broker
         self._strategy = strategy or DefaultStrategy()
+        self._mcp_cache: dict[str, dict] = {}  # symbol → {supertrend_dir, adx, _date}
 
-    def compute(self, symbol: str) -> Optional[SignalResult]:
+    def compute(self, symbol: str) -> SignalResult | None:
         symbol = _validate_symbol(symbol)
         try:
             return self._compute(symbol)
@@ -176,8 +196,42 @@ class SignalEngine:
             logger.warning("Failed to annotate chart for %s: %s", symbol, exc)
             return []
 
-    def _compute(self, symbol: str) -> Optional[SignalResult]:
-        from argus.storage.models import get_session, get_cached_historicals, save_historicals
+    def _fetch_mcp_indicators(self, symbol: str) -> dict:
+        import datetime as _dt
+        today = _dt.date.today()
+        cached = self._mcp_cache.get(symbol, {})
+        if cached.get("_date") == today:
+            return cached
+
+        result: dict = {"_date": today}
+        try:
+            from argus.broker.robinhood_mcp import get_technical_indicator as _mcp_ti
+            start = (
+                _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=60)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            st = _mcp_ti(symbol, "supertrend", "day", start, output="latest")
+            if st:
+                raw_dir = st.get("direction")
+                result["supertrend_dir"] = int(raw_dir) if raw_dir is not None else None
+                result["supertrend_val"] = float(st.get("value", 0) or 0)
+
+            adx_pt = _mcp_ti(symbol, "adx", "day", start, output="latest")
+            if adx_pt:
+                raw_adx = adx_pt.get("value")
+                result["adx"] = float(raw_adx) if raw_adx is not None else None
+        except Exception as exc:
+            logger.debug("MCP indicator fetch failed for %s: %s", symbol, exc)
+
+        self._mcp_cache[symbol] = result
+        return result
+
+    def _compute(self, symbol: str) -> SignalResult | None:
+        from argus.storage.models import (
+            get_cached_historicals,
+            get_session,
+            save_historicals,
+        )
         
         # 1. Try to load from cache
         with get_session() as session:
@@ -252,7 +306,7 @@ class SignalEngine:
 
         last = df.iloc[-1]
 
-        def _safe(col: str) -> Optional[float]:
+        def _safe(col: str) -> float | None:
             v = last.get(col)
             if v is None or (isinstance(v, float) and np.isnan(v)):
                 return None
@@ -284,7 +338,14 @@ class SignalEngine:
             if prev_close > 0:
                 change_pct = (price - prev_close) / prev_close * 100
 
-        composite, confidence = self._strategy.score(price, rsi, macd_hist, bb_upper, bb_lower, sma_20, ema_50)
+        mcp = self._fetch_mcp_indicators(symbol)
+        supertrend_dir = mcp.get("supertrend_dir")
+        adx_val = mcp.get("adx")
+
+        composite, confidence = self._strategy.score(
+            price, rsi, macd_hist, bb_upper, bb_lower, sma_20, ema_50,
+            supertrend_dir=supertrend_dir, adx=adx_val,
+        )
 
         return SignalResult(
             symbol=symbol,
@@ -303,10 +364,12 @@ class SignalEngine:
             composite=composite,
             confidence=confidence,
             atr=atr,
+            supertrend_dir=supertrend_dir,
+            adx=adx_val,
         )
 
 
-def _build_dataframe(raw: list[dict]) -> Optional[pd.DataFrame]:
+def _build_dataframe(raw: list[dict]) -> pd.DataFrame | None:
     try:
         df = pd.DataFrame(raw)
         for col in ("open_price", "close_price", "high_price", "low_price"):

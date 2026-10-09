@@ -8,7 +8,11 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from argus.strategy.indicators import DefaultStrategy, _build_dataframe, _validate_symbol
+from argus.strategy.indicators import (
+    DefaultStrategy,
+    _build_dataframe,
+    _validate_symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +94,8 @@ class BacktestEngine:
             price = float(row["close"])
             date = str(raw[i].get("begins_at", i))
 
-            def _get(col: str) -> float | None:
-                v = row.get(col)
+            def _get(col: str, _row: object = row) -> float | None:
+                v = _row.get(col)
                 return None if v is None else float(v)
 
             rsi      = _get("RSI_14")
@@ -101,7 +105,7 @@ class BacktestEngine:
             sma_20   = _get("SMA_20")
             ema_50   = _get("EMA_50")
 
-            composite, confidence = _STRATEGY.score(
+            composite, _confidence = _STRATEGY.score(
                 price, rsi, macd_h, bb_upper, bb_lower, sma_20, ema_50
             )
 

@@ -10,8 +10,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -24,19 +23,29 @@ class FundamentalsSnapshot:
     cached_on: datetime.date
 
     # Valuation
-    pe_ratio: Optional[float] = None
-    pb_ratio: Optional[float] = None
-    market_cap_b: Optional[float] = None   # billions
+    pe_ratio: float | None = None
+    pb_ratio: float | None = None
+    market_cap_b: float | None = None   # billions
 
     # 52-week position (0.0 = at 52w low, 1.0 = at 52w high)
-    week52_position: Optional[float] = None
-    week52_low: Optional[float] = None
-    week52_high: Optional[float] = None
+    week52_position: float | None = None
+    week52_low: float | None = None
+    week52_high: float | None = None
 
     # Financials: last two quarters (most-recent first)
-    revenue_growth_pct: Optional[float] = None   # QoQ revenue growth %
-    net_margin_latest: Optional[float] = None    # most recent quarter net margin %
-    net_margin_prev: Optional[float] = None      # prior quarter net margin %
+    revenue_growth_pct: float | None = None   # QoQ revenue growth %
+    net_margin_latest: float | None = None    # most recent quarter net margin %
+    net_margin_prev: float | None = None      # prior quarter net margin %
+    gross_profit_b: float | None = None       # gross profit in billions, latest quarter
+
+    # Analyst consensus
+    analyst_buy_pct: float | None = None
+    analyst_sell_pct: float | None = None
+    analyst_target_avg: float | None = None
+    analyst_target_upside_pct: float | None = None  # relative to estimated current price
+
+    # Politician disclosures (90-day window, cached with daily TTL)
+    politician_trades_summary: str | None = None
 
 
 class FundamentalsCache:
@@ -61,7 +70,7 @@ class FundamentalsCache:
             if raw and isinstance(raw, list):
                 raw = raw[0]
             if raw and isinstance(raw, dict):
-                def _f(key: str) -> Optional[float]:
+                def _f(key: str) -> float | None:
                     v = raw.get(key)
                     try:
                         return float(v) if v not in (None, "", "None") else None
@@ -87,29 +96,50 @@ class FundamentalsCache:
             logger.debug("Fundamentals fetch failed for %s: %s", symbol, exc)
 
         try:
-            import robin_stocks.robinhood as rh
-
-            # ── Financials (revenue / net margin trend) ───────────────────────
-            earnings = rh.stocks.get_earnings(symbol) or []
-            # robin_stocks earnings don't include revenue — try instruments financials
-            # Fall back to quarterly EPS trend as a profitability proxy if full
-            # financials aren't available via robin_stocks
-            if not earnings:
-                return snap
-
-            # Use most recent two entries that have actual EPS to gauge trend
-            actuals = [
-                e for e in earnings
-                if e.get("eps", {}) and e["eps"].get("actual") not in (None, "")
-            ]
-            if len(actuals) >= 2:
-                eps_now  = float(actuals[0]["eps"]["actual"])
-                eps_prev = float(actuals[1]["eps"]["actual"])
-                if eps_prev != 0:
-                    snap.revenue_growth_pct = round((eps_now - eps_prev) / abs(eps_prev) * 100, 1)
-
+            from argus.broker.robinhood_mcp import get_quarterly_financials as _qf
+            fin = _qf([symbol]).get(symbol, {})
+            snap.revenue_growth_pct = fin.get("revenue_growth_pct")
+            snap.net_margin_latest  = fin.get("net_margin_latest")
+            snap.net_margin_prev    = fin.get("net_margin_prev")
+            snap.gross_profit_b     = fin.get("gross_profit_b")
         except Exception as exc:
-            logger.debug("Financials fetch failed for %s: %s", symbol, exc)
+            logger.debug("MCP financials fetch failed for %s: %s", symbol, exc)
+
+        try:
+            from argus.broker.robinhood_mcp import get_analyst_ratings as _ar
+            ar = _ar([symbol]).get(symbol, {})
+            snap.analyst_buy_pct   = ar.get("buy_pct")
+            snap.analyst_sell_pct  = ar.get("sell_pct")
+            snap.analyst_target_avg = ar.get("target_avg")
+            if snap.analyst_target_avg and snap.week52_low and snap.week52_high and snap.week52_position is not None:
+                est_price = snap.week52_low + snap.week52_position * (snap.week52_high - snap.week52_low)
+                if est_price > 0:
+                    snap.analyst_target_upside_pct = round(
+                        (snap.analyst_target_avg / est_price - 1) * 100, 1
+                    )
+        except Exception as exc:
+            logger.debug("MCP analyst ratings fetch failed for %s: %s", symbol, exc)
+
+        try:
+            import datetime as _dt
+
+            from argus.broker.robinhood_mcp import get_politician_trades_for as _pt
+            cutoff = (_dt.date.today() - _dt.timedelta(days=90)).isoformat()
+            trades = [t for t in _pt(symbol) if t.get("transaction_date", "") >= cutoff]
+            if trades:
+                buys  = sum(1 for t in trades if "buy"  in (t.get("transaction_type") or "").lower())
+                sells = sum(1 for t in trades if "sell" in (t.get("transaction_type") or "").lower())
+                # Only emit derived counts — raw politician/amount strings are free-text
+                # from a third-party feed and must not flow into the AI prompt verbatim.
+                parts = []
+                if buys:
+                    parts.append(f"{buys} buy{'s' if buys > 1 else ''}")
+                if sells:
+                    parts.append(f"{sells} sell{'s' if sells > 1 else ''}")
+                if parts:
+                    snap.politician_trades_summary = f"{', '.join(parts)} in last 90 days"
+        except Exception as exc:
+            logger.debug("MCP politician trades fetch failed for %s: %s", symbol, exc)
 
         return snap
 
@@ -143,9 +173,31 @@ class FundamentalsCache:
                 f"  52-week range: ${snap.week52_low:.2f} – ${snap.week52_high:.2f} "
                 f"(currently at {pct:.0f}% of range)"
             )
-        if snap.revenue_growth_pct is not None:
-            direction = "▲" if snap.revenue_growth_pct >= 0 else "▼"
-            lines.append(f"  EPS trend (QoQ): {direction}{abs(snap.revenue_growth_pct):.1f}%")
+
+        if snap.revenue_growth_pct is not None or snap.net_margin_latest is not None:
+            rev_str = ""
+            if snap.revenue_growth_pct is not None:
+                d = "▲" if snap.revenue_growth_pct >= 0 else "▼"
+                rev_str = f"revenue {d}{abs(snap.revenue_growth_pct):.1f}%"
+            margin_str = ""
+            if snap.net_margin_latest is not None:
+                margin_str = f"net margin {snap.net_margin_latest:.1f}%"
+            parts = [p for p in [rev_str, margin_str] if p]
+            lines.append(f"  Financials (QoQ): {' · '.join(parts)}")
+
+        if snap.analyst_buy_pct is not None:
+            buy_pct  = round(snap.analyst_buy_pct * 100)
+            sell_pct = round((snap.analyst_sell_pct or 0) * 100)
+            analyst_str = f"  Analyst: {buy_pct}% Buy · {100 - buy_pct - sell_pct}% Hold · {sell_pct}% Sell"
+            if snap.analyst_target_avg:
+                analyst_str += f" · avg target ${snap.analyst_target_avg:.2f}"
+            if snap.analyst_target_upside_pct is not None:
+                sign = "+" if snap.analyst_target_upside_pct >= 0 else ""
+                analyst_str += f" ({sign}{snap.analyst_target_upside_pct:.1f}% upside)"
+            lines.append(analyst_str)
+
+        if snap.politician_trades_summary:
+            lines.append(f"  Politician disclosures (90d): {snap.politician_trades_summary}")
 
         if not lines:
             return ""

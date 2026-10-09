@@ -10,20 +10,19 @@ from __future__ import annotations
 
 import getpass
 import sys
-from typing import Optional
 
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich import box
 
 from argus.secrets import (
+    _SERVICE,
     SECRET_KEYS,
     delete_secret,
     get_secret,
     list_stored,
     set_secret,
-    _SERVICE,
 )
 
 console = Console()
@@ -39,7 +38,7 @@ _DESCRIPTIONS: dict[str, str] = {
 }
 
 
-def _mask(value: Optional[str]) -> str:
+def _mask(value: str | None) -> str:
     if not value:
         return "[dim]not set[/dim]"
     visible = min(4, len(value) // 4)
@@ -65,7 +64,7 @@ def _show_status() -> None:
     console.print(f"[dim]Service name in keychain: [cyan]{_SERVICE}[/cyan][/dim]\n")
 
 
-def _prompt_secret(key: str, existing: Optional[str]) -> Optional[str]:
+def _prompt_secret(key: str, existing: str | None) -> str | None:
     desc = _DESCRIPTIONS.get(key, key)
     optional = "(optional)" in desc
 

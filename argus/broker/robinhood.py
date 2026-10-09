@@ -12,7 +12,6 @@ import re
 import threading
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
 
 import pyotp
 from pydantic import SecretStr
@@ -65,7 +64,7 @@ class RobinhoodBroker:
     ) -> None:
         self.username = username
         self._password = password if isinstance(password, SecretStr) else SecretStr(password)
-        self._mfa_secret: Optional[SecretStr] = (
+        self._mfa_secret: SecretStr | None = (
             (mfa_secret if isinstance(mfa_secret, SecretStr) else SecretStr(mfa_secret))
             if mfa_secret
             else None
@@ -108,18 +107,36 @@ class RobinhoodBroker:
             return
         try:
             import robin_stocks.robinhood as rh
+            import robin_stocks.robinhood.authentication as _rh_auth
 
-            mfa_code: Optional[str] = None
+            # robin_stocks raises TimeoutError("...Assuming login approved...") when the
+            # workflow-status confirmation step times out, even though the user DID approve
+            # in the app. Patch _validate_sherrif_id to swallow that TimeoutError so the
+            # outer rh.login() proceeds to re-attempt the POST with the approved session.
+            _orig_validate = _rh_auth._validate_sherrif_id
+
+            def _patched_validate(device_token, workflow_id):
+                try:
+                    _orig_validate(device_token, workflow_id)
+                except TimeoutError as _te:
+                    logger.info("Device approval timeout (%s) — assuming approved, continuing login", _te)
+
+            _rh_auth._validate_sherrif_id = _patched_validate
+
+            mfa_code: str | None = None
             if self._mfa_secret:
                 mfa_code = pyotp.TOTP(self._mfa_secret.get_secret_value()).now()
                 self._mfa_secret = None    # clear from memory immediately
 
-            rh.login(
-                self.username,
-                self._password.get_secret_value(),
-                mfa_code=mfa_code,
-                store_session=True,
-            )
+            try:
+                rh.login(
+                    self.username,
+                    self._password.get_secret_value(),
+                    mfa_code=mfa_code,
+                    store_session=True,
+                )
+            finally:
+                _rh_auth._validate_sherrif_id = _orig_validate  # always restore
             # rh.login() can fail silently (prints a message, returns None) especially
             # during the device-approval challenge flow. Verify the session is live by
             # checking the Authorization header on the shared session object.
@@ -198,6 +215,7 @@ class RobinhoodBroker:
 
         def _loop() -> None:
             import time
+
             import robin_stocks.robinhood as rh
             while True:
                 time.sleep(45 * 60)
@@ -304,29 +322,48 @@ class RobinhoodBroker:
         Crypto is not account-scoped in Robinhood — call this once per process,
         not once per account, to avoid double-counting.
 
-        Returns: {"total_usd": float, "positions": [{"symbol", "qty", "price", "value"}]}
+        Returns: {"total_usd": float, "total_cost": float, "positions": [{"symbol", "qty", "price", "value", "cost"}]}
         """
         if not self._logged_in:
-            return {"total_usd": 0.0, "positions": []}
+            return {"total_usd": 0.0, "total_cost": 0.0, "positions": []}
         try:
             import robin_stocks.robinhood as rh
             holdings = rh.crypto.get_crypto_positions() or []
+
+            # Try MCP for authoritative cost bases; fall back to robin_stocks fields
+            mcp_costs: dict[str, float] = {}
+            if self.account_number:
+                try:
+                    from argus.broker.robinhood_mcp import get_crypto_cost_basis as _gcb
+                    mcp_costs = _gcb(self.account_number)
+                except Exception as _mcp_exc:
+                    logger.debug("MCP crypto cost basis unavailable: %s", _mcp_exc)
+
             breakdown = []
             total = 0.0
+            total_cost = 0.0
             for item in holdings:
                 sym = item.get("currency", {}).get("code", "")
                 qty = float(item.get("quantity", 0))
                 if not sym or qty < 1e-8:
                     continue
+                # MCP cost basis is most accurate; fall back through robin_stocks fields
+                cost = mcp_costs.get(sym.upper(), 0.0)
+                if cost == 0:
+                    cb = item.get("cost_bases", [{}])[0]
+                    cost = float(cb.get("direct_cost_basis", 0) or 0)
+                if cost == 0:
+                    tax_lots = item.get("tax_lot_cost_bases", [{}])
+                    cost = float(tax_lots[0].get("clearing_book_cost_basis", 0)) if tax_lots else 0.0
                 try:
                     price = self._live_get_price(sym)
                 except Exception:
-                    cost = float(item.get("cost_bases", [{}])[0].get("direct_cost_basis", 0))
                     price = cost / qty if qty else 0.0
                 value = price * qty
                 total += value
-                breakdown.append({"symbol": sym, "qty": qty, "price": price, "value": value})
-            return {"total_usd": round(total, 2), "positions": breakdown}
+                total_cost += cost
+                breakdown.append({"symbol": sym, "qty": qty, "price": price, "value": value, "cost": cost})
+            return {"total_usd": round(total, 2), "total_cost": round(total_cost, 2), "positions": breakdown}
         except Exception as exc:
             logger.warning("Could not fetch crypto equity: %s", exc)
             return {"total_usd": 0.0, "positions": []}
@@ -389,7 +426,7 @@ class RobinhoodBroker:
             try:
                 sym_data = rh.stocks.get_instrument_by_url(instrument_url, info="symbol")
                 sym = (sym_data or "").strip().upper()
-            except Exception:
+            except Exception:  # noqa: S112
                 continue
             if sym:
                 result[sym] = {"qty": qty, "avg_price": avg}
@@ -479,12 +516,13 @@ class RobinhoodBroker:
             logger.debug("Screener upcoming-earnings tag failed: %s", exc)
 
         try:
-            import robin_stocks.robinhood as rh
             import datetime as _dt
+
+            import robin_stocks.robinhood as rh
 
             # Per-symbol earnings check for movers already in result
             today = _dt.date.today()
-            for item in list(result):
+            for item in result:
                 sym = item["symbol"]
                 if item["category"] == "earnings":
                     continue
@@ -533,7 +571,8 @@ class RobinhoodBroker:
                 # RemoteDisconnected happens right after a session reauth — retry once
                 _is_disconnect = "RemoteDisconnected" in type(exc).__name__ or "RemoteDisconnected" in str(exc)
                 if _is_disconnect:
-                    import time as _t; _t.sleep(1.5)
+                    import time as _t
+                    _t.sleep(1.5)
                     try:
                         if symbol in CRYPTO_SYMBOLS:
                             data = rh.crypto.get_crypto_historicals(symbol, interval=interval, span=span)
@@ -557,8 +596,9 @@ class RobinhoodBroker:
     def _yf_crypto_historicals(self, symbol: str, span: str) -> list[dict]:
         """Fetch crypto OHLCV from Yahoo Finance — no Robinhood auth needed."""
         try:
-            import yfinance as yf
             import datetime as _dt
+
+            import yfinance as yf
             _span_days = {
                 'day': 7, 'week': 35, 'month': 35, '3month': 95,
                 'year': 370, '5year': 1830,
@@ -668,8 +708,9 @@ class RobinhoodBroker:
 
     def _poll_until_filled(self, order_id: str, is_crypto: bool, timeout: float = 30.0) -> dict:
         """Poll order status until filled, cancelled, or timeout. Returns last order dict."""
-        import robin_stocks.robinhood as rh
         import time
+
+        import robin_stocks.robinhood as rh
 
         last_known: dict = {}
         deadline = time.monotonic() + timeout
