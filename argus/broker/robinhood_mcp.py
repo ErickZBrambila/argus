@@ -117,16 +117,29 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
         "method": "tools/call",
         "params": {"name": tool_name, "arguments": arguments},
     }
-    resp = requests.post(
-        _MCP_URL,
-        json=payload,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        },
-        timeout=15,
-    )
+
+    def _post(tok: str) -> requests.Response:
+        return requests.post(
+            _MCP_URL,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {tok}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            timeout=15,
+        )
+
+    resp = _post(token)
+    if resp.status_code == 401:
+        # Token rejected — reload from keychain and retry once
+        logger.warning("robinhood_mcp: 401 on %s — reloading token from keychain", tool_name)
+        with _token_lock:
+            _token_cache.clear()
+        token = _get_access_token()
+        if not token:
+            raise RuntimeError("No Robinhood MCP access token available after reload")
+        resp = _post(token)
     resp.raise_for_status()
 
     # Response is SSE: "event: message\ndata: {...}\n\n"
