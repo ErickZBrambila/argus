@@ -234,6 +234,7 @@ class Autopilot:
         self._recent_trades: collections.deque = collections.deque(maxlen=200)
         self._latest_signals: list[dict] = []
         self._first_signal_sent: set[str] = set()  # priority symbols that already fired first-signal alert
+        self._warmup_done = False  # suppress first-scan notifications until one full tick completes
         # Cache: label → {"equity": float, "positions": dict} — refreshed each tick
         self._account_cache: dict[str, dict] = {}
         self._last_ai_vote: dict = {}
@@ -807,12 +808,16 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 signals.append(d)
 
         # First-signal ntfy for high-conviction watch symbols (new listings, IPO pipeline)
+        # Skip during the warmup tick so restarts don't spam notifications.
         for _sig_d in signals:
             _sym = _sig_d.get("symbol", "")
             if (_sym in _PRIORITY_WATCH_SYMBOLS
                     and _sym not in self._first_signal_sent
                     and _sig_d.get("composite") == "bullish"):
                 self._first_signal_sent.add(_sym)
+                if not self._warmup_done:
+                    logger.info("First BULLISH signal for %s suppressed (warmup tick)", _sym)
+                    continue
                 _price = _sig_d.get("price", 0)
                 _conf  = _sig_d.get("confidence", 0)
                 logger.info("First BULLISH signal for priority watch symbol %s @ $%.2f", _sym, _price)
@@ -1711,6 +1716,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         }
         self._terminal.update(state)
         web_dashboard.push_state(state)
+        self._warmup_done = True
 
     # ── Storage helpers ──────────────────────────────────────────────────────
 

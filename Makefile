@@ -9,10 +9,7 @@ WEB_LOG     := argus-web.log
 start:
 	@echo "Starting argus..."
 	@nohup $(ARGUS) >> $(LOG) 2>&1 &
-	@sleep 2
-	@echo "Starting argus-web..."
-	@nohup $(ARGUS_WEB) >> $(WEB_LOG) 2>&1 &
-	@sleep 3
+	@sleep 5
 	@$(MAKE) --no-print-directory status
 
 stop:
