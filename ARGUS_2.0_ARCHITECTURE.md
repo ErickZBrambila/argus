@@ -1,7 +1,9 @@
 # Argus 2.0 — Architecture Blueprint
 
-> Status: **Design phase** — implementation begins September 2026.
+> Status: **Phase 1 complete (Oct 2026). Phase 5 complete. Remaining phases paused — accumulating live trading data before building out specialist agents.**
 > Read the Migration Path (Section 7) before touching any code.
+>
+> **October 2026 update**: Robinhood MCP integration is live. See Section 9 for what this changes.
 
 ## What Opus found in the codebase that shapes this design
 
@@ -143,14 +145,19 @@ sideways (else): size=0.7x, conf+0.04
 ### ATLAS — Technical Analyst
 - **Runs**: Per symbol, every tick. Heavily cached.
 - **Output**: `MultiTFSignal` — weekly trend, daily (existing), 15min momentum, 5min entry quality, support/resistance
-- **Model**: `pandas_ta`. Optional Haiku for chart patterns (Phase 2).
+- **Model**: `pandas_ta` for daily/weekly. Optional Haiku for chart patterns (Phase 2).
 - **Modified file**: `argus/strategy/indicators.py` — add `compute_multi_tf()`, keep `compute()` intact.
+- **MCP note**: The intraday tier (5min/15min) of `compute_multi_tf()` can source directly from Robinhood MCP's `get_equity_technical_indicators` endpoint, which supports `5min`/`15min` intervals and covers RSI, VWAP, MACD, Bollinger, Stochastic, Ichimoku. Avoids a second set of OHLCV fetches + pandas_ta for intraday. SuperTrend and ADX already live via MCP (daily cached).
 
 ### LEDGER — Fundamentals Agent
-- **Runs**: Once per symbol per trading day (daily TTL cache).
-- **Output**: `FundamentalScore` with forward PE (yfinance), analyst ratings, short float %, `value_score` 0–1, `prompt_block` ready for Houston. Also writes an **OKF document** to `knowledge/symbols/<SYMBOL>.md` so the profile is human-readable and persists across restarts.
-- **Model**: Haiku only for unusual data (negative forward PE, short float >30%).
-- **Modified file**: `argus/engine/fundamentals_cache.py`
+- **Runs**: Once per symbol per trading day (daily TTL cache). **Core data layer already live as of Oct 2026.**
+- **Output**: `FundamentalScore` with PE/P/B/52-week range, analyst ratings (buy%/sell%/avg target/upside%), quarterly financials (revenue growth, net margins, gross profit), politician STOCK Act disclosures (90d window), `prompt_block` ready for Houston. Also writes an **OKF document** to `knowledge/symbols/<SYMBOL>.md` so the profile is human-readable and persists across restarts.
+- **Model**: Haiku only for unusual flags (negative forward PE, short float >30%). The data itself is MCP-sourced — no yfinance needed for the core data.
+- **Modified file**: `argus/engine/fundamentals_cache.py` — **already updated, all MCP fields live**.
+- **MCP replaces yfinance for**: analyst ratings, quarterly financials, politician trades. yfinance yfinance supplemental call is dropped.
+- **New capabilities from MCP** (not yet wired):
+  - `get_sec_filing_facts` — pull key 10-Q data (revenue, cash, debt) per symbol daily.
+  - `get_earnings_results` — EPS actual vs. estimate (beat/miss magnitude) as a momentum signal; add to LEDGER output when building the full Houston bundle.
 
 ```markdown
 ---
@@ -178,6 +185,7 @@ No unusual flags. Value score 0.71 — acceptable for momentum entry.
 - **Output**: `OptionsSignal` — call/put ratio, put wall, call ceiling, flow direction
 - **Model**: Pure Python math. Extends existing `_check_symbol_options()`.
 - **Modified file**: `argus/screener/market_intelligence.py`
+- **MCP note**: `get_option_chains` and `get_option_quotes` are in the MCP tool list. Oracle can source chains from MCP (official Robinhood data) instead of yfinance. The math logic is unchanged.
 
 ### HOUSTON — Orchestrator and Final Decision Engine
 - **Runs**: Per symbol when AnalysisBundle has changed (debounced).
@@ -261,13 +269,19 @@ Houston reads the `knowledge/` directory at startup and on each weekly review cy
 - **Open Knowledge Format (OKF)**: Markdown + YAML frontmatter for two outputs that benefit from being human-readable and auditable — LearnAgent strategy overrides (`knowledge/overrides/`) and LEDGER symbol profiles (`knowledge/symbols/`). No new dependency — plain file writes. Everything in `knowledge/` is gitignored from the main repo but can be version-controlled separately if desired. Spec: [github.com/GoogleCloudPlatform/knowledge-catalog](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
 
 ### Keep (unchanged)
-Python 3.12, FastAPI, SQLite, pandas_ta, yfinance, Anthropic SDK, Gemini, ntfy.sh, Tailscale, httpx, keyring.
+Python 3.12, FastAPI, SQLite, pandas_ta, Anthropic SDK, Gemini, ntfy.sh, Tailscale, httpx, keyring.
+
+### yfinance scope reduced
+yfinance is no longer needed for LEDGER (analyst ratings, financials, politician trades now come from MCP). Still used for sector ETF returns in RADAR and options chains in ORACLE (until MCP option chains are wired).
 
 ### NOT needed
 Redis, Kafka, Celery, Docker, LangChain/LangGraph, vector database, real-time news streaming, Bloomberg/Refinitiv.
 
-### Phase 4 (later): MCP Broker
-Replace `robin_stocks` with `MCPBroker` behind `USE_MCP_BROKER=true` feature flag. MCP server handles OAuth lifecycle — no more `reauth()`.
+### Robinhood MCP (live as of Phase 1)
+`argus/broker/robinhood_mcp.py` — HTTP MCP client reading OAuth from macOS keychain. Daily-cached tools: SuperTrend, ADX, analyst ratings, quarterly financials, earnings calendar, politician trades. Realized P&L and crypto cost basis refresh every ~2h. Order placement tools (`place_equity_order`, `place_crypto_order`) available for Phase 3 migration.
+
+### Phase 3: MCPBroker migration (incremental)
+Wire `USE_MCP_BROKER=true` flag for order placement. MCP handles OAuth lifecycle — no more `reauth()`. No big-bang phase needed.
 
 ---
 
@@ -287,18 +301,26 @@ Current 1.0 cost: ~$15–20/month. 2.0 is 3–5x more — the tradeoff for multi
 
 ## 7. Migration Path (6 Phases — Nothing Breaks)
 
-### Phase 1 (1 week) — Foundation, zero behavior change
-1. Add `regime.py` (CassandraAgent). Run at 9:20am, write to SQLite, **log only — don't use for decisions**.
-2. Add `bundle.py` dataclasses (`AnalysisBundle`, `MultiTFSignal`). No consumers yet.
-3. Add proactive RH keep-alive (3 lines in `broker/robinhood.py`).
-4. Add APScheduler dependency. Schedule Radar + Cassandra. Don't change tick logic.
-5. Add `regime` field to `Flashcard` (defaults to `"unknown"` for historical records).
+### Phase 1 — Foundation ✅ COMPLETE (Oct 2026)
+1. ✅ `regime.py` (CassandraAgent). Runs at 9:20am, log-only mode.
+2. ✅ `bundle.py` dataclasses (`AnalysisBundle`, `MultiTFSignal`).
+3. ✅ Proactive RH keep-alive in `broker/robinhood.py`.
+4. ✅ APScheduler wired. Radar + Cassandra scheduled.
+5. ✅ `regime` field on `Flashcard`.
+6. ✅ **Robinhood MCP client** (`broker/robinhood_mcp.py`) — SuperTrend/ADX, analyst ratings, financials, earnings calendar, politician trades, realized P&L, crypto cost basis. All daily-cached.
+7. ✅ LEDGER MCP data: analyst ratings, quarterly financials, politician trades already injected into AI prompts.
 
-### Phase 2 (2 weeks) — Specialist agents, parallel to existing
+### Phase 5 — Mobile approval action URLs ✅ COMPLETE (Oct 2026)
+- ntfy notifications send high-priority push with Approve/Deny HTTP action buttons.
+- Buttons POST to `http://elcuchomacbookpro.tail19e5ce.ts.net:8000/api/approve/{id}` with `X-Argus-Token` auth.
+- Approval gate re-enabled in `_route_buy()`. `LARGE_TRADE_THRESHOLD=0` queues all BUYs.
+
+### Phase 2 — Specialist agents (paused — accumulating live data)
 1. `RadarAgent` in `argus/agent/radar.py`. Wire to 7am job. Output to `scan_universe` SQLite table. Drop-in for `get_screener_symbols()`.
+   - **New input available**: `run_scan` / `get_scans` MCP tools can serve as an additional high-quality candidate source alongside EDGAR/options/movers.
 2. `HeraldAgent` in `argus/agent/herald.py`. News at 9:20am. Adds sentiment to AnalysisBundle.
-3. `compute_multi_tf()` in `indicators.py`. Keep `compute()` intact.
-4. Extend `FundamentalsCache` with yfinance supplemental data.
+3. `compute_multi_tf()` in `indicators.py`. Intraday (5min/15min) tier sourced from MCP; daily/weekly from pandas_ta.
+4. ~~Extend `FundamentalsCache` with yfinance supplemental data~~ — **done via MCP** (see Phase 1 above). Remaining: wire `get_sec_filing_facts` and `get_earnings_results` (beat/miss) into LEDGER output for Houston bundle.
 
 ### Phase 3 (2 weeks) — Houston upgrade (the big switch)
 1. Implement `decide_bundle()` in `decision.py`. **Shadow mode**: run in parallel with `decide()`, log both, execute 1.0 only.
@@ -306,17 +328,15 @@ Current 1.0 cost: ~$15–20/month. 2.0 is 3–5x more — the tradeoff for multi
 3. Flip switch on agentic account. Watch 3 days. Then enable on default.
 4. Wire `PortfolioGuard`.
 5. Enable regime-adjusted sizing. Monitor 1 week.
+6. Wire `USE_MCP_BROKER=true` flag for order placement via MCP (`place_equity_order`, `place_crypto_order`, `get_equity_positions`). Incremental migration — no big-bang rewrite.
 
 ### Phase 4 (1 week) — Learning loop
 1. `LearnAgent.weekly_review()` wired to Sunday 8pm.
 2. Houston reads `strategy_overrides.json`. Conservative deltas (max ±0.05 initially).
 3. Wire dynamic confidence thresholds.
 
-### Phase 5 (1 week) — Mobile approval action URLs
-- ntfy notifications get Approve/Reject action URLs pointing to existing FastAPI endpoints.
-
-### Phase 6 (2+ weeks, after everything stable) — MCP Broker migration
-- `MCPBroker` behind feature flag. Paper test 2 weeks before live.
+### ~~Phase 6~~ MCPBroker migration — folded into Phase 3
+See Phase 3 item 6 above. No longer a separate phase — incremental behind feature flag.
 
 ---
 
@@ -337,12 +357,13 @@ Current 1.0 cost: ~$15–20/month. 2.0 is 3–5x more — the tradeoff for multi
 - `argus/engine/autopilot.py` — APScheduler, PortfolioGuard, AnalysisBundle, regime reads
 - `argus/agent/decision.py` — add `decide_bundle()` alongside `decide()`
 - `argus/strategy/indicators.py` — add `compute_multi_tf()`
-- `argus/engine/fundamentals_cache.py` — yfinance supplemental fields
+- `argus/engine/fundamentals_cache.py` — ✅ MCP data live; remaining: SEC filings + earnings beat/miss for Houston bundle
 - `argus/screener/market_intelligence.py` — return `OptionsSignal` dataclasses
 - `argus/risk/manager.py` — read regime multiplier for sizing
-- `argus/notifications/notifier.py` — add `action_urls` parameter
+- `argus/notifications/notifier.py` — ✅ action buttons live (Approve/Deny via Tailscale)
 - `argus/storage/models.py` — add `scan_universe`, `regime_state` tables
-- `argus/broker/robinhood.py` — proactive keep-alive thread
+- `argus/broker/robinhood.py` — ✅ proactive keep-alive live
+- `argus/broker/robinhood_mcp.py` — ✅ new file, MCP client live
 - `pyproject.toml` — add `apscheduler>=3.10`
 
 **Untouched** (by design):
@@ -370,3 +391,31 @@ Current 1.0 cost: ~$15–20/month. 2.0 is 3–5x more — the tradeoff for multi
 **Options execution is Phase 2+**: Oracle (signals) is Phase 1 at near-zero cost. Execution requires understanding Greeks, expiry selection, assignment risk — get that wrong and losses are worse than any equity mistake. Do it after everything else is stable.
 
 **Argus stays more autonomous than Bracket22**: Houston makes the final call automatically (unlike Bracket22 where a human reviews). The default account approval gate provides human oversight for large/risky trades. This is the right tradeoff for the two-account setup.
+
+---
+
+## 9. MCP Impact Assessment (Oct 2026)
+
+### What MCP replaced / made redundant
+| Original Plan | MCP Reality |
+|---|---|
+| yfinance analyst ratings for LEDGER | `get_equity_analyst_ratings` — live, daily cached |
+| yfinance quarterly financials for LEDGER | `get_financials` — live, daily cached |
+| Politician trades as future Phase 2 enhancement | `get_politician_trades` — live, 90d window, daily cached |
+| Phase 5 ntfy action URLs as a separate phase | Done in Phase 1 alongside MCP work |
+| Phase 6 MCPBroker as big-bang rewrite | Incremental — order placement tools ready, migrate in Phase 3 behind flag |
+| Haiku call for LEDGER unusual flag detection | Still applicable, but the data source is MCP not yfinance |
+
+### What MCP simplified
+| Agent | Simplification |
+|---|---|
+| ATLAS multi-TF | Intraday (5min/15min) tier sources from MCP instead of extra OHLCV + pandas_ta run |
+| ORACLE | Option chains available from `get_option_chains` / `get_option_quotes` (official data, no yfinance) |
+
+### What MCP leaves unaffected
+RADAR, CASSANDRA (uses no external data), PortfolioGuard, LearnAgent/OKF loop, Houston bundle format, APScheduler, prompt caching. These proceed as designed when we resume.
+
+### New capabilities MCP unlocks (not yet wired)
+- **`get_sec_filing_facts`**: Pull key 10-Q data (revenue, cash, debt) per symbol — add to LEDGER Houston bundle.
+- **`get_earnings_results`**: EPS beat/miss magnitude — momentum signal not in the current design. Add to LEDGER.
+- **`run_scan` / `get_scans`**: Robinhood server-side screener — use as an additional candidate source in RADAR alongside EDGAR/options/movers.

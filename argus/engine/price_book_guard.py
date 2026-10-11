@@ -15,7 +15,6 @@ import datetime
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +26,9 @@ _CACHE_SECONDS  = 60      # refresh at most once per minute per symbol
 class BookSnapshot:
     symbol: str
     fetched_at: datetime.datetime
-    best_bid: Optional[float] = None
-    best_ask: Optional[float] = None
-    spread_pct: Optional[float] = None
+    best_bid: float | None = None
+    best_ask: float | None = None
+    spread_pct: float | None = None
 
 
 class PriceBookGuard:
@@ -41,7 +40,7 @@ class PriceBookGuard:
         self._lock = threading.Lock()
 
     def _fetch(self, symbol: str) -> BookSnapshot:
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         snap = BookSnapshot(symbol=symbol, fetched_at=now)
 
         try:
@@ -67,7 +66,7 @@ class PriceBookGuard:
         return snap
 
     def get(self, symbol: str) -> BookSnapshot:
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         with self._lock:
             cached = self._cache.get(symbol)
             if cached and (now - cached.fetched_at).total_seconds() < _CACHE_SECONDS:

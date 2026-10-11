@@ -1,0 +1,229 @@
+{
+  "uid": "argus-phase1-monitoring",
+  "title": "Argus Phase 1 KPIs",
+  "tags": ["argus", "trading"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Market Regime",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "1": { "text": "ACTIVE", "color": "green" } } },
+            { "type": "value", "options": { "0": { "text": "–", "color": "transparent" } } }
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "argus_regime_current",
+          "legendFormat": "{{regime}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Cassandra Runs (success vs failure)",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 9, "x": 6, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 } }
+      },
+      "targets": [
+        {
+          "expr": "increase(argus_cassandra_runs_total{result=\"success\"}[1h])",
+          "legendFormat": "Success",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(argus_cassandra_runs_total{result=\"failure\"}[1h])",
+          "legendFormat": "Failure",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Cassandra Duration (p95)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 9, "x": 15, "y": 0 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(argus_cassandra_duration_seconds_bucket[30m]))",
+          "legendFormat": "p95 duration",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Daily P&L ($)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 4 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0 },
+              { "color": "green", "value": 50 }
+            ]
+          },
+          "custom": { "fillOpacity": 10 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "argus_daily_pnl_dollars",
+          "legendFormat": "{{account}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Portfolio Equity ($)",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 18, "x": 6, "y": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": { "lineWidth": 2, "fillOpacity": 8 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "argus_portfolio_equity_dollars",
+          "legendFormat": "{{account}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Trades Executed",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2, "drawStyle": "bars" } }
+      },
+      "targets": [
+        {
+          "expr": "increase(argus_trades_total{action=\"buy\"}[1h])",
+          "legendFormat": "Buy – {{account}}",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(argus_trades_total{action=\"sell\"}[1h])",
+          "legendFormat": "Sell – {{account}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Active Positions",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        {
+          "expr": "argus_active_positions_count",
+          "legendFormat": "{{account}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "AI Decisions",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2, "drawStyle": "bars" } }
+      },
+      "targets": [
+        {
+          "expr": "increase(argus_decisions_total[1h])",
+          "legendFormat": "{{decision}} – {{account}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Decision Cycle Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 12 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2 } }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(argus_decision_cycle_seconds_bucket[5m]))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(argus_decision_cycle_seconds_bucket[5m]))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "API Errors",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 12 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2 },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": 1 }] }
+        }
+      },
+      "targets": [
+        {
+          "expr": "increase(argus_api_errors_total[1h])",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

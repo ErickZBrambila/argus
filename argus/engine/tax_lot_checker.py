@@ -14,8 +14,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +26,9 @@ _LONG_TERM_DAYS = 365   # IRS threshold for long-term capital gains
 class LotInfo:
     symbol: str
     cached_on: datetime.date
-    earliest_acquisition: Optional[datetime.date] = None   # oldest open lot
-    days_held: Optional[int] = None                        # days since earliest lot
-    days_until_long_term: Optional[int] = None             # None if already long-term or unknown
+    earliest_acquisition: datetime.date | None = None   # oldest open lot
+    days_held: int | None = None                        # days since earliest lot
+    days_until_long_term: int | None = None             # None if already long-term or unknown
 
 
 class TaxLotChecker:

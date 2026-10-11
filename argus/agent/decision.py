@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import anthropic
 
@@ -85,7 +84,8 @@ def classify_risk(signal_confidence: float, decision_confidence: float, consensu
     return "high"
 
 
-from argus.config import get_settings  # noqa: E402
+from argus.config import get_settings
+
 
 def get_model_info() -> dict:
     settings = get_settings()
@@ -188,9 +188,9 @@ class _GeminiEngine:
             _ai_status["gemini"] = status
             # On quota exhaustion (429), pause Gemini for the rest of the trading day
             if "429" in err_str or "quota" in err_str.lower() or "resource_exhausted" in err_str.lower():
-                import time
                 import datetime as _dt
-                now = _dt.datetime.now()
+                import time
+                now = _dt.datetime.now(_dt.UTC)
                 midnight = _dt.datetime.combine(now.date() + _dt.timedelta(days=1), _dt.time.min)
                 self._quota_exhausted_until = midnight.timestamp()
                 logger.warning("Gemini daily quota exhausted — switching to Claude-only until midnight")
@@ -263,9 +263,9 @@ def _consensus(claude: TradeDecision, gemini: TradeDecision, symbol: str) -> Tra
 class DecisionEngine:
     """Ensemble decision engine. Uses both Claude and Gemini when Gemini key is set."""
 
-    def __init__(self, anthropic_key: str, gemini_key: Optional[str] = None) -> None:
+    def __init__(self, anthropic_key: str, gemini_key: str | None = None) -> None:
         self._claude = _ClaudeEngine(anthropic_key)
-        self._gemini: Optional[_GeminiEngine] = None
+        self._gemini: _GeminiEngine | None = None
         if gemini_key:
             try:
                 self._gemini = _GeminiEngine(gemini_key)
@@ -390,6 +390,11 @@ def _build_prompt(
     sma_str = f"{signal.sma_20:.2f}" if signal.sma_20 is not None else "N/A"
     ema_str = f"{signal.ema_50:.2f}" if signal.ema_50 is not None else "N/A"
 
+    st_dir = getattr(signal, "supertrend_dir", None)
+    st_str = ("bullish ↑" if st_dir == 1 else "bearish ↓") if st_dir is not None else "N/A"
+    adx_val = getattr(signal, "adx", None)
+    adx_str = f"{adx_val:.1f}" if adx_val is not None else "N/A"
+
     fundamentals_section = f"\n{fundamentals_block}\n" if fundamentals_block else ""
     return f"""Symbol: {signal.symbol}
 Current price: ${signal.price:.4f}
@@ -401,6 +406,8 @@ Technical indicators:
   Bollinger Bands: {bb_str}
   SMA-20: {sma_str}
   EMA-50: {ema_str}
+  SuperTrend (10,3): {st_str}
+  ADX (10): {adx_str}
 {fundamentals_section}
 Portfolio context:
   Equity: ${portfolio_equity:,.2f}

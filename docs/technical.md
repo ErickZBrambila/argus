@@ -628,7 +628,63 @@ Full step-by-step migration checklist: [`mac-mini-setup.md`](mac-mini-setup.md)
 
 ---
 
-## 18. Market Intelligence Screeners
+## 18. Observability — Prometheus + Grafana
+
+Argus ships with a Prometheus scrape endpoint and a pre-built Grafana dashboard. Both are included in `docker-compose.yml` and start automatically alongside the main container.
+
+### Endpoints
+
+| Service | URL | Notes |
+|---------|-----|-------|
+| Metrics (raw) | `http://localhost:8000/metrics` | Unauthenticated — Prometheus scrapes this |
+| Prometheus | `http://localhost:9090` | Query raw metrics, check scrape health |
+| Grafana | `http://localhost:3000` | "Argus Phase 1 KPIs" dashboard, no login required |
+
+### Dashboard panels
+
+| Panel | Metric | What it tells you |
+|-------|--------|-------------------|
+| Market Regime | `argus_regime_current{regime}` | CassandraAgent's current bull/bear/neutral/unknown classification |
+| Cassandra Runs | `argus_cassandra_runs_total{result}` | Daily 9:20am run success vs failure rate |
+| Cassandra Duration | `argus_cassandra_duration_seconds` | How long the yfinance fetch + classify takes (p95) |
+| Daily P&L | `argus_daily_pnl_dollars{account}` | Session P&L in dollars per account, live |
+| Portfolio Equity | `argus_portfolio_equity_dollars{account}` | Equity time series per account |
+| Trades Executed | `argus_trades_total{action,account}` | Buy/sell count per account |
+| Active Positions | `argus_active_positions_count{account}` | Open positions per account |
+| AI Decisions | `argus_decisions_total{decision,account}` | BUY/SELL/HOLD counts per account |
+| Cycle Latency | `argus_decision_cycle_seconds` | p50/p95 of full `_tick()` scan duration |
+| API Errors | `argus_api_errors_total{service}` | Failures by service (broker, yfinance, claude, gemini) |
+
+### Metrics module
+
+All metrics are defined in `argus/metrics.py` — import from there to avoid duplicate-registration errors:
+
+```python
+from argus.metrics import trades_total, set_regime, decision_cycle_seconds
+```
+
+`set_regime(regime)` handles the Prometheus enum pattern (sets 1.0 for the active regime, 0.0 for all others). It never raises.
+
+### Data retention
+
+Prometheus is configured with `--storage.tsdb.retention.time=30d`. Grafana and Prometheus data persist in named Docker volumes (`prometheus-data`, `grafana-data`) and survive container restarts.
+
+### Useful commands
+
+```bash
+# Start the full stack (Argus + Prometheus + Grafana)
+docker compose up -d
+
+# Check Prometheus scrape health
+open http://localhost:9090/targets
+
+# Open dashboard
+open http://localhost:3000
+```
+
+---
+
+## 20. Market Intelligence Screeners
 
 `argus/screener/market_intelligence.py` provides two additional discovery feeds that run once per day at market open alongside the native Robinhood screener. Both are integrated in `Autopilot._refresh_screener()` and deduplicated before being added to the signal universe. The AI ensemble still makes the final BUY/SELL/HOLD decision.
 
@@ -678,7 +734,7 @@ Symbols are added with `category="insider"` and a reason string like `"SEC Form 
 
 ---
 
-## 19. MCP Bridge — Market Discovery
+## 21. MCP Bridge — Market Discovery
 
 Argus watches more than just its static watchlist. Market discovery runs via two parallel mechanisms:
 
@@ -848,7 +904,7 @@ argus/
     │   └── manager.py            # RiskManager; PDT tracking; drawdown kill switch; stop-loss
     │
     ├── dashboard/
-    │   ├── web.py                # FastAPI app; SSE stream; advanced charting; HTML UI
+    │   ├── web.py                # FastAPI app; SSE stream; /metrics endpoint; HTML UI
     │   ├── terminal.py           # Rich terminal dashboard; NullTerminalDashboard
     │   ├── token_tracker.py      # Lifetime cost tracking; ROI calculation
     │   └── log_buffer.py         # In-memory log ring buffer (500 entries)
@@ -856,9 +912,19 @@ argus/
     ├── learning/
     │   └── flashcards.py         # FlashcardStore; Readiness Scorecard logic
     │
+    ├── metrics.py                # Prometheus registry — all counters/gauges/histograms
+    │
     ├── notifications/
     │   └── notifier.py           # Notifier; email (aiosmtplib); SMS (Twilio); Slack
     │
     └── storage/
         └── models.py             # SQLAlchemy models; Persistent Watchlist; Trade history
+
+monitoring/
+├── prometheus.yml                              # Scrape config (argus:8000, 15s)
+└── grafana/provisioning/
+    ├── datasources/prometheus.yml              # Auto-wires Prometheus datasource
+    └── dashboards/
+        ├── dashboard.yml                       # Dashboard loader config
+        └── argus.json                          # "Argus Phase 1 KPIs" (10 panels)
 ```
