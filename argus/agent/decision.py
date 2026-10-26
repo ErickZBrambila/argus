@@ -146,7 +146,8 @@ class _GeminiEngine:
         self._config = _gt.GenerateContentConfig(
             system_instruction=_SYSTEM_PROMPT,
             temperature=0.2,
-            max_output_tokens=1024,
+            max_output_tokens=4096,
+            thinking_config=_gt.ThinkingConfig(thinking_budget=0),
         )
         self._quota_exhausted_until: float = 0.0  # epoch seconds
 
