@@ -48,10 +48,13 @@ Rules you must follow:
 - ALWAYS output valid JSON in the exact schema below — no exceptions, no prose, no markdown.
 - If data looks anomalous or contradictory, output HOLD with your reasoning in the JSON.
 - Never recommend risking more than the caller's position sizing limits.
-- Be conservative — when in doubt, HOLD.
 - Factor in the composite technical signal, individual indicator readings, and
   overall portfolio health.
 - Briefly explain your reasoning in the "reasoning" field (2-3 sentences max).
+
+BUY guidance: Only BUY when the technical trend is clearly in your favour and momentum supports continuation. Avoid entries in neutral RSI zones (45-55) without strong trend confirmation.
+
+SELL guidance: Recommend SELL on a held position when the entry thesis has broken down — trend reversal, RSI divergence, or momentum fading after a strong run. Do not reflexively HOLD just because a position is profitable; locking in gains on weakening signals is correct.
 
 Output schema (strict JSON only — your entire response must be this and nothing else):
 {
@@ -218,11 +221,28 @@ def _consensus(claude: TradeDecision, gemini: TradeDecision, symbol: str) -> Tra
             partial_error=_partial,
         )
 
-    # One HOLD, one directional → majority rules: take the directional action
-    # at reduced confidence (high risk). Only a direct BUY↔SELL contradiction
-    # warrants a hard HOLD.
+    # One HOLD, one directional → only act if the directional model has strong conviction.
+    # Weak split-decision buys (≤70% confidence) caused repeated bad entries — require 70%+.
     if ca == "HOLD" or ga == "HOLD":
         directional = claude if ga == "HOLD" else gemini
+        _SPLIT_MIN_CONFIDENCE = 0.70
+        if directional.action == "BUY" and directional.confidence < _SPLIT_MIN_CONFIDENCE:
+            logger.info(
+                "Ensemble: split on %s (Claude=%s, Gemini=%s) — confidence %.0f%% below split threshold %.0f%%, holding",
+                symbol, ca, ga, directional.confidence * 100, _SPLIT_MIN_CONFIDENCE * 100,
+            )
+            return TradeDecision(
+                symbol=symbol,
+                action="HOLD",
+                confidence=directional.confidence,
+                reasoning=(
+                    f"Split decision — confidence {directional.confidence:.0%} below split-buy threshold {_SPLIT_MIN_CONFIDENCE:.0%}. "
+                    f"[Claude] {claude.reasoning}  [Gemini] {gemini.reasoning}"
+                ),
+                models_used="ensemble",
+                consensus=False,
+                partial_error=_partial,
+            )
         logger.info(
             "Ensemble: split on %s (Claude=%s, Gemini=%s) — taking directional %s at high risk",
             symbol, ca, ga, directional.action,

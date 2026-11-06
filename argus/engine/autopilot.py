@@ -57,6 +57,8 @@ _RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 _PRIORITY_WATCH_SYMBOLS: frozenset[str] = frozenset({"SPCX"})
 # Force-sell this many calendar days before the sell_by_date deadline
 _SELL_BY_FORCE_DAYS = 1
+# Block re-entry for this many days after a stop-loss exit on the same symbol
+_STOP_LOSS_REENTRY_DAYS = 7
 
 
 @dataclass
@@ -73,6 +75,8 @@ class AccountContext:
     db_starting_equity: float = 0.0   # from DB — used for dashboard "Today P&L" display only
     # symbol → UTC datetime of last sell; prevents immediate rebuy after a sell
     sell_cooldown: dict = field(default_factory=dict)
+    # symbol → UTC datetime of last stop-loss exit; prevents re-entry for _STOP_LOSS_REENTRY_DAYS
+    stop_loss_cooldown: dict = field(default_factory=dict)
     crypto_enabled: bool = True       # False = skip crypto symbols entirely for this account
     rsi_floor: float = 52.0          # BUY blocked if RSI below this (lower = more aggressive)
     min_hold_hours: float = 48.0     # SELL blocked within this many hours of entry (0 = day-trade freely)
@@ -1114,7 +1118,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     if symbol in _exit_only:
                         logger.info("[%s][%s] BUY skipped — exit-only symbol", acct.label, symbol)
                         continue
-                    # Sell cooldown: block rebuy for 4 hours after a sell
+                    # Sell cooldown: block rebuy for 4 hours after a voluntary sell
                     _sold_at = acct.sell_cooldown.get(symbol)
                     if _sold_at is not None:
                         _hours_since = (datetime.datetime.now(_UTC) - _sold_at).total_seconds() / 3600
@@ -1126,6 +1130,18 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                             continue
                         else:
                             acct.sell_cooldown.pop(symbol, None)
+                    # Stop-loss cooldown: block re-entry for N days after a stop-loss exit
+                    _stopped_at = acct.stop_loss_cooldown.get(symbol)
+                    if _stopped_at is not None:
+                        _days_since = (datetime.datetime.now(_UTC) - _stopped_at).total_seconds() / 86400
+                        if _days_since < _STOP_LOSS_REENTRY_DAYS:
+                            logger.info(
+                                "[%s][%s] BUY blocked — stop-loss fired %.1fd ago (cooldown %dd)",
+                                acct.label, symbol, _days_since, _STOP_LOSS_REENTRY_DAYS,
+                            )
+                            continue
+                        else:
+                            acct.stop_loss_cooldown.pop(symbol, None)
                     if not acct.allow_overlap and other_held and symbol in other_held:
                         logger.info("[%s][%s] BUY skipped — already held by another account", acct.label, symbol)
                         continue
@@ -1381,10 +1397,13 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             return False
 
         # Record sell time so the BUY cooldown can block an immediate rebuy
-        acct.sell_cooldown[symbol] = datetime.datetime.now(_UTC)
+        _now = datetime.datetime.now(_UTC)
+        acct.sell_cooldown[symbol] = _now
+        outcome = "stop-loss" if "stop-loss" in reason.lower() else "sell"
+        if outcome == "stop-loss":
+            acct.stop_loss_cooldown[symbol] = _now
 
         # ── Step 2: flashcard close ──────────────────────────────────────────
-        outcome = "stop-loss" if "stop-loss" in reason.lower() else "sell"
         for card in self._flashcards.get_all():
             if card.symbol == symbol and card.account == acct.label and card.exit_price is None:
                 self._flashcards.close_trade(card.trade_id, result.price, outcome)
