@@ -511,7 +511,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                     self._check_promotions()
                     self._poll_approvals()
                     if not self._paused:
-                        self._tick()
+                        self._tick_with_timeout()
                     interval = self._get_interval()
                     self._current_interval = interval
                     self._next_scan_at = datetime.datetime.now(_UTC) + datetime.timedelta(seconds=interval)
@@ -714,6 +714,31 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         )
 
     # ── Main tick ────────────────────────────────────────────────────────────
+
+    _TICK_TIMEOUT = 90  # seconds — kills a hung tick before it blocks the loop
+
+    def _tick_with_timeout(self) -> None:
+        """Run _tick() in a thread so a hung HTTP call can't freeze the main loop."""
+        import threading
+        result: list[Exception] = []
+
+        def _run() -> None:
+            try:
+                self._tick()
+            except Exception as exc:
+                result.append(exc)
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=self._TICK_TIMEOUT)
+        if t.is_alive():
+            logger.error(
+                "Tick timed out after %ds — a blocking call (likely yfinance or Robinhood) "
+                "did not return. Skipping this cycle.",
+                self._TICK_TIMEOUT,
+            )
+        elif result:
+            raise result[0]
 
     def _tick(self) -> None:
         from argus.metrics import decision_cycle_seconds

@@ -267,12 +267,14 @@ class DecisionEngine:
     def __init__(self, anthropic_key: str, gemini_key: str | None = None) -> None:
         self._claude = _ClaudeEngine(anthropic_key)
         self._gemini: _GeminiEngine | None = None
-        if gemini_key:
+        if gemini_key and get_settings().gemini_enabled:
             try:
                 self._gemini = _GeminiEngine(gemini_key)
                 logger.info("Ensemble mode: Claude + Gemini")
             except Exception as exc:
                 logger.warning("Gemini init failed, running Claude-only: %s", exc)
+        elif not get_settings().gemini_enabled:
+            logger.info("Gemini disabled via GEMINI_ENABLED=false — running Claude-only")
 
     def decide(
         self,
