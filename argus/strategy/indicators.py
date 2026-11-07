@@ -197,6 +197,10 @@ class SignalEngine:
             return []
 
     def _fetch_mcp_indicators(self, symbol: str) -> dict:
+        from argus.broker.robinhood import CRYPTO_SYMBOLS
+        if symbol in CRYPTO_SYMBOLS:
+            return {}
+
         import datetime as _dt
         today = _dt.date.today()
         cached = self._mcp_cache.get(symbol, {})

@@ -143,10 +143,15 @@ def _call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
     resp.raise_for_status()
 
     # Response is SSE: "event: message\ndata: {...}\n\n"
+    # Skip non-JSON data: lines (keep-alives, event-type annotations) until we find
+    # the actual JSON payload.
     text = resp.text.strip()
     for line in text.splitlines():
         if line.startswith("data:"):
-            body = json.loads(line[5:].strip())
+            try:
+                body = json.loads(line[5:].strip())
+            except (json.JSONDecodeError, ValueError):
+                continue
             result = body.get("result", {})
             content = result.get("content", [])
             if content:

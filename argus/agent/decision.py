@@ -195,7 +195,7 @@ class _GeminiEngine:
                 import datetime as _dt
                 import time
                 now = _dt.datetime.now(_dt.UTC)
-                midnight = _dt.datetime.combine(now.date() + _dt.timedelta(days=1), _dt.time.min)
+                midnight = _dt.datetime.combine(now.date() + _dt.timedelta(days=1), _dt.time.min, tzinfo=_dt.UTC)
                 self._quota_exhausted_until = midnight.timestamp()
                 logger.warning("Gemini daily quota exhausted — switching to Claude-only until midnight")
                 _ai_status["gemini"] = "yellow"
@@ -222,11 +222,11 @@ def _consensus(claude: TradeDecision, gemini: TradeDecision, symbol: str) -> Tra
         )
 
     # One HOLD, one directional → only act if the directional model has strong conviction.
-    # Weak split-decision buys (≤70% confidence) caused repeated bad entries — require 70%+.
+    # Apply to both BUY and SELL: a low-confidence split-SELL can exit a profitable position prematurely.
     if ca == "HOLD" or ga == "HOLD":
         directional = claude if ga == "HOLD" else gemini
         _SPLIT_MIN_CONFIDENCE = 0.70
-        if directional.action == "BUY" and directional.confidence < _SPLIT_MIN_CONFIDENCE:
+        if directional.action in ("BUY", "SELL") and directional.confidence < _SPLIT_MIN_CONFIDENCE:
             logger.info(
                 "Ensemble: split on %s (Claude=%s, Gemini=%s) — confidence %.0f%% below split threshold %.0f%%, holding",
                 symbol, ca, ga, directional.confidence * 100, _SPLIT_MIN_CONFIDENCE * 100,

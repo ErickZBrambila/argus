@@ -244,6 +244,9 @@ class Autopilot:
         # Price cache: symbol → last known price — populated inside the tick thread,
         # consumed by _update_dashboard in the main thread to avoid blocking network calls.
         self._price_cache: dict[str, float] = {}
+        # Crypto equity cache — populated inside the tick thread (protected by 90s timeout),
+        # consumed by _update_dashboard and _tick_account to avoid live calls in the main thread.
+        self._crypto_equity_cache: dict = {"total_usd": 0.0, "total_cost": 0.0, "positions": []}
         self._last_ai_vote: dict = {}
         self._ticks_since_vote = 999
         # Official realized P&L from Robinhood MCP — keyed by account label
@@ -965,9 +968,11 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         crypto_usd = 0.0
         if not acct.broker.paper:
             try:
-                crypto_usd = acct.broker.get_crypto_equity().get("total_usd", 0.0)
+                _ce = acct.broker.get_crypto_equity()
+                self._crypto_equity_cache = _ce
+                crypto_usd = _ce.get("total_usd", 0.0)
             except Exception:
-                pass
+                crypto_usd = self._crypto_equity_cache.get("total_usd", 0.0)
 
         if acct.risk.check_drawdown(equity, crypto_usd):
             self._persist_kill_switch(acct)
@@ -1496,7 +1501,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         if not symbol:
             return
         for acct in self._accounts:
-            positions = acct.broker.get_open_positions()
+            positions = self._account_cache.get(acct.label, {}).get("positions", {})
             if symbol in positions:
                 self._execute_sell(acct, symbol, positions[symbol]["qty"], reason="force-close via dashboard")
 
@@ -1520,13 +1525,16 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         if not from_acct or not to_acct:
             return
 
-        positions = from_acct.broker.get_open_positions()
+        positions = self._account_cache.get(from_acct.label, {}).get("positions", {})
         if symbol not in positions:
             logger.warning("Promote: %s not found in %s positions", symbol, from_label)
             return
 
-        pos          = positions[symbol]
-        price        = from_acct.broker.get_price(symbol)
+        pos   = positions[symbol]
+        price = self._price_cache.get(symbol, 0.0)
+        if not price:
+            logger.warning("Promote: no cached price for %s — skipping (will retry next tick)", symbol)
+            return
         qty          = pos["qty"]
         dollar_value = qty * price
 
@@ -1609,8 +1617,8 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         for acct in self._accounts:
             try:
                 cached = self._account_cache.get(acct.label, {})
-                eq = cached["equity"] if "equity" in cached else acct.broker.get_portfolio_equity()
-                positions_raw = cached.get("positions") or acct.broker.get_open_positions()
+                eq = cached.get("equity", 0.0)
+                positions_raw = cached.get("positions") or {}
                 total_equity += eq
                 total_entry_equity += acct.risk.session_entry_equity
                 kill_switch = kill_switch or acct.risk.kill_switch_active
@@ -1647,10 +1655,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
         accounts_state = {}
         for acct in self._accounts:
             cached = self._account_cache.get(acct.label, {})
-            try:
-                eq = cached["equity"] if "equity" in cached else acct.broker.get_portfolio_equity()
-            except Exception:
-                eq = 0.0
+            eq = cached.get("equity", 0.0)
             # Use DB starting equity for display so "Today P&L" reflects the
             # start-of-day baseline rather than the risk manager's combined baseline.
             entry_eq = acct.db_starting_equity or acct.risk.session_entry_equity
@@ -1666,11 +1671,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
             since_reset_pnl_pct = (since_reset_pnl / reset_baseline * 100) if reset_baseline else 0.0
 
             acct_positions = {}
-            try:
-                positions_raw = cached.get("positions") or acct.broker.get_open_positions()
-            except Exception as _pos_err:
-                logger.warning("[%s] Could not fetch positions for dashboard: %s", acct.label, _pos_err)
-                positions_raw = {}
+            positions_raw = cached.get("positions") or {}
             for sym, pos in positions_raw.items():
                 try:
                     cur = self._price_cache.get(sym, pos["avg_price"])
@@ -1703,22 +1704,9 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 "equity_goal": self._cfg.equity_goal,
             }
 
-        # Crypto equity — fetch from the default account broker (MCP cost basis is
-        # registered there); fall back to any live broker if default isn't available.
-        crypto_equity: dict = {"total_usd": 0.0, "positions": []}
-        _crypto_broker = None
-        for _acct in self._accounts:
-            if _acct.broker._logged_in and not _acct.broker.paper:
-                if _acct.account_number == self._cfg.default_account_number:
-                    _crypto_broker = _acct.broker
-                    break
-                if _crypto_broker is None:
-                    _crypto_broker = _acct.broker
-        if _crypto_broker:
-            try:
-                crypto_equity = _crypto_broker.get_crypto_equity()
-            except Exception as _ce:
-                logger.debug("Could not fetch crypto equity: %s", _ce)
+        # Use tick-cached crypto equity — the tick thread already called get_crypto_equity()
+        # under the 90s timeout guard; calling it live here would hang the main loop.
+        crypto_equity = self._crypto_equity_cache
 
         from argus.dashboard.token_tracker import get_summary as _token_summary
         tokens = _token_summary()
@@ -1774,7 +1762,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
     # ── Storage helpers ──────────────────────────────────────────────────────
 
     def _restore_session_state(self) -> None:
-        """Load per-account starting equity, kill switch, and day trade count from today's DB rows."""
+        """Load per-account starting equity, kill switch, day trade count, and stop-loss cooldowns from DB."""
         today = datetime.date.today()
         restored_ks: list[str] = []
         with get_session() as session:
@@ -1801,6 +1789,30 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 # under-count and mistakenly allow buys that would breach PDT.
                 today_dt = get_today_day_trades(session, acct.label)
                 acct.risk._day_trade_count = max(acct.risk._day_trade_count, today_dt)
+
+                # Restore stop-loss cooldown from recent sell trades so a restart
+                # doesn't wipe the N-day re-entry block on stopped-out symbols.
+                cutoff = datetime.datetime.now(_UTC) - datetime.timedelta(days=_STOP_LOSS_REENTRY_DAYS)
+                stop_sells = (
+                    session.query(Trade)
+                    .filter(
+                        Trade.side == "sell",
+                        Trade.reasoning == "stop-loss",
+                        Trade.paper == acct.broker.paper,
+                        Trade.created_at >= cutoff,
+                    )
+                    .all()
+                )
+                restored_sl: list[str] = []
+                for t in stop_sells:
+                    if t.symbol not in acct.stop_loss_cooldown:
+                        acct.stop_loss_cooldown[t.symbol] = t.created_at
+                        restored_sl.append(t.symbol)
+                if restored_sl:
+                    logger.info(
+                        "[%s] Restored stop-loss cooldown for: %s",
+                        acct.label, ", ".join(restored_sl),
+                    )
         if restored_ks:
             logger.warning(
                 "Kill switch restored for [%s] — drawdown limit was exceeded earlier today",

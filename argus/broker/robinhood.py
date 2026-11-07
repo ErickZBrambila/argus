@@ -366,7 +366,7 @@ class RobinhoodBroker:
             return {"total_usd": round(total, 2), "total_cost": round(total_cost, 2), "positions": breakdown}
         except Exception as exc:
             logger.warning("Could not fetch crypto equity: %s", exc)
-            return {"total_usd": 0.0, "positions": []}
+            return {"total_usd": 0.0, "total_cost": 0.0, "positions": []}
 
     def _live_equity(self) -> float:
         import robin_stocks.robinhood as rh
