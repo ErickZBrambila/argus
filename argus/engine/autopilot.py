@@ -241,6 +241,9 @@ class Autopilot:
         self._warmup_done = False  # suppress first-scan notifications until one full tick completes
         # Cache: label → {"equity": float, "positions": dict} — refreshed each tick
         self._account_cache: dict[str, dict] = {}
+        # Price cache: symbol → last known price — populated inside the tick thread,
+        # consumed by _update_dashboard in the main thread to avoid blocking network calls.
+        self._price_cache: dict[str, float] = {}
         self._last_ai_vote: dict = {}
         self._ticks_since_vote = 999
         # Official realized P&L from Robinhood MCP — keyed by account label
@@ -835,6 +838,12 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 d["screener_reason"] = candidate["reason"]
                 d["screener_category"] = candidate["category"]
                 signals.append(d)
+
+        # Refresh price cache from freshly computed signals so _update_dashboard
+        # can display current prices without making blocking network calls.
+        for _s in signals:
+            if _p := _s.get("price"):
+                self._price_cache[_s["symbol"]] = float(_p)
 
         # First-signal ntfy for high-conviction watch symbols (new listings, IPO pipeline)
         # Skip during the warmup tick so restarts don't spam notifications.
@@ -1608,7 +1617,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
 
                 for sym, pos in positions_raw.items():
                     try:
-                        cur = acct.broker.get_price(sym)
+                        cur = self._price_cache.get(sym, pos["avg_price"])
                         pnl_pct = (cur - pos["avg_price"]) / pos["avg_price"] * 100 if pos["avg_price"] else 0
                         key = f"{sym} [{acct.label}]"
                         pos_display[key] = {
@@ -1664,7 +1673,7 @@ Be concise. findings and risks: 2–4 items each. No text outside the JSON."""
                 positions_raw = {}
             for sym, pos in positions_raw.items():
                 try:
-                    cur = acct.broker.get_price(sym)
+                    cur = self._price_cache.get(sym, pos["avg_price"])
                     pnl_pct = (cur - pos["avg_price"]) / pos["avg_price"] * 100 if pos["avg_price"] else 0
                     acct_positions[sym] = {
                         "quantity": pos["qty"],
