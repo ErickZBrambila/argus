@@ -247,10 +247,13 @@ argus/
 ├── argus/
 │   ├── main.py              # Entry point
 │   ├── config.py            # All settings (reads .env + keychain)
+│   ├── metrics.py           # Prometheus metrics registry (counters, gauges, histograms)
 │   ├── setup_wizard.py      # Browser-based setup GUI
 │   ├── setup_secrets.py     # CLI keychain manager (argus-setup)
 │   ├── engine/
 │   │   ├── autopilot.py     # Main trading loop
+│   │   ├── regime.py        # CassandraAgent — market regime classifier (2.0 Phase 1)
+│   │   ├── bundle.py        # AnalysisBundle dataclasses (2.0 Phase 1)
 │   │   └── session.py       # Market hours detection
 │   ├── agent/
 │   │   └── decision.py      # Claude + Gemini ensemble
@@ -261,11 +264,17 @@ argus/
 │   ├── risk/
 │   │   └── manager.py       # Stop-loss, sizing, PDT, kill switch
 │   ├── dashboard/
-│   │   ├── web.py           # FastAPI web dashboard + MCP bridge API
+│   │   ├── web.py           # FastAPI web dashboard + /metrics endpoint
 │   │   └── terminal.py      # Rich terminal UI
 │   └── learning/
 │       └── flashcards.py    # Trade journal + performance scorecard
+├── monitoring/
+│   ├── prometheus.yml                          # Scrape config (15s interval)
+│   └── grafana/provisioning/
+│       ├── datasources/prometheus.yml          # Auto-wires Prometheus
+│       └── dashboards/argus.json               # "Argus Phase 1 KPIs" dashboard
 ├── .env.example             # Config template
+├── docker-compose.yml       # Argus + Prometheus + Grafana
 ├── pyproject.toml
 └── CHANGELOG.md
 ```

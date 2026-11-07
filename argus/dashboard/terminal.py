@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime
 import logging
-from typing import Optional
 
 from rich import box
 from rich.console import Console
@@ -37,7 +36,7 @@ class NullTerminalDashboard:
 
 class _LiveRenderable:
     """Calls _render() on every Rich Live refresh so the countdown ticks live."""
-    def __init__(self, dashboard: "TerminalDashboard") -> None:
+    def __init__(self, dashboard: TerminalDashboard) -> None:
         self._d = dashboard
 
     def __rich_console__(self, console, options):  # type: ignore[override]
@@ -46,7 +45,7 @@ class _LiveRenderable:
 
 class TerminalDashboard:
     def __init__(self) -> None:
-        self._live: Optional[Live] = None
+        self._live: Live | None = None
         self._state: dict = _empty_state()
 
     def start(self) -> None:
@@ -73,7 +72,7 @@ class TerminalDashboard:
         mode = Text(" PAPER ", style="bold white on blue") if s.get("paper_trade") else Text(" LIVE ", style="bold white on red")
         kill = Text(" ⚡ KILL SWITCH ", style="bold white on red") if s.get("kill_switch") else Text("")
         paused = Text(" ⏸ PAUSED ", style="bold black on yellow") if s.get("paused") else Text("")
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
 
         # Market session + countdown
         _SESSION_STYLES = {
@@ -90,7 +89,7 @@ class TerminalDashboard:
         if next_scan:
             try:
                 nxt = datetime.datetime.fromisoformat(next_scan)
-                secs = max(0, int((nxt - datetime.datetime.now(datetime.timezone.utc)).total_seconds()))
+                secs = max(0, int((nxt - datetime.datetime.now(datetime.UTC)).total_seconds()))
                 m, sec = divmod(secs, 60)
                 countdown_str = f"{m}:{sec:02d}" if m else f"{sec}s"
             except Exception:
@@ -155,7 +154,7 @@ class TerminalDashboard:
 
 def _market_countdown() -> tuple[str, str]:
     """Return (label, value) for time until next market open or close."""
-    now_et = datetime.datetime.now(datetime.timezone.utc).astimezone(
+    now_et = datetime.datetime.now(datetime.UTC).astimezone(
         datetime.timezone(datetime.timedelta(hours=-4))  # EDT; close enough for display
     )
     try:

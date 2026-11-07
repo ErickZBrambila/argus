@@ -16,7 +16,11 @@ import logging
 from typing import Any
 
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +124,7 @@ class Settings(BaseSettings):
     # Model overrides
     claude_model: str = Field("claude-sonnet-4-6", alias="CLAUDE_MODEL")
     gemini_model: str = Field("gemini-2.5-flash", alias="GEMINI_MODEL")
+    gemini_enabled: bool = Field(True, alias="GEMINI_ENABLED")
 
     # Scan loop — adaptive intervals per market session
     scan_interval_seconds: int = Field(300, alias="SCAN_INTERVAL_SECONDS")

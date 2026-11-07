@@ -10,7 +10,7 @@ Argus is an automated AI trading agent for Robinhood that uses a **Claude + Gemi
 - **Language:** Python 3.11+
 - **AI Models:** Claude 3.5 Sonnet / Opus (Anthropic) & Gemini 2.0 / 2.5 Flash (Google)
 - **Broker API:** `robin-stocks` (Robinhood)
-- **Signal Engine:** `pandas-ta` with a pluggable **Strategy Pattern**
+- **Signal Engine:** `pandas-ta` + **Robinhood MCP** (SuperTrend, ADX, multi-TF indicators, analyst ratings, financials) with a pluggable **Strategy Pattern**
 - **Web Dashboard:** FastAPI with SSE for real-time updates and **Advanced Charting** (synced RSI, Volume, SMA/EMA)
 - **Terminal UI:** Rich-based dashboard
 - **Configuration:** Pydantic Settings with OS Keychain integration (`keyring`)
@@ -22,7 +22,8 @@ Argus is an automated AI trading agent for Robinhood that uses a **Claude + Gemi
 - `argus/engine/autopilot.py`: The core orchestration loop and account management.
 - `argus/engine/session.py`: NYSE market session detection and adaptive interval logic.
 - `argus/engine/earnings_guard.py`: Blocks BUY within 5 days of an earnings report; daily per-symbol cache.
-- `argus/engine/fundamentals_cache.py`: Injects PE, P/B, 52-week range, and EPS trend into AI prompts; daily cache.
+- `argus/engine/fundamentals_cache.py`: Injects PE, P/B, 52-week range, analyst ratings, quarterly financials, and politician STOCK Act disclosures into AI prompts; daily cache. Data sourced from Robinhood MCP.
+- `argus/broker/robinhood_mcp.py`: HTTP client for Robinhood MCP (OAuth via macOS keychain). Provides technical indicators, financials, analyst ratings, earnings, crypto positions, realized P&L.
 - `argus/engine/tax_lot_checker.py`: Defers voluntary SELL when a lot is within 14 days of long-term threshold; daily cache.
 - `argus/engine/price_book_guard.py`: Blocks BUY when bid/ask spread > 0.5%; 60-second cache.
 - `argus/agent/decision.py`: The ensemble decision engine and automated **Go-Live Audit**.
@@ -44,7 +45,7 @@ The dashboard features `lightweight-charts` with synced RSI sub-panes, Volume hi
 ### 3. Pre-Trade Guard System
 Four modules run before every BUY or SELL, each with a thread-safe cache:
 - **EarningsGuard** — blocks BUY within 5 days of earnings (daily cache per symbol).
-- **FundamentalsCache** — injects PE, P/B, 52-week range, EPS trend into AI prompts (daily cache).
+- **FundamentalsCache** — injects PE, P/B, 52-week range, analyst ratings (buy%/sell%/avg target), quarterly financials, and politician disclosures into AI prompts (daily cache; all data from Robinhood MCP).
 - **TaxLotChecker** — defers voluntary SELL when within 14 days of long-term tax threshold (daily cache).
 - **PriceBookGuard** — blocks BUY when bid/ask spread > 0.5% (60-second cache).
 

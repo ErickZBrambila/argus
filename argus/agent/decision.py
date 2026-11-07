@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import anthropic
 
@@ -46,14 +45,18 @@ _SYSTEM_PROMPT = """You are Argus, an AI trading agent. You receive technical an
 and portfolio context, then decide whether to BUY, SELL, or HOLD a position.
 
 Rules you must follow:
-- Only output valid JSON in the exact schema specified.
+- ALWAYS output valid JSON in the exact schema below — no exceptions, no prose, no markdown.
+- If data looks anomalous or contradictory, output HOLD with your reasoning in the JSON.
 - Never recommend risking more than the caller's position sizing limits.
-- Be conservative — when in doubt, HOLD.
 - Factor in the composite technical signal, individual indicator readings, and
   overall portfolio health.
 - Briefly explain your reasoning in the "reasoning" field (2-3 sentences max).
 
-Output schema (strict JSON, no markdown fences):
+BUY guidance: Only BUY when the technical trend is clearly in your favour and momentum supports continuation. Avoid entries in neutral RSI zones (45-55) without strong trend confirmation.
+
+SELL guidance: Recommend SELL on a held position when the entry thesis has broken down — trend reversal, RSI divergence, or momentum fading after a strong run. Do not reflexively HOLD just because a position is profitable; locking in gains on weakening signals is correct.
+
+Output schema (strict JSON only — your entire response must be this and nothing else):
 {
   "action": "BUY" | "SELL" | "HOLD",
   "confidence": 0.0-1.0,
@@ -85,7 +88,8 @@ def classify_risk(signal_confidence: float, decision_confidence: float, consensu
     return "high"
 
 
-from argus.config import get_settings  # noqa: E402
+from argus.config import get_settings
+
 
 def get_model_info() -> dict:
     settings = get_settings()
@@ -145,7 +149,7 @@ class _GeminiEngine:
         self._config = _gt.GenerateContentConfig(
             system_instruction=_SYSTEM_PROMPT,
             temperature=0.2,
-            max_output_tokens=1024,
+            max_output_tokens=4096,
             thinking_config=_gt.ThinkingConfig(thinking_budget=0),
         )
         self._quota_exhausted_until: float = 0.0  # epoch seconds
@@ -188,10 +192,10 @@ class _GeminiEngine:
             _ai_status["gemini"] = status
             # On quota exhaustion (429), pause Gemini for the rest of the trading day
             if "429" in err_str or "quota" in err_str.lower() or "resource_exhausted" in err_str.lower():
-                import time
                 import datetime as _dt
-                now = _dt.datetime.now()
-                midnight = _dt.datetime.combine(now.date() + _dt.timedelta(days=1), _dt.time.min)
+                import time
+                now = _dt.datetime.now(_dt.UTC)
+                midnight = _dt.datetime.combine(now.date() + _dt.timedelta(days=1), _dt.time.min, tzinfo=_dt.UTC)
                 self._quota_exhausted_until = midnight.timestamp()
                 logger.warning("Gemini daily quota exhausted — switching to Claude-only until midnight")
                 _ai_status["gemini"] = "yellow"
@@ -217,11 +221,28 @@ def _consensus(claude: TradeDecision, gemini: TradeDecision, symbol: str) -> Tra
             partial_error=_partial,
         )
 
-    # One HOLD, one directional → majority rules: take the directional action
-    # at reduced confidence (high risk). Only a direct BUY↔SELL contradiction
-    # warrants a hard HOLD.
+    # One HOLD, one directional → only act if the directional model has strong conviction.
+    # Apply to both BUY and SELL: a low-confidence split-SELL can exit a profitable position prematurely.
     if ca == "HOLD" or ga == "HOLD":
         directional = claude if ga == "HOLD" else gemini
+        _SPLIT_MIN_CONFIDENCE = 0.70
+        if directional.action in ("BUY", "SELL") and directional.confidence < _SPLIT_MIN_CONFIDENCE:
+            logger.info(
+                "Ensemble: split on %s (Claude=%s, Gemini=%s) — confidence %.0f%% below split threshold %.0f%%, holding",
+                symbol, ca, ga, directional.confidence * 100, _SPLIT_MIN_CONFIDENCE * 100,
+            )
+            return TradeDecision(
+                symbol=symbol,
+                action="HOLD",
+                confidence=directional.confidence,
+                reasoning=(
+                    f"Split decision — confidence {directional.confidence:.0%} below split-buy threshold {_SPLIT_MIN_CONFIDENCE:.0%}. "
+                    f"[Claude] {claude.reasoning}  [Gemini] {gemini.reasoning}"
+                ),
+                models_used="ensemble",
+                consensus=False,
+                partial_error=_partial,
+            )
         logger.info(
             "Ensemble: split on %s (Claude=%s, Gemini=%s) — taking directional %s at high risk",
             symbol, ca, ga, directional.action,
@@ -263,15 +284,17 @@ def _consensus(claude: TradeDecision, gemini: TradeDecision, symbol: str) -> Tra
 class DecisionEngine:
     """Ensemble decision engine. Uses both Claude and Gemini when Gemini key is set."""
 
-    def __init__(self, anthropic_key: str, gemini_key: Optional[str] = None) -> None:
+    def __init__(self, anthropic_key: str, gemini_key: str | None = None) -> None:
         self._claude = _ClaudeEngine(anthropic_key)
-        self._gemini: Optional[_GeminiEngine] = None
-        if gemini_key:
+        self._gemini: _GeminiEngine | None = None
+        if gemini_key and get_settings().gemini_enabled:
             try:
                 self._gemini = _GeminiEngine(gemini_key)
                 logger.info("Ensemble mode: Claude + Gemini")
             except Exception as exc:
                 logger.warning("Gemini init failed, running Claude-only: %s", exc)
+        elif not get_settings().gemini_enabled:
+            logger.info("Gemini disabled via GEMINI_ENABLED=false — running Claude-only")
 
     def decide(
         self,
@@ -390,6 +413,11 @@ def _build_prompt(
     sma_str = f"{signal.sma_20:.2f}" if signal.sma_20 is not None else "N/A"
     ema_str = f"{signal.ema_50:.2f}" if signal.ema_50 is not None else "N/A"
 
+    st_dir = getattr(signal, "supertrend_dir", None)
+    st_str = ("bullish ↑" if st_dir == 1 else "bearish ↓") if st_dir is not None else "N/A"
+    adx_val = getattr(signal, "adx", None)
+    adx_str = f"{adx_val:.1f}" if adx_val is not None else "N/A"
+
     fundamentals_section = f"\n{fundamentals_block}\n" if fundamentals_block else ""
     return f"""Symbol: {signal.symbol}
 Current price: ${signal.price:.4f}
@@ -401,6 +429,8 @@ Technical indicators:
   Bollinger Bands: {bb_str}
   SMA-20: {sma_str}
   EMA-50: {ema_str}
+  SuperTrend (10,3): {st_str}
+  ADX (10): {adx_str}
 {fundamentals_section}
 Portfolio context:
   Equity: ${portfolio_equity:,.2f}

@@ -63,7 +63,7 @@ def get_market_session() -> str:
             return "afterhours"
         return "closed"
     except Exception:
-        logger.error("get_market_session() failed — defaulting to closed", exc_info=True)
+        logger.exception("get_market_session() failed — defaulting to closed")
         return "closed"   # fail closed: safer than fail open
 
 
